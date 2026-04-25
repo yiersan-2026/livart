@@ -859,8 +859,8 @@ const Canvas: React.FC<CanvasProps> = ({
       });
       if (useLocalMask) {
         onItemUpdate(targetItem.id, { maskData: undefined });
-        setLocalRedrawItemId(prev => prev === targetItem.id ? null : prev);
-        setActiveTool('select');
+        setLocalRedrawItemId(newId);
+        setActiveTool('brush');
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : '未知错误';
@@ -871,6 +871,11 @@ const Canvas: React.FC<CanvasProps> = ({
           imageJobId: undefined,
           label: 'AI 重绘失败'
         });
+      }
+      if (useLocalMask) {
+        setSelectedIds([targetItem.id]);
+        setLocalRedrawItemId(targetItem.id);
+        setActiveTool('brush');
       }
       setInlineEditErrors(prev => ({ ...prev, [targetItem.id]: message }));
     } finally {
