@@ -83,6 +83,7 @@ function App() {
   const isSavingCanvasRef = useRef(false);
   const saveRevisionRef = useRef(Date.now());
   const resumedImageJobIdsRef = useRef<Set<string>>(new Set());
+  const hasPendingImageJob = items.some(item => item.type === 'image' && item.status === 'loading' && !!item.imageJobId);
 
   const resetWorkspace = () => {
     setItems([]);
@@ -231,7 +232,7 @@ function App() {
   }, [isAuthReady, authSession?.token]);
 
   useEffect(() => {
-    if (!isThinking) return;
+    if (!isThinking && !hasPendingImageJob) return;
 
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
       event.preventDefault();
@@ -240,7 +241,7 @@ function App() {
 
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [isThinking]);
+  }, [isThinking, hasPendingImageJob]);
 
   useEffect(() => {
     if (!isAuthReady) return;
@@ -310,7 +311,6 @@ function App() {
       }
     };
 
-    const hasPendingImageJob = items.some(item => item.type === 'image' && item.status === 'loading' && !!item.imageJobId);
     saveTimerRef.current = window.setTimeout(flushQueuedCanvasSave, hasPendingImageJob ? 50 : 800);
 
     return () => {
