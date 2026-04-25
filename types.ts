@@ -27,6 +27,7 @@ export interface CanvasItem {
   // 增强型 Workflow 字段
   layers: CompositionLayer[];
   drawingData?: string; // 涂鸦层的 base64 数据
+  maskData?: string; // 图片局部重绘蒙版草稿
   compositeImage?: string; // 最终渲染的快照
 }
 

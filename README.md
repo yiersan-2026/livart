@@ -1,6 +1,6 @@
 <div align="center">
 
-# 灵匠 Artisan Lab
+# SoulArt / 灵匠 Artisan Lab
 
 **All-in-One 无限画布 AI 图像创作工作台**
 
@@ -12,7 +12,23 @@
 
 ## 项目简介
 
-灵匠是一款基于 **无限画布** 设计理念的 AI 图像创作工具。它将图像生成、编辑、换装、涂鸦等功能整合到一个自由的画布空间中，让创作者能够像在白板上构思一样，通过视觉布局来表达创作意图。
+SoulArt 是一款基于 **无限画布** 设计理念的 AI 图像创作工具。它将图像生成、编辑、换装、涂鸦、局部重绘和永久画布项目管理整合到一个自由的画布空间中，让创作者能够像在白板上构思一样，通过视觉布局来表达创作意图。
+
+本项目基于上一个开源系统 [yiqi-software/ArtisanLab](https://gitee.com/yiqi-software/ArtisanLab) 二次开发而来。原项目提供了无限画布、基础 AI 图像生成、画布元素编辑和视觉逻辑工作流能力；SoulArt 在此基础上补充了更完整的图生图、局部重绘、永久画布、后端持久化和 Lovart 风格交互。
+
+### 本版本新增能力
+
+- **独立生图接口配置**：文生图和图生图使用不同接口，默认支持 OpenAI Images API 兼容格式。
+- **图生图与局部重绘**：选中图片后可直接输入指令重绘，也可进入“局部”模式涂抹区域并通过 `mask` 精确修改局部。
+- **提示词自动优化**：提交前自动调用提示词优化模型，补全画面描述、质量要求和负面约束。
+- **Lovart 风格图片引用**：右侧输入框支持输入 `@` 选择画布图片，并以可删除的内联标签参与提示词上下文。
+- **图片拖入画布**：支持直接把本机图片拖进画布，自动创建图片节点。
+- **选中图片下方对话框**：选中单张图片后显示 3 行输入框，可用 `Ctrl/⌘ + Enter` 快速提交。
+- **并行图片处理**：多个图片的重绘状态互不阻塞，切换图片不会清空各自输入内容。
+- **永久画布后端**：新增 Spring Boot + MyBatis Plus 后端，用 PostgreSQL 保存画布项目，用 MinIO 保存图片资源。
+- **异步保存队列**：画布保存请求进入 RabbitMQ，后端单消费者按顺序落库，并通过 revision 避免旧数据覆盖新数据。
+- **多项目画布**：支持创建多个项目，一个项目对应一张独立画布，并记住最近打开的项目。
+- **画布体验优化**：缩放逻辑改为以鼠标位置为锚点，输入框滚动和键盘快捷键冲突已修复。
 
 ### 设计理念
 
@@ -37,6 +53,8 @@
 - 多元素自由布局
 - 框选批量操作
 - 图层层级管理
+- 以鼠标位置为中心的缩放体验
+- 本机图片拖拽导入
 
 ### 视觉逻辑推理
 
@@ -58,6 +76,18 @@
 
 ![对话编辑](./img/3.png)
 
+### 图片局部重绘
+
+选中图片后点击下方输入框里的“局部”按钮，即可使用画笔涂抹需要修改的区域。提交后系统会把涂抹区域转换为 Images API 的 `mask` 参数，只重绘被涂抹的区域，未涂抹区域尽量保持原图不变。
+
+### 永久画布项目
+
+SoulArt 支持创建多个项目画布。前端会把画布元素、消息、缩放位置和图片资源保存到后端：
+
+- PostgreSQL：保存项目、画布状态和快照记录
+- MinIO：保存画布中的图片资源
+- RabbitMQ：串行化保存请求，减少并发保存冲突
+
 ---
 
 ## 快速开始
@@ -65,7 +95,11 @@
 ### 环境要求
 
 - Node.js 18+
-- 支持 Gemini API 的网络环境
+- Java 17+
+- PostgreSQL
+- MinIO
+- RabbitMQ
+- 支持 OpenAI Images API 兼容接口或 Gemini 图像接口的网络环境
 
 ### 安装运行
 
@@ -80,12 +114,42 @@ npm install
 npm run dev
 ```
 
+### 项目画布后端
+
+后端位于 `backend/`，使用 Spring Boot + MyBatis Plus：
+
+```bash
+cd backend
+cp .env.example .env
+# 填入 PostgreSQL 与 MinIO 配置
+set -a
+source .env
+set +a
+mvn spring-boot:run
+```
+
+前端会通过 Vite 把 `/api/canvases`、`/api/canvas`、`/api/assets`、`/api/health` 代理到后端。
+现在支持创建多个项目：一个项目对应一张独立画布，画布保存请求会先进入 RabbitMQ 队列，再由后端消费者顺序落库。
+
 ### API 配置
 
 点击界面左上角的设置图标，填入：
-- API 地址（支持自定义代理）
+- API 地址（支持自定义代理，默认前端代理为 `/api/images/generations` 和 `/api/images/edits`）
 - API 密钥
-- 模型名称（默认 gemini-2.0-flash-exp-image-generation）
+- 模型名称（默认 `gpt-image-2`，也兼容部分 Gemini 图像模型）
+
+也可以在 `.env.local` 中配置：
+
+```bash
+IMAGE_API_BASE_URL=https://example.com/v1/
+IMAGE_API_MODEL=gpt-image-2
+IMAGE_API_KEY=your-api-key
+TEXT_TO_IMAGE_API_URL=/api/images/generations
+IMAGE_TO_IMAGE_API_URL=/api/images/edits
+PROMPT_OPTIMIZER_MODEL=gpt-5.5
+```
+
+不要把真实 `.env.local`、`backend/.env` 或任何 API Key 提交到仓库。
 
 ---
 
@@ -100,6 +164,8 @@ npm run dev
 | 选择元素 | 单击 |
 | 多选元素 | 框选 或 Shift + 单击 |
 | 删除元素 | Delete / Backspace |
+| 提交输入框 | Ctrl / ⌘ + Enter |
+| 引用图片 | 在右侧输入框输入 @ |
 
 ### 创作流程
 
@@ -109,6 +175,14 @@ npm run dev
 4. **涂鸦标注**：切换画笔工具进行涂鸦（可选）
 5. **生成输出**：输入提示词（可留空让 AI 自动推理）并点击生成
 
+### 局部重绘流程
+
+1. 选中画布上的一张图片
+2. 点击图片下方输入框上方的“局部”
+3. 用画笔涂抹需要修改的区域，可用橡皮擦修正
+4. 输入修改指令，例如“把涂抹区域改成蓝色花朵”
+5. 点击提交，系统会自动优化提示词并调用图生图 `mask` 接口
+
 ---
 
 ## 技术栈
@@ -117,12 +191,25 @@ npm run dev
 - TypeScript
 - Vite
 - Tailwind CSS
+- Spring Boot
+- MyBatis Plus
+- PostgreSQL
+- MinIO
+- RabbitMQ
 - Lucide Icons
-- Google Gemini API
+- OpenAI Images API 兼容接口
+- Google Gemini API（可选兼容）
+
+---
+
+## 开源来源与致谢
+
+本项目基于 [yiqi-software/ArtisanLab](https://gitee.com/yiqi-software/ArtisanLab) 继续开发。感谢原项目提供的无限画布和 AI 图像创作基础能力。
+
+SoulArt 当前改动重点是把原有单机画布体验扩展为可长期使用的 AI 创作工作台：增加永久画布后端、项目管理、异步保存队列、图片资源存储、提示词优化、Lovart 风格图片引用、选中图片快捷重绘、局部 mask 重绘和更稳定的图像接口代理。
 
 ---
 
 ## 开源协议
 
 MIT License
-

@@ -8,12 +8,13 @@ import {
   MessageSquarePlus, Pencil,
   Copy, Layers
 } from 'lucide-react';
-import { generateWorkflowImage } from '../services/gemini';
+import { editImage, generateWorkflowImage } from '../services/gemini';
+import { optimizePrompt } from '../services/promptOptimizer';
 
 interface CanvasProps {
   items: CanvasItem[];
   zoom: number;
-  onZoomChange: (newZoom: number) => void;
+  onZoomChange: (newZoom: number, anchorPoint?: { x: number; y: number }) => void;
   pan: { x: number; y: number };
   onPanChange: (pan: { x: number; y: number }) => void;
   onItemUpdate: (id: string, updates: Partial<CanvasItem>) => void;
@@ -21,6 +22,7 @@ interface CanvasProps {
   onItemDeleteMultiple: (ids: string[]) => void;
   onItemAdd: (item: CanvasItem) => void; 
   onAddTextAt: (x: number, y: number) => void;
+  onAddImageAt: (file: File, x: number, y: number) => void;
   onAddToChat: (item: CanvasItem) => void;
   selectedIds: string[];
   setSelectedIds: (ids: string[]) => void;
@@ -28,8 +30,112 @@ interface CanvasProps {
 
 type ResizeDirection = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
 
+const getCanvasDimension = (value: number) => Math.max(1, Math.round(value));
+
+const loadImageElement = (src: string) => new Promise<HTMLImageElement>((resolve, reject) => {
+  const image = new Image();
+  image.onload = () => resolve(image);
+  image.onerror = () => reject(new Error('图片加载失败，无法生成局部重绘蒙版'));
+  image.src = src;
+});
+
+const getImageDimensions = async (src: string, fallbackWidth: number, fallbackHeight: number) => {
+  try {
+    const image = await loadImageElement(src);
+    return {
+      width: getCanvasDimension(image.naturalWidth || fallbackWidth),
+      height: getCanvasDimension(image.naturalHeight || fallbackHeight)
+    };
+  } catch {
+    return {
+      width: getCanvasDimension(fallbackWidth),
+      height: getCanvasDimension(fallbackHeight)
+    };
+  }
+};
+
+const createTransparentEditMask = async (
+  paintMaskDataUrl: string,
+  imageDataUrl: string,
+  displayWidth: number,
+  displayHeight: number
+) => {
+  const displayCanvasWidth = getCanvasDimension(displayWidth);
+  const displayCanvasHeight = getCanvasDimension(displayHeight);
+  const imageDimensions = await getImageDimensions(imageDataUrl, displayCanvasWidth, displayCanvasHeight);
+  const paintImage = await loadImageElement(paintMaskDataUrl);
+
+  const displayPaintCanvas = document.createElement('canvas');
+  displayPaintCanvas.width = displayCanvasWidth;
+  displayPaintCanvas.height = displayCanvasHeight;
+  const displayPaintContext = displayPaintCanvas.getContext('2d');
+  if (!displayPaintContext) throw new Error('无法创建局部重绘蒙版');
+  displayPaintContext.clearRect(0, 0, displayCanvasWidth, displayCanvasHeight);
+  displayPaintContext.drawImage(paintImage, 0, 0, displayCanvasWidth, displayCanvasHeight);
+
+  const normalizedPaintCanvas = document.createElement('canvas');
+  normalizedPaintCanvas.width = imageDimensions.width;
+  normalizedPaintCanvas.height = imageDimensions.height;
+  const normalizedPaintContext = normalizedPaintCanvas.getContext('2d');
+  if (!normalizedPaintContext) throw new Error('无法创建局部重绘蒙版');
+
+  const containScale = Math.min(
+    displayCanvasWidth / imageDimensions.width,
+    displayCanvasHeight / imageDimensions.height
+  );
+  const renderedWidth = imageDimensions.width * containScale;
+  const renderedHeight = imageDimensions.height * containScale;
+  const renderedX = (displayCanvasWidth - renderedWidth) / 2;
+  const renderedY = (displayCanvasHeight - renderedHeight) / 2;
+
+  normalizedPaintContext.clearRect(0, 0, imageDimensions.width, imageDimensions.height);
+  normalizedPaintContext.drawImage(
+    displayPaintCanvas,
+    renderedX,
+    renderedY,
+    renderedWidth,
+    renderedHeight,
+    0,
+    0,
+    imageDimensions.width,
+    imageDimensions.height
+  );
+
+  const paintPixels = normalizedPaintContext.getImageData(0, 0, imageDimensions.width, imageDimensions.height);
+  const apiMaskCanvas = document.createElement('canvas');
+  apiMaskCanvas.width = imageDimensions.width;
+  apiMaskCanvas.height = imageDimensions.height;
+  const apiMaskContext = apiMaskCanvas.getContext('2d');
+  if (!apiMaskContext) throw new Error('无法创建局部重绘蒙版');
+
+  const apiMaskPixels = apiMaskContext.createImageData(imageDimensions.width, imageDimensions.height);
+  let hasPaintedArea = false;
+
+  for (let index = 0; index < paintPixels.data.length; index += 4) {
+    const isPainted = paintPixels.data[index + 3] > 12;
+    if (isPainted) hasPaintedArea = true;
+    apiMaskPixels.data[index] = 0;
+    apiMaskPixels.data[index + 1] = 0;
+    apiMaskPixels.data[index + 2] = 0;
+    apiMaskPixels.data[index + 3] = isPainted ? 0 : 255;
+  }
+
+  if (!hasPaintedArea) return null;
+
+  apiMaskContext.putImageData(apiMaskPixels, 0, 0);
+  return apiMaskCanvas.toDataURL('image/png');
+};
+
+const isEditableTarget = (target: EventTarget | null) => {
+  if (!(target instanceof HTMLElement)) return false;
+  return (
+    ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) ||
+    !!target.closest('[contenteditable="true"]')
+  );
+};
+
 const Canvas: React.FC<CanvasProps> = ({ 
-  items, zoom, onZoomChange, pan, onPanChange, onItemUpdate, onItemDelete, onItemDeleteMultiple, onItemAdd, onAddTextAt, onAddToChat, selectedIds, setSelectedIds 
+  items, zoom, onZoomChange, pan, onPanChange, onItemUpdate, onItemDelete, onItemDeleteMultiple, onItemAdd, onAddTextAt, onAddImageAt, onAddToChat, selectedIds, setSelectedIds
 }) => {
   const [dragState, setDragState] = useState<{ id: string, startX: number, startY: number } | null>(null);
   const [resizeState, setResizeState] = useState<{ 
@@ -41,6 +147,7 @@ const Canvas: React.FC<CanvasProps> = ({
   const [isSpacePressed, setIsSpacePressed] = useState(false);
   const [lastMousePos, setLastMousePos] = useState({ x: 0, y: 0 });
   const [selectionBox, setSelectionBox] = useState<{ startX: number, startY: number, x: number, y: number, w: number, h: number } | null>(null);
+  const [isDraggingImageFile, setIsDraggingImageFile] = useState(false);
 
   // 绘图工具状态
   const [activeTool, setActiveTool] = useState<'select' | 'brush' | 'eraser'>('select');
@@ -49,28 +156,119 @@ const Canvas: React.FC<CanvasProps> = ({
   const drawingCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [frameworkPrompt, setFrameworkPrompt] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [inlineEditPrompts, setInlineEditPrompts] = useState<Record<string, string>>({});
+  const [inlineEditErrors, setInlineEditErrors] = useState<Record<string, string>>({});
+  const [inlineEditingIds, setInlineEditingIds] = useState<Set<string>>(() => new Set());
+  const [inlinePromptOptimizingIds, setInlinePromptOptimizingIds] = useState<Set<string>>(() => new Set());
+  const [localRedrawItemId, setLocalRedrawItemId] = useState<string | null>(null);
+  const inlineEditingIdsRef = useRef<Set<string>>(new Set());
+  const inlinePromptOptimizingIdsRef = useRef<Set<string>>(new Set());
+  const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const selectedItem = items.find(i => selectedIds.length === 1 && i.id === selectedIds[0]);
+  const selectedItemIsInlineEditing = selectedItem ? inlineEditingIds.has(selectedItem.id) : false;
+  const selectedItemIsInlinePromptOptimizing = selectedItem ? inlinePromptOptimizingIds.has(selectedItem.id) : false;
+  const selectedItemIsLocalRedraw = selectedItem?.type === 'image' && selectedItem.id === localRedrawItemId;
+  const selectedInlineEditError = selectedItem ? inlineEditErrors[selectedItem.id] : '';
+  const inlineEditPrompt = selectedItem?.type === 'image' ? inlineEditPrompts[selectedItem.id] || '' : '';
 
   // 全局右键菜单状态
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, id: string } | null>(null);
 
   // 修复假死：当选中项改变时，确保重置绘图状态，防止 Ref 冲突或状态死循环
   useEffect(() => {
-    if (selectedItem?.type !== 'workflow' || activeTool === 'select') {
+    const canUseDrawingTool = selectedItem?.type === 'workflow' || selectedItemIsLocalRedraw;
+    if (!canUseDrawingTool || activeTool === 'select') {
       setIsDrawing(false);
       if (activeTool !== 'select') setActiveTool('select');
     }
-  }, [selectedIds]);
+  }, [activeTool, selectedIds, localRedrawItemId, selectedItem?.type, selectedItemIsLocalRedraw]);
+
+  useEffect(() => {
+    if (!selectedItemIsLocalRedraw || !selectedItem) return;
+
+    const canvas = maskCanvasRef.current;
+    if (!canvas) return;
+
+    const width = getCanvasDimension(selectedItem.width);
+    const height = getCanvasDimension(selectedItem.height);
+    canvas.width = width;
+    canvas.height = height;
+
+    const context = canvas.getContext('2d');
+    if (!context) return;
+
+    context.clearRect(0, 0, width, height);
+    if (!selectedItem.maskData) return;
+
+    let cancelled = false;
+    loadImageElement(selectedItem.maskData)
+      .then((image) => {
+        if (cancelled) return;
+        context.clearRect(0, 0, width, height);
+        context.drawImage(image, 0, 0, width, height);
+      })
+      .catch(() => {
+        if (!cancelled) context.clearRect(0, 0, width, height);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedItemIsLocalRedraw, selectedItem?.id, selectedItem?.maskData, selectedItem?.width, selectedItem?.height]);
+
+  const setInlineEditingForItem = (id: string, isEditing: boolean) => {
+    const nextEditingIds = new Set(inlineEditingIdsRef.current);
+    if (isEditing) {
+      nextEditingIds.add(id);
+    } else {
+      nextEditingIds.delete(id);
+    }
+    inlineEditingIdsRef.current = nextEditingIds;
+    setInlineEditingIds(nextEditingIds);
+  };
+
+  const setInlinePromptOptimizingForItem = (id: string, isOptimizing: boolean) => {
+    const nextOptimizingIds = new Set(inlinePromptOptimizingIdsRef.current);
+    if (isOptimizing) {
+      nextOptimizingIds.add(id);
+    } else {
+      nextOptimizingIds.delete(id);
+    }
+    inlinePromptOptimizingIdsRef.current = nextOptimizingIds;
+    setInlinePromptOptimizingIds(nextOptimizingIds);
+  };
+
+  const clearInlineEditError = (id: string) => {
+    setInlineEditErrors(prev => {
+      if (!prev[id]) return prev;
+      const nextErrors = { ...prev };
+      delete nextErrors[id];
+      return nextErrors;
+    });
+  };
+
+  const setInlineEditPromptForItem = (id: string, prompt: string) => {
+    setInlineEditPrompts(prev => ({ ...prev, [id]: prompt }));
+  };
+
+  const getCurrentMaskDataForItem = (id: string, fallbackMaskData?: string) => {
+    if (localRedrawItemId === id && maskCanvasRef.current) {
+      return maskCanvasRef.current.toDataURL('image/png');
+    }
+    return fallbackMaskData;
+  };
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.code === 'Space' && !['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) {
+      if (isEditableTarget(e.target)) return;
+
+      if (e.code === 'Space') {
         setIsSpacePressed(true);
         if (e.target === document.body) e.preventDefault();
       }
-      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedIds.length > 0 && !['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) {
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedIds.length > 0) {
         onItemDeleteMultiple(selectedIds);
       }
     };
@@ -90,22 +288,58 @@ const Canvas: React.FC<CanvasProps> = ({
   }, [selectedIds, onItemDeleteMultiple]);
 
   useEffect(() => {
-    const handleWheel = (e: WheelEvent) => {
-      if (e.ctrlKey) {
-        e.preventDefault();
-        const delta = -e.deltaY;
-        onZoomChange(Math.min(Math.max(0.1, zoom + delta * 0.001), 5));
+    const handleWheel = (event: WheelEvent) => {
+      if (isEditableTarget(event.target)) return;
+
+      event.preventDefault();
+
+      if (event.ctrlKey || event.metaKey) {
+        const normalizedDeltaY = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
+        const nextZoom = zoom * Math.exp(-normalizedDeltaY * 0.002);
+        onZoomChange(nextZoom, { x: event.clientX, y: event.clientY });
+        return;
       }
+
+      const panDeltaX = event.shiftKey && !event.deltaX ? event.deltaY : event.deltaX;
+      onPanChange({
+        x: pan.x - panDeltaX,
+        y: pan.y - event.deltaY
+      });
     };
-    containerRef.current?.addEventListener('wheel', handleWheel, { passive: false });
-    return () => containerRef.current?.removeEventListener('wheel', handleWheel);
-  }, [zoom, onZoomChange]);
+
+    const container = containerRef.current;
+    container?.addEventListener('wheel', handleWheel, { passive: false });
+    return () => container?.removeEventListener('wheel', handleWheel);
+  }, [zoom, pan, onZoomChange, onPanChange]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return;
     if (isSpacePressed) {
       setIsPanning(true);
       setLastMousePos({ x: e.clientX, y: e.clientY });
+      return;
+    }
+
+    // 图片局部重绘蒙版：置顶层画布捕获
+    if (activeTool !== 'select' && selectedItemIsLocalRedraw) {
+      setIsDrawing(true);
+      const rect = maskCanvasRef.current?.getBoundingClientRect();
+      if (rect) {
+        const ctx = maskCanvasRef.current?.getContext('2d');
+        if (ctx) {
+          const x = (e.clientX - rect.left) / zoom;
+          const y = (e.clientY - rect.top) / zoom;
+          ctx.beginPath();
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          ctx.lineWidth = brushSize;
+          ctx.strokeStyle = 'rgba(99, 102, 241, 0.55)';
+          ctx.globalCompositeOperation = activeTool === 'eraser' ? 'destination-out' : 'source-over';
+          ctx.moveTo(x, y);
+          ctx.lineTo(x + 0.01, y + 0.01);
+          ctx.stroke();
+        }
+      }
       return;
     }
 
@@ -116,10 +350,17 @@ const Canvas: React.FC<CanvasProps> = ({
       if (rect) {
         const ctx = drawingCanvasRef.current?.getContext('2d');
         if (ctx) {
+          const x = (e.clientX - rect.left) / zoom;
+          const y = (e.clientY - rect.top) / zoom;
           ctx.beginPath();
           ctx.lineCap = 'round';
           ctx.lineJoin = 'round';
-          ctx.moveTo((e.clientX - rect.left) / zoom, (e.clientY - rect.top) / zoom);
+          ctx.strokeStyle = '#000000';
+          ctx.lineWidth = brushSize;
+          ctx.globalCompositeOperation = activeTool === 'eraser' ? 'destination-out' : 'source-over';
+          ctx.moveTo(x, y);
+          ctx.lineTo(x + 0.01, y + 0.01);
+          ctx.stroke();
         }
       }
       return;
@@ -143,6 +384,21 @@ const Canvas: React.FC<CanvasProps> = ({
     if (isPanning) {
       onPanChange({ x: pan.x + (e.clientX - lastMousePos.x), y: pan.y + (e.clientY - lastMousePos.y) });
       setLastMousePos({ x: e.clientX, y: e.clientY });
+      return;
+    }
+
+    if (isDrawing && selectedItemIsLocalRedraw) {
+      const rect = maskCanvasRef.current?.getBoundingClientRect();
+      if (rect) {
+        const ctx = maskCanvasRef.current?.getContext('2d');
+        if (ctx) {
+          ctx.strokeStyle = 'rgba(99, 102, 241, 0.55)';
+          ctx.lineWidth = brushSize;
+          ctx.globalCompositeOperation = activeTool === 'eraser' ? 'destination-out' : 'source-over';
+          ctx.lineTo((e.clientX - rect.left) / zoom, (e.clientY - rect.top) / zoom);
+          ctx.stroke();
+        }
+      }
       return;
     }
 
@@ -203,7 +459,11 @@ const Canvas: React.FC<CanvasProps> = ({
   };
 
   const handleMouseUp = () => {
-    if (isDrawing && selectedItem?.type === 'workflow') {
+    if (isDrawing && selectedItemIsLocalRedraw) {
+      setIsDrawing(false);
+      const data = maskCanvasRef.current?.toDataURL('image/png');
+      if (data && selectedItem) onItemUpdate(selectedItem.id, { maskData: data });
+    } else if (isDrawing && selectedItem?.type === 'workflow') {
       setIsDrawing(false);
       const data = drawingCanvasRef.current?.toDataURL();
       if (data) onItemUpdate(selectedItem.id, { drawingData: data });
@@ -221,6 +481,39 @@ const Canvas: React.FC<CanvasProps> = ({
     setIsPanning(false);
     setDragState(null);
     setResizeState(null);
+  };
+
+  const getDroppedImageFiles = (fileList: FileList) => {
+    return Array.from(fileList).filter(file => file.type.startsWith('image/'));
+  };
+
+  const handleDragOver = (event: React.DragEvent) => {
+    if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    setIsDraggingImageFile(true);
+  };
+
+  const handleDragLeave = (event: React.DragEvent) => {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
+    setIsDraggingImageFile(false);
+  };
+
+  const handleDrop = (event: React.DragEvent) => {
+    if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+    event.preventDefault();
+    setIsDraggingImageFile(false);
+
+    const imageFiles = getDroppedImageFiles(event.dataTransfer.files);
+    if (imageFiles.length === 0) return;
+
+    const dropX = (event.clientX - pan.x) / zoom;
+    const dropY = (event.clientY - pan.y) / zoom;
+
+    imageFiles.forEach((file, index) => {
+      onAddImageAt(file, dropX + index * 28, dropY + index * 28);
+    });
   };
 
   const startItemDrag = (e: React.MouseEvent, id: string) => {
@@ -308,12 +601,70 @@ const Canvas: React.FC<CanvasProps> = ({
       onItemAdd(newItem);
       onItemUpdate(selectedItem.id, { status: 'completed' });
       setFrameworkPrompt('');
-      setSelectedIds([newId]); 
+      setSelectedIds([newId]);
     } catch (error) {
       console.error(error);
       onItemUpdate(selectedItem.id, { status: 'error' });
     } finally {
       setIsGenerating(false);
+    }
+  };
+
+  const handleInlineImageRedraw = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const prompt = inlineEditPrompt.trim();
+    if (!prompt || !selectedItem || selectedItem.type !== 'image' || inlineEditingIdsRef.current.has(selectedItem.id) || inlinePromptOptimizingIdsRef.current.has(selectedItem.id)) return;
+
+    const targetItem = selectedItem;
+    const useLocalMask = localRedrawItemId === targetItem.id;
+    setInlineEditingForItem(targetItem.id, true);
+    setInlinePromptOptimizingForItem(targetItem.id, true);
+    clearInlineEditError(targetItem.id);
+
+    try {
+      const currentMaskData = useLocalMask
+        ? getCurrentMaskDataForItem(targetItem.id, targetItem.maskData)
+        : undefined;
+
+      if (useLocalMask && !currentMaskData) {
+        throw new Error('请先用画笔涂抹需要局部重绘的区域');
+      }
+
+      const promptToOptimize = useLocalMask
+        ? `${prompt}。只修改用户用蒙版涂抹的局部区域，未被蒙版覆盖的区域必须保持原图不变。`
+        : prompt;
+      const optimizedPrompt = await optimizePrompt(promptToOptimize, 'image-to-image');
+      setInlineEditPromptForItem(targetItem.id, optimizedPrompt);
+      setInlinePromptOptimizingForItem(targetItem.id, false);
+      onItemUpdate(targetItem.id, { status: 'loading' });
+
+      let maskDataUrl: string | null | undefined;
+      if (useLocalMask) {
+        maskDataUrl = await createTransparentEditMask(currentMaskData!, targetItem.content, targetItem.width, targetItem.height);
+        if (!maskDataUrl) {
+          throw new Error('请先用画笔涂抹需要局部重绘的区域');
+        }
+      }
+
+      const result = await editImage(optimizedPrompt, targetItem.content, maskDataUrl || undefined);
+      onItemUpdate(targetItem.id, {
+        content: result,
+        status: 'completed',
+        label: optimizedPrompt.substring(0, 16) + (optimizedPrompt.length > 16 ? '...' : ''),
+        maskData: useLocalMask ? undefined : targetItem.maskData
+      });
+      if (useLocalMask) {
+        setLocalRedrawItemId(prev => prev === targetItem.id ? null : prev);
+        setActiveTool('select');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      console.error(error);
+      onItemUpdate(targetItem.id, { status: 'completed' });
+      setInlineEditErrors(prev => ({ ...prev, [targetItem.id]: message }));
+    } finally {
+      setInlinePromptOptimizingForItem(targetItem.id, false);
+      setInlineEditingForItem(targetItem.id, false);
     }
   };
 
@@ -354,7 +705,18 @@ const Canvas: React.FC<CanvasProps> = ({
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
     >
+      {isDraggingImageFile && (
+        <div className="absolute inset-4 z-[4000000] pointer-events-none rounded-[32px] border-2 border-dashed border-indigo-400 bg-indigo-500/10 flex items-center justify-center">
+          <div className="px-5 py-3 rounded-2xl bg-white/95 shadow-2xl border border-indigo-100 text-sm font-black text-indigo-600">
+            松开鼠标，将图片添加到画布
+          </div>
+        </div>
+      )}
+
       <div 
         className="absolute transition-transform duration-75 will-change-transform" 
         style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: '0 0' }}
@@ -423,6 +785,31 @@ const Canvas: React.FC<CanvasProps> = ({
               </div>
             );
           })}
+          {items.map((item) => {
+            if (item.type !== 'image') return null;
+            const isActiveMaskItem = selectedItemIsLocalRedraw && selectedItem?.id === item.id;
+            if (!isActiveMaskItem && !item.maskData) return null;
+            return (
+              <div
+                key={`mask-draw-${item.id}`}
+                className="absolute"
+                style={{ left: item.x, top: item.y, width: item.width, height: item.height }}
+              >
+                {isActiveMaskItem ? (
+                  <canvas
+                    ref={maskCanvasRef}
+                    width={getCanvasDimension(item.width)}
+                    height={getCanvasDimension(item.height)}
+                    className={`absolute inset-0 w-full h-full rounded-[14px] ${
+                      activeTool === 'select' ? 'pointer-events-none' : 'cursor-crosshair pointer-events-auto'
+                    }`}
+                  />
+                ) : item.maskData ? (
+                  <img src={item.maskData} className="absolute inset-0 w-full h-full rounded-[14px] pointer-events-none" />
+                ) : null}
+              </div>
+            );
+          })}
         </div>
 
         {/* 工具栏栏 */}
@@ -462,6 +849,99 @@ const Canvas: React.FC<CanvasProps> = ({
               </div>
             </div>
           </div>
+        )}
+
+        {selectedItem?.type === 'image' && selectedIds.length === 1 && (
+          <form
+            onSubmit={handleInlineImageRedraw}
+            className="absolute z-[2000000] flex flex-col items-center gap-2 animate-in fade-in zoom-in-95 pointer-events-auto"
+            style={{
+              left: selectedItem.x + selectedItem.width / 2,
+              top: selectedItem.y + selectedItem.height + 28,
+              transform: 'translateX(-50%)'
+            }}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="flex w-[420px] max-w-[70vw] items-center gap-2 rounded-2xl border border-gray-100 bg-white/95 p-1.5 shadow-[0_20px_60px_-24px_rgba(0,0,0,0.22)]">
+              <button
+                type="button"
+                onClick={() => {
+                  setLocalRedrawItemId(prev => {
+                    const nextId = prev === selectedItem.id ? null : selectedItem.id;
+                    setActiveTool(nextId ? 'brush' : 'select');
+                    return nextId;
+                  });
+                }}
+                disabled={selectedItemIsInlineEditing || selectedItem.status === 'loading'}
+                className={`flex shrink-0 items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-black transition-all ${
+                  selectedItemIsLocalRedraw
+                    ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20'
+                    : 'bg-gray-50 text-gray-500 hover:bg-indigo-50 hover:text-indigo-600'
+                } disabled:opacity-40`}
+              >
+                <Layers size={15} />局部
+              </button>
+              {selectedItemIsLocalRedraw && (
+                <>
+                  <button type="button" onClick={() => setActiveTool('select')} className={`rounded-xl p-2 transition-all ${activeTool === 'select' ? 'bg-black text-white' : 'text-gray-400 hover:bg-gray-100'}`} title="选择/移动">
+                    <MousePointer2 size={16} />
+                  </button>
+                  <button type="button" onClick={() => setActiveTool('brush')} className={`rounded-xl p-2 transition-all ${activeTool === 'brush' ? 'bg-black text-white' : 'text-gray-400 hover:bg-gray-100'}`} title="涂抹重绘区域">
+                    <Pencil size={16} />
+                  </button>
+                  <button type="button" onClick={() => setActiveTool('eraser')} className={`rounded-xl p-2 transition-all ${activeTool === 'eraser' ? 'bg-black text-white' : 'text-gray-400 hover:bg-gray-100'}`} title="擦除蒙版">
+                    <Eraser size={16} />
+                  </button>
+                  <input
+                    type="range"
+                    min={4}
+                    max={64}
+                    value={brushSize}
+                    onChange={(event) => setBrushSize(Number(event.target.value))}
+                    className="h-1 flex-1 accent-indigo-600"
+                    title="画笔大小"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => onItemUpdate(selectedItem.id, { maskData: undefined })}
+                    className="rounded-xl px-2.5 py-2 text-xs font-black text-gray-400 transition-all hover:bg-red-50 hover:text-red-500"
+                  >
+                    清除
+                  </button>
+                </>
+              )}
+            </div>
+            <div className="relative flex items-end w-[420px] max-w-[70vw] p-1.5 bg-white border border-gray-100 rounded-2xl shadow-[0_32px_80px_-16px_rgba(0,0,0,0.18)]">
+              <textarea
+                value={inlineEditPrompt}
+                onChange={(event) => setInlineEditPromptForItem(selectedItem.id, event.target.value)}
+                onKeyDown={(event) => {
+                  event.stopPropagation();
+                  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+                    event.preventDefault();
+                    event.currentTarget.form?.requestSubmit();
+                  }
+                }}
+                disabled={selectedItemIsInlineEditing || selectedItem.status === 'loading'}
+                rows={3}
+                placeholder={selectedItemIsLocalRedraw ? '先涂抹区域，再输入局部重绘指令' : '输入重绘指令，例如：换成赛博朋克风格'}
+                className="scrollbar-hide w-full min-h-[72px] max-h-28 resize-none overflow-y-auto overflow-x-hidden pl-4 pr-12 py-3 bg-gray-50 border border-gray-100 rounded-xl text-sm leading-5 font-bold outline-none focus:ring-4 focus:ring-indigo-500/10 disabled:opacity-60 transition-all"
+              />
+              <button
+                type="submit"
+                disabled={!inlineEditPrompt.trim() || selectedItemIsInlineEditing || selectedItem.status === 'loading' || selectedItemIsInlinePromptOptimizing}
+                className="absolute right-3 w-9 h-9 bg-black text-white rounded-lg flex items-center justify-center disabled:opacity-30 hover:scale-105 active:scale-95 transition-all shadow-lg"
+                title={selectedItemIsLocalRedraw ? '局部重绘当前图片' : '重绘当前图片'}
+              >
+                {selectedItemIsInlineEditing || selectedItem.status === 'loading' || selectedItemIsInlinePromptOptimizing ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
+              </button>
+            </div>
+            {selectedInlineEditError && (
+              <div className="max-w-[420px] rounded-xl bg-red-50 border border-red-100 px-3 py-2 text-[11px] font-bold text-red-500 shadow-lg">
+                {selectedInlineEditError}
+              </div>
+            )}
+          </form>
         )}
       </div>
 

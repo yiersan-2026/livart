@@ -1,21 +1,44 @@
 
-import React, { useState } from 'react';
-import { Trash2, Hammer, PanelRightClose, PanelRight, Settings } from 'lucide-react';
-import { CanvasItem, PlanStep, ChatMessage } from './types';
+import React, { useEffect, useRef, useState } from 'react';
+import { Trash2, Hammer, PanelRightClose, PanelRight, Settings, FolderPlus } from 'lucide-react';
+import { CanvasItem, ChatMessage } from './types';
 import Canvas from './components/Canvas';
 import Sidebar from './components/Sidebar';
 import Toolbar from './components/Toolbar';
 import ConfigModal from './components/ConfigModal';
 import { generateImage, generateWorkflowImage } from './services/gemini';
+import {
+  CanvasPersistenceState,
+  CanvasProject,
+  createCanvasProject,
+  listCanvasProjects,
+  loadCanvasProject,
+  saveCanvasProject
+} from './services/canvasPersistence';
+
+const MIN_ZOOM = 0.1;
+const MAX_ZOOM = 5;
+const SIDEBAR_WIDTH = 384;
+const LAST_PROJECT_STORAGE_KEY = 'artisanlab_last_project_id';
+
+const clampZoom = (value: number) => Math.min(Math.max(value, MIN_ZOOM), MAX_ZOOM);
+
+const createWelcomeMessage = (): ChatMessage => ({
+  id: 'welcome',
+  role: 'assistant',
+  text: '你好！我是灵匠助手。请直接告诉我你想要生成的画面，或者右键图片添加到对话进行编辑。',
+  timestamp: Date.now()
+});
+
+interface PendingCanvasSave {
+  canvasId: string;
+  title: string;
+  state: CanvasPersistenceState;
+}
 
 function App() {
   const [items, setItems] = useState<CanvasItem[]>([]);
-  const [messages, setMessages] = useState<ChatMessage[]>([{
-    id: 'welcome',
-    role: 'assistant',
-    text: '你好！我是灵匠助手。请直接告诉我你想要生成的画面，或者右键图片添加到对话进行编辑。',
-    timestamp: Date.now()
-  }]);
+  const [messages, setMessages] = useState<ChatMessage[]>([createWelcomeMessage()]);
   const [isThinking, setIsThinking] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: window.innerWidth / 4, y: window.innerHeight / 4 });
@@ -23,6 +46,191 @@ function App() {
   const [showSidebar, setShowSidebar] = useState(true);
   const [contextImage, setContextImage] = useState<CanvasItem | null>(null);
   const [showConfigModal, setShowConfigModal] = useState(false);
+  const [hasLoadedCanvas, setHasLoadedCanvas] = useState(false);
+  const [canvasSyncStatus, setCanvasSyncStatus] = useState<'loading' | 'saving' | 'saved' | 'error'>('loading');
+  const [projects, setProjects] = useState<CanvasProject[]>([]);
+  const [currentProjectId, setCurrentProjectId] = useState('');
+  const [currentProjectTitle, setCurrentProjectTitle] = useState('默认画布');
+  const saveTimerRef = useRef<number | null>(null);
+  const pendingSaveRef = useRef<PendingCanvasSave | null>(null);
+  const isSavingCanvasRef = useRef(false);
+  const saveRevisionRef = useRef(Date.now());
+
+  const flushQueuedCanvasSave = () => {
+    if (isSavingCanvasRef.current || !pendingSaveRef.current) return;
+
+    const savePayload = pendingSaveRef.current;
+    pendingSaveRef.current = null;
+    isSavingCanvasRef.current = true;
+    saveRevisionRef.current += 1;
+    setCanvasSyncStatus('saving');
+
+    saveCanvasProject(savePayload.canvasId, savePayload.state, saveRevisionRef.current, savePayload.title)
+      .then(() => {
+        if (!pendingSaveRef.current) {
+          setCanvasSyncStatus('saved');
+        }
+      })
+      .catch((error) => {
+        console.warn('[canvas-persistence] save failed', error);
+        setCanvasSyncStatus('error');
+      })
+      .finally(() => {
+        isSavingCanvasRef.current = false;
+        if (pendingSaveRef.current) {
+          flushQueuedCanvasSave();
+        }
+      });
+  };
+
+  const applyLoadedProject = (project: CanvasProject, state: CanvasPersistenceState) => {
+    setCurrentProjectId(project.id);
+    setCurrentProjectTitle(project.title || '未命名项目');
+    localStorage.setItem(LAST_PROJECT_STORAGE_KEY, project.id);
+    saveRevisionRef.current = Math.max(Date.now(), project.revision || 0);
+    setItems(state.items);
+    setMessages(state.messages.length > 0 ? state.messages : [createWelcomeMessage()]);
+    setZoom(state.viewport.zoom);
+    setPan(state.viewport.pan);
+    setSelectedIds([]);
+    setContextImage(null);
+  };
+
+  const loadProjectById = async (projectId: string) => {
+    setHasLoadedCanvas(false);
+    setCanvasSyncStatus('loading');
+    const loaded = await loadCanvasProject(projectId);
+    applyLoadedProject(loaded.project, loaded.state);
+    setProjects(prev => {
+      const exists = prev.some(project => project.id === loaded.project.id);
+      if (!exists) return [loaded.project, ...prev];
+      return prev.map(project => project.id === loaded.project.id ? loaded.project : project);
+    });
+    setCanvasSyncStatus('saved');
+    setHasLoadedCanvas(true);
+  };
+
+  useEffect(() => {
+    let isMounted = true;
+
+    (async () => {
+      const projectList = await listCanvasProjects();
+      const initialProject = projectList.length > 0
+        ? projectList.find(project => project.id === localStorage.getItem(LAST_PROJECT_STORAGE_KEY)) || projectList[0]
+        : (await createCanvasProject('默认画布')).project;
+
+      const normalizedProjects = projectList.length > 0 ? projectList : [initialProject];
+      const loaded = await loadCanvasProject(initialProject.id);
+
+      return { normalizedProjects, loaded };
+    })()
+      .then(({ normalizedProjects, loaded }) => {
+        if (!isMounted) return;
+        setProjects(normalizedProjects);
+        applyLoadedProject(loaded.project, loaded.state);
+        setCanvasSyncStatus('saved');
+      })
+      .catch((error) => {
+        console.warn('[canvas-persistence] load failed', error);
+        if (isMounted) {
+          setCanvasSyncStatus('error');
+        }
+      })
+      .finally(() => {
+        if (isMounted) {
+          setHasLoadedCanvas(true);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!hasLoadedCanvas || !currentProjectId) return;
+    if (saveTimerRef.current) {
+      window.clearTimeout(saveTimerRef.current);
+    }
+
+    pendingSaveRef.current = {
+      canvasId: currentProjectId,
+      title: currentProjectTitle,
+      state: {
+        items,
+        messages,
+        viewport: { zoom, pan },
+        selectedIds: []
+      }
+    };
+
+    saveTimerRef.current = window.setTimeout(flushQueuedCanvasSave, 800);
+
+    return () => {
+      if (saveTimerRef.current) {
+        window.clearTimeout(saveTimerRef.current);
+      }
+    };
+  }, [items, messages, zoom, pan, hasLoadedCanvas, currentProjectId, currentProjectTitle]);
+
+  const canvasSyncText = canvasSyncStatus === 'loading'
+    ? '永久画布读取中'
+    : canvasSyncStatus === 'saving'
+      ? '永久画布保存中'
+      : canvasSyncStatus === 'saved'
+        ? '永久画布已同步'
+        : '永久画布未连接';
+
+  const handleProjectChange = (projectId: string) => {
+    if (!projectId || projectId === currentProjectId) return;
+    flushQueuedCanvasSave();
+    loadProjectById(projectId).catch(error => {
+      console.warn('[canvas-persistence] switch project failed', error);
+      setCanvasSyncStatus('error');
+      setHasLoadedCanvas(true);
+    });
+  };
+
+  const handleCreateProject = async () => {
+    const title = window.prompt('请输入项目名称', `新项目 ${projects.length + 1}`);
+    if (title === null) return;
+
+    flushQueuedCanvasSave();
+    setHasLoadedCanvas(false);
+    setCanvasSyncStatus('loading');
+
+    try {
+      const created = await createCanvasProject(title.trim() || `新项目 ${projects.length + 1}`);
+      setProjects(prev => [created.project, ...prev]);
+      applyLoadedProject(created.project, created.state);
+      setCanvasSyncStatus('saved');
+    } catch (error) {
+      console.warn('[canvas-persistence] create project failed', error);
+      setCanvasSyncStatus('error');
+    } finally {
+      setHasLoadedCanvas(true);
+    }
+  };
+
+  const getCanvasCenterPoint = () => {
+    const availableWidth = window.innerWidth - (showSidebar ? SIDEBAR_WIDTH : 0);
+    return {
+      x: availableWidth / 2,
+      y: window.innerHeight / 2
+    };
+  };
+
+  const handleZoomChange = (nextZoom: number, anchorPoint = getCanvasCenterPoint()) => {
+    const clampedZoom = clampZoom(nextZoom);
+    const worldX = (anchorPoint.x - pan.x) / zoom;
+    const worldY = (anchorPoint.y - pan.y) / zoom;
+
+    setPan({
+      x: anchorPoint.x - worldX * clampedZoom,
+      y: anchorPoint.y - worldY * clampedZoom
+    });
+    setZoom(clampedZoom);
+  };
 
   const addWorkflow = () => {
     const newId = Math.random().toString(36).substr(2, 9);
@@ -42,7 +250,7 @@ function App() {
     setSelectedIds([newId]);
   };
 
-  const addImageItem = (file: File) => {
+  const addImageItem = (file: File, dropX?: number, dropY?: number) => {
     const reader = new FileReader();
     reader.onload = (e) => {
       const content = e.target?.result as string;
@@ -68,8 +276,8 @@ function App() {
           id: newId,
           type: 'image',
           content: content,
-          x: (-pan.x + window.innerWidth/2) / zoom - width / 2,
-          y: (-pan.y + window.innerHeight/2) / zoom - height / 2,
+          x: (dropX !== undefined ? dropX : (-pan.x + window.innerWidth/2) / zoom) - width / 2,
+          y: (dropY !== undefined ? dropY : (-pan.y + window.innerHeight/2) / zoom) - height / 2,
           width: width,
           height: height,
           status: 'completed',
@@ -169,8 +377,9 @@ function App() {
       
       setContextImage(null);
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : '未知错误';
       setItems(prev => prev.map(i => i.id === newId ? { ...i, status: 'error' } : i));
-      addMessage('出错了，没能完成生成，请稍后再试。', 'assistant');
+      addMessage(`出错了，没能完成生成：${errorMessage}`, 'assistant');
     } finally {
       setIsThinking(false);
     }
@@ -202,6 +411,34 @@ function App() {
                 <span className="font-black text-lg tracking-tighter text-gray-900 leading-none">灵匠</span>
                 <span className="text-[7px] font-black uppercase tracking-widest text-gray-400">Artisan Lab</span>
               </div>
+              <span className={`rounded-full px-2.5 py-1 text-[10px] font-black ${
+                canvasSyncStatus === 'error' ? 'bg-red-50 text-red-500' : 'bg-emerald-50 text-emerald-600'
+              }`}>
+                {canvasSyncText}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 rounded-2xl border border-gray-100 bg-white/70 px-2 py-1.5 shadow-sm">
+              <select
+                value={currentProjectId}
+                onChange={(event) => handleProjectChange(event.target.value)}
+                disabled={!hasLoadedCanvas || projects.length === 0}
+                className="max-w-56 bg-transparent text-xs font-black text-gray-700 outline-none disabled:opacity-50"
+                title="切换项目画布"
+              >
+                {projects.map(project => (
+                  <option key={project.id} value={project.id}>
+                    {project.title || '未命名项目'}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={handleCreateProject}
+                disabled={!hasLoadedCanvas}
+                className="p-1.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all disabled:opacity-40"
+                title="新建项目"
+              >
+                <FolderPlus size={16} />
+              </button>
             </div>
           </div>
           <div className="flex items-center gap-3">
@@ -224,7 +461,7 @@ function App() {
         <Canvas 
           items={items} 
           zoom={zoom} 
-          onZoomChange={setZoom}
+          onZoomChange={handleZoomChange}
           pan={pan} 
           onPanChange={setPan} 
           onItemUpdate={handleUpdateItem}
@@ -232,6 +469,7 @@ function App() {
           onItemDeleteMultiple={handleDeleteItems}
           onItemAdd={(item) => { setItems(prev => [...prev, item]); setSelectedIds([item.id]); }}
           onAddTextAt={addTextItem}
+          onAddImageAt={addImageItem}
           onAddToChat={handleAddToChat}
           selectedIds={selectedIds} 
           setSelectedIds={setSelectedIds}
@@ -239,7 +477,7 @@ function App() {
         
         <Toolbar 
           zoom={zoom} 
-          onZoomChange={setZoom} 
+          onZoomChange={handleZoomChange}
           onResetView={() => { setZoom(1); setPan({ x: window.innerWidth / 4, y: window.innerHeight / 4 }); }}
           onAddWorkflow={addWorkflow}
           onAddImage={addImageItem}
@@ -253,6 +491,8 @@ function App() {
           isThinking={isThinking}
           onSendMessage={handleSidebarSendMessage}
           contextImage={contextImage}
+          imageItems={items.filter(item => item.type === 'image' && !!item.content)}
+          onSelectContextImage={setContextImage}
           onClearContextImage={() => setContextImage(null)}
         />
       </div>

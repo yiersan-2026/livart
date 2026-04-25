@@ -80,6 +80,7 @@ const HomePage: React.FC<HomePageProps> = ({ onStart, onEnterCanvas }) => {
                 }
                 className="w-full text-xl font-medium text-gray-800 placeholder:text-gray-300 outline-none resize-none h-24 py-2 bg-transparent"
                 onKeyDown={(e) => {
+                  e.stopPropagation();
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
                     handleSubmit(e);

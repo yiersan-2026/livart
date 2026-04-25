@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { X, Save } from 'lucide-react';
-import { getApiConfig, saveApiConfig, ApiConfig, AVAILABLE_MODELS } from '../services/config';
+import { getApiConfig, saveApiConfig, ApiConfig, AVAILABLE_MODELS, DEFAULT_API_CONFIG } from '../services/config';
 
 interface ConfigModalProps {
   isOpen: boolean;
@@ -8,7 +8,7 @@ interface ConfigModalProps {
 }
 
 const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose }) => {
-  const [config, setConfig] = useState<ApiConfig>({ baseUrl: '', apiKey: '', model: 'gemini-3-pro-image-preview' });
+  const [config, setConfig] = useState<ApiConfig>(DEFAULT_API_CONFIG);
 
   useEffect(() => {
     if (isOpen) {
@@ -35,7 +35,7 @@ const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose }) => {
 
         <div className="p-6 space-y-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">中转地址</label>
+            <label className="block text-sm font-medium text-gray-700 mb-2">基础地址</label>
             <input
               type="text"
               value={config.baseUrl}
@@ -43,7 +43,29 @@ const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose }) => {
               placeholder="https://api.example.com"
               className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-black/10 focus:border-gray-300 transition-all"
             />
-            <p className="text-xs text-gray-400 mt-1">例如: https://api.example.com</p>
+            <p className="text-xs text-gray-400 mt-1">用于兼容旧配置，优先使用下面两个完整接口地址。</p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">文生图地址</label>
+            <input
+              type="text"
+              value={config.textToImageUrl}
+              onChange={(e) => setConfig({ ...config, textToImageUrl: e.target.value })}
+              placeholder="https://api.example.com/v1/images/generations"
+              className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-black/10 focus:border-gray-300 transition-all"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">图生图地址</label>
+            <input
+              type="text"
+              value={config.imageToImageUrl}
+              onChange={(e) => setConfig({ ...config, imageToImageUrl: e.target.value })}
+              placeholder="https://api.example.com/v1/images/edits"
+              className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-black/10 focus:border-gray-300 transition-all"
+            />
           </div>
 
           <div>
