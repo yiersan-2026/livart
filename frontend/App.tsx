@@ -222,6 +222,18 @@ function App() {
   }, [isAuthReady, authSession?.token]);
 
   useEffect(() => {
+    if (!isThinking) return;
+
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [isThinking]);
+
+  useEffect(() => {
     if (!isAuthReady) return;
 
     let isMounted = true;

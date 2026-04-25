@@ -179,9 +179,22 @@ const Canvas: React.FC<CanvasProps> = ({
   const selectedItemIsLocalRedraw = selectedItem?.type === 'image' && selectedItem.id === localRedrawItemId;
   const selectedInlineEditError = selectedItem ? inlineEditErrors[selectedItem.id] : '';
   const inlineEditPrompt = selectedItem?.type === 'image' ? inlineEditPrompts[selectedItem.id] || '' : '';
+  const hasActiveCanvasGeneration = isGenerating || inlineEditingIds.size > 0 || inlinePromptOptimizingIds.size > 0;
 
   // 全局右键菜单状态
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, id: string } | null>(null);
+
+  useEffect(() => {
+    if (!hasActiveCanvasGeneration) return;
+
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [hasActiveCanvasGeneration]);
 
   // 修复假死：当选中项改变时，确保重置绘图状态，防止 Ref 冲突或状态死循环
   useEffect(() => {
