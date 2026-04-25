@@ -51,6 +51,13 @@ const getJsonBody = async (request: IncomingMessage) => {
   return JSON.parse(body.toString('utf8'));
 };
 
+const getBearerToken = (authorization: string | string[] | undefined) => {
+  const value = Array.isArray(authorization) ? authorization[0] : authorization;
+  if (!value) return '';
+  const match = value.match(/^Bearer\s+(.+)$/i);
+  return match?.[1]?.trim() || '';
+};
+
 const sanitizeOptimizedPrompt = (text: string) => {
   return text
     .replace(/^```(?:text|markdown)?/i, '')
@@ -216,18 +223,21 @@ const proxyPromptOptimizeRequest = async (
     return;
   }
 
-  if (!baseUrl || !apiKey || !model) {
-    writeJson(response, 500, { error: '提示词优化器配置缺失' });
-    return;
-  }
-
   try {
     const body = await getJsonBody(request);
     const prompt = String(body.prompt || '').trim();
     const mode = body.mode === 'image-to-image' ? 'image-to-image' : 'text-to-image';
+    const effectiveBaseUrl = String(body.baseUrl || baseUrl || '').trim();
+    const effectiveApiKey = getBearerToken(request.headers.authorization) || apiKey;
+    const effectiveModel = String(body.model || model || '').trim();
 
     if (!prompt) {
       writeJson(response, 400, { error: '请输入需要优化的提示词' });
+      return;
+    }
+
+    if (!effectiveBaseUrl || !effectiveApiKey || !effectiveModel) {
+      writeJson(response, 500, { error: '提示词优化器配置缺失' });
       return;
     }
 
@@ -235,10 +245,10 @@ const proxyPromptOptimizeRequest = async (
     const userPrompt = `原始提示词：${prompt}`;
     const startedAt = Date.now();
 
-    console.info(`[prompt-optimizer] start mode=${mode} model=${model}`);
+    console.info(`[prompt-optimizer] start mode=${mode} model=${effectiveModel}`);
 
-    const responsesResult = await callPromptOptimizerEndpoint(joinUrl(baseUrl, 'responses'), apiKey, {
-      model,
+    const responsesResult = await callPromptOptimizerEndpoint(joinUrl(effectiveBaseUrl, 'responses'), effectiveApiKey, {
+      model: effectiveModel,
       instructions: systemPrompt,
       input: userPrompt
     });
@@ -246,8 +256,8 @@ const proxyPromptOptimizeRequest = async (
     let finalResult = responsesResult;
     if (!responsesResult.ok && [400, 404, 405].includes(responsesResult.status)) {
       console.warn(`[prompt-optimizer] responses fallback status=${responsesResult.status} body=${getBodyPreview(responsesResult.body)}`);
-      finalResult = await callPromptOptimizerEndpoint(joinUrl(baseUrl, 'chat/completions'), apiKey, {
-        model,
+      finalResult = await callPromptOptimizerEndpoint(joinUrl(effectiveBaseUrl, 'chat/completions'), effectiveApiKey, {
+        model: effectiveModel,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }
@@ -268,7 +278,7 @@ const proxyPromptOptimizeRequest = async (
 
     writeJson(response, 200, {
       optimizedPrompt,
-      model,
+      model: effectiveModel,
       mode
     });
     console.info(`[prompt-optimizer] done mode=${mode} duration=${Date.now() - startedAt}ms`);
@@ -413,6 +423,10 @@ export default defineConfig(({ mode }) => {
             target: backendApiBaseUrl,
             changeOrigin: true
           },
+          '/api/auth': {
+            target: backendApiBaseUrl,
+            changeOrigin: true
+          },
           '/api/health': {
             target: backendApiBaseUrl,
             changeOrigin: true
@@ -422,7 +436,7 @@ export default defineConfig(({ mode }) => {
       plugins: [
         react(),
         {
-          name: 'artisanlab-image-proxy',
+          name: 'livart-image-proxy',
           configureServer(server) {
             server.middlewares.use('/api/images/generations', (request, response) => {
               proxyImageRequest('text-to-image', textToImageUpstreamUrl, request, response, env.IMAGE_API_KEY);
@@ -442,6 +456,8 @@ export default defineConfig(({ mode }) => {
         'process.env.IMAGE_API_BASE_URL': JSON.stringify(env.IMAGE_API_BASE_URL),
         'process.env.IMAGE_API_KEY': JSON.stringify(env.IMAGE_API_KEY),
         'process.env.IMAGE_API_MODEL': JSON.stringify(env.IMAGE_API_MODEL),
+        'process.env.PROMPT_OPTIMIZER_MODEL': JSON.stringify(env.PROMPT_OPTIMIZER_MODEL),
+        'process.env.CHAT_API_MODEL': JSON.stringify(env.CHAT_API_MODEL),
         'process.env.TEXT_TO_IMAGE_API_URL': JSON.stringify(env.TEXT_TO_IMAGE_API_URL || '/api/images/generations'),
         'process.env.IMAGE_TO_IMAGE_API_URL': JSON.stringify(env.IMAGE_TO_IMAGE_API_URL || '/api/images/edits'),
         'process.env.IMAGE_TEXT_TO_IMAGE_URL': JSON.stringify(env.IMAGE_TEXT_TO_IMAGE_URL),

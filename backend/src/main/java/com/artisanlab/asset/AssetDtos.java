@@ -10,6 +10,7 @@ public final class AssetDtos {
     public record AssetResponse(
             UUID id,
             UUID canvasId,
+            UUID userId,
             String urlPath,
             String originalFilename,
             String mimeType,

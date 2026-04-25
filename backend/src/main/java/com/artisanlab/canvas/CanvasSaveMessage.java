@@ -5,6 +5,7 @@ import java.util.UUID;
 
 public record CanvasSaveMessage(
         UUID messageId,
+        UUID userId,
         UUID canvasId,
         String title,
         String stateJson,

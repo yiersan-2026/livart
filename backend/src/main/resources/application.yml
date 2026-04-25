@@ -4,7 +4,7 @@ server:
 
 spring:
   application:
-    name: artisanlab-backend
+    name: livart-backend
   servlet:
     multipart:
       max-file-size: 25MB
@@ -46,6 +46,9 @@ mybatis-plus:
     banner: false
 
 artisan:
+  auth:
+    jwt-secret: ${JWT_SECRET:dev-only-change-me-livart-jwt-secret-at-least-32-chars}
+    jwt-ttl-days: ${JWT_TTL_DAYS:30}
   canvas:
     default-canvas-id: ${CANVAS_ID:00000000-0000-0000-0000-000000000001}
   cors:
@@ -54,10 +57,10 @@ artisan:
     endpoint: ${MINIO_ENDPOINT:}
     access-key: ${MINIO_ACCESS_KEY:}
     secret-key: ${MINIO_SECRET_KEY:}
-    bucket: ${MINIO_BUCKET:artisanlab}
+    bucket: ${MINIO_BUCKET:livart}
   rabbitmq:
-    canvas-save-queue: ${CANVAS_SAVE_QUEUE:artisanlab.canvas.save.dev}
-    canvas-save-dead-letter-queue: ${CANVAS_SAVE_DEAD_LETTER_QUEUE:artisanlab.canvas.save.dev.dead}
+    canvas-save-queue: ${CANVAS_SAVE_QUEUE:livart.canvas.save.dev}
+    canvas-save-dead-letter-queue: ${CANVAS_SAVE_DEAD_LETTER_QUEUE:livart.canvas.save.dev.dead}
 
 logging:
   level:

@@ -1,4 +1,4 @@
-package com.artisanlab.canvas;
+package com.artisanlab.auth;
 
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableField;
@@ -8,26 +8,24 @@ import com.baomidou.mybatisplus.annotation.TableName;
 import java.time.OffsetDateTime;
 import java.util.UUID;
 
-@TableName("artisan_canvases")
-public class CanvasEntity {
+@TableName("artisan_users")
+public class UserEntity {
     @TableId(type = IdType.INPUT)
     private UUID id;
 
-    private String title;
+    private String username;
 
-    @TableField("user_id")
-    private UUID userId;
+    @TableField("display_name")
+    private String displayName;
 
-    @TableField("state_json")
-    private String stateJson;
+    @TableField("password_hash")
+    private String passwordHash;
 
     @TableField("created_at")
     private OffsetDateTime createdAt;
 
     @TableField("updated_at")
     private OffsetDateTime updatedAt;
-
-    private Long revision;
 
     public UUID getId() {
         return id;
@@ -37,28 +35,28 @@ public class CanvasEntity {
         this.id = id;
     }
 
-    public String getTitle() {
-        return title;
+    public String getUsername() {
+        return username;
     }
 
-    public void setTitle(String title) {
-        this.title = title;
+    public void setUsername(String username) {
+        this.username = username;
     }
 
-    public UUID getUserId() {
-        return userId;
+    public String getDisplayName() {
+        return displayName;
     }
 
-    public void setUserId(UUID userId) {
-        this.userId = userId;
+    public void setDisplayName(String displayName) {
+        this.displayName = displayName;
     }
 
-    public String getStateJson() {
-        return stateJson;
+    public String getPasswordHash() {
+        return passwordHash;
     }
 
-    public void setStateJson(String stateJson) {
-        this.stateJson = stateJson;
+    public void setPasswordHash(String passwordHash) {
+        this.passwordHash = passwordHash;
     }
 
     public OffsetDateTime getCreatedAt() {
@@ -75,13 +73,5 @@ public class CanvasEntity {
 
     public void setUpdatedAt(OffsetDateTime updatedAt) {
         this.updatedAt = updatedAt;
-    }
-
-    public Long getRevision() {
-        return revision;
-    }
-
-    public void setRevision(Long revision) {
-        this.revision = revision;
     }
 }

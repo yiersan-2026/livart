@@ -15,6 +15,7 @@ backend/.env.*
 !backend/.env.example
 backend/target
 node_modules
+.vite
 dist
 dist-ssr
 *.local

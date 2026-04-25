@@ -21,15 +21,16 @@ public class CanvasSaveQueueService {
         this.properties = properties;
     }
 
-    public CanvasDtos.CanvasResponse enqueueCurrentCanvasSave(CanvasDtos.SaveCanvasRequest request) {
-        return enqueueCanvasSave(properties.canvas().defaultCanvasId(), request);
+    public CanvasDtos.CanvasResponse enqueueCurrentCanvasSave(UUID userId, CanvasDtos.SaveCanvasRequest request) {
+        return enqueueCanvasSave(userId, properties.canvas().defaultCanvasId(), request);
     }
 
-    public CanvasDtos.CanvasResponse enqueueCanvasSave(UUID canvasId, CanvasDtos.SaveCanvasRequest request) {
+    public CanvasDtos.CanvasResponse enqueueCanvasSave(UUID userId, UUID canvasId, CanvasDtos.SaveCanvasRequest request) {
         String title = normalizeTitle(request.title());
         long revision = normalizeRevision(request.clientRevision());
         CanvasSaveMessage message = new CanvasSaveMessage(
                 UUID.randomUUID(),
+                userId,
                 canvasId,
                 title,
                 request.state().toString(),

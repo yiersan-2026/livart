@@ -16,6 +16,9 @@ public class AssetEntity {
     @TableField("canvas_id")
     private UUID canvasId;
 
+    @TableField("user_id")
+    private UUID userId;
+
     @TableField("object_key")
     private String objectKey;
 
@@ -52,6 +55,14 @@ public class AssetEntity {
 
     public void setCanvasId(UUID canvasId) {
         this.canvasId = canvasId;
+    }
+
+    public UUID getUserId() {
+        return userId;
+    }
+
+    public void setUserId(UUID userId) {
+        this.userId = userId;
     }
 
     public String getObjectKey() {

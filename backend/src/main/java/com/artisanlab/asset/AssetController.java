@@ -1,5 +1,6 @@
 package com.artisanlab.asset;
 
+import com.artisanlab.auth.AuthContext;
 import com.artisanlab.common.ApiResponse;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.http.CacheControl;
@@ -23,9 +24,11 @@ import java.util.concurrent.TimeUnit;
 @RequestMapping("/api/assets")
 public class AssetController {
     private final AssetService assetService;
+    private final AuthContext authContext;
 
-    public AssetController(AssetService assetService) {
+    public AssetController(AssetService assetService, AuthContext authContext) {
         this.assetService = assetService;
+        this.authContext = authContext;
     }
 
     @PostMapping
@@ -33,7 +36,7 @@ public class AssetController {
             @RequestPart("file") MultipartFile file,
             @RequestParam(value = "canvasId", required = false) UUID canvasId
     ) {
-        return ApiResponse.ok(assetService.upload(canvasId, file));
+        return ApiResponse.ok(assetService.upload(authContext.requireUserId(), canvasId, file));
     }
 
     @GetMapping("/{id}/content")

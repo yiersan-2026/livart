@@ -12,10 +12,10 @@
     </parent>
 
     <groupId>com.artisanlab</groupId>
-    <artifactId>artisanlab-backend</artifactId>
+    <artifactId>livart-backend</artifactId>
     <version>0.0.1-SNAPSHOT</version>
-    <name>ArtisanLab Backend</name>
-    <description>Permanent canvas backend for ArtisanLab</description>
+    <name>livart Backend</name>
+    <description>Permanent canvas backend for livart</description>
 
     <properties>
         <java.version>17</java.version>
@@ -35,6 +35,10 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-amqp</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
         </dependency>
         <dependency>
             <groupId>com.baomidou</groupId>

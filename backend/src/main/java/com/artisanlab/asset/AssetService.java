@@ -2,6 +2,7 @@ package com.artisanlab.asset;
 
 import com.artisanlab.common.ApiException;
 import com.artisanlab.config.ArtisanProperties;
+import com.artisanlab.canvas.CanvasMapper;
 import io.minio.BucketExistsArgs;
 import io.minio.GetObjectArgs;
 import io.minio.GetObjectResponse;
@@ -24,11 +25,13 @@ import java.util.UUID;
 @Service
 public class AssetService {
     private final AssetMapper assetMapper;
+    private final CanvasMapper canvasMapper;
     private final ArtisanProperties properties;
     private final MinioClient minioClient;
 
-    public AssetService(AssetMapper assetMapper, ArtisanProperties properties) {
+    public AssetService(AssetMapper assetMapper, CanvasMapper canvasMapper, ArtisanProperties properties) {
         this.assetMapper = assetMapper;
+        this.canvasMapper = canvasMapper;
         this.properties = properties;
         this.minioClient = MinioClient.builder()
                 .endpoint(properties.minio().endpoint())
@@ -53,8 +56,11 @@ public class AssetService {
     }
 
     @Transactional
-    public AssetDtos.AssetResponse upload(UUID canvasId, MultipartFile file) {
+    public AssetDtos.AssetResponse upload(UUID userId, UUID canvasId, MultipartFile file) {
         validateImage(file);
+        if (canvasId != null && canvasMapper.findByIdAndUserIdWithJson(canvasId, userId) == null) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "CANVAS_NOT_FOUND", "项目画布不存在");
+        }
 
         UUID assetId = UUID.randomUUID();
         String mimeType = normalizeMimeType(file.getContentType());
@@ -81,6 +87,7 @@ public class AssetService {
         AssetEntity entity = new AssetEntity();
         entity.setId(assetId);
         entity.setCanvasId(canvasId);
+        entity.setUserId(userId);
         entity.setObjectKey(objectKey);
         entity.setUrlPath("/api/assets/%s/content".formatted(assetId));
         entity.setOriginalFilename(filename);
@@ -137,6 +144,7 @@ public class AssetService {
         return new AssetDtos.AssetResponse(
                 entity.getId(),
                 entity.getCanvasId(),
+                entity.getUserId(),
                 entity.getUrlPath(),
                 entity.getOriginalFilename(),
                 entity.getMimeType(),

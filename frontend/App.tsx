@@ -1,7 +1,8 @@
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Trash2, Hammer, PanelRightClose, PanelRight, Settings, FolderPlus } from 'lucide-react';
+import { Trash2, Hammer, PanelRightClose, PanelRight, Settings, FolderPlus, LogOut, UserRound } from 'lucide-react';
 import { CanvasItem, ChatMessage } from './types';
+import AuthPanel from './components/AuthPanel';
 import Canvas from './components/Canvas';
 import Sidebar from './components/Sidebar';
 import Toolbar from './components/Toolbar';
@@ -13,20 +14,28 @@ import {
   createCanvasProject,
   listCanvasProjects,
   loadCanvasProject,
+  resetCanvasPersistenceSession,
   saveCanvasProject
 } from './services/canvasPersistence';
+import {
+  AuthSession,
+  clearAuthSession,
+  getStoredAuthSession,
+  loadCurrentUser,
+  logout
+} from './services/auth';
 
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 5;
 const SIDEBAR_WIDTH = 384;
-const LAST_PROJECT_STORAGE_KEY = 'artisanlab_last_project_id';
+const LAST_PROJECT_STORAGE_KEY = 'livart_last_project_id';
 
 const clampZoom = (value: number) => Math.min(Math.max(value, MIN_ZOOM), MAX_ZOOM);
 
 const createWelcomeMessage = (): ChatMessage => ({
   id: 'welcome',
   role: 'assistant',
-  text: '你好！我是灵匠助手。请直接告诉我你想要生成的画面，或者右键图片添加到对话进行编辑。',
+  text: '你好！我是 livart 助手。请直接告诉我你想要生成的画面，或者右键图片添加到对话进行编辑。',
   timestamp: Date.now()
 });
 
@@ -46,6 +55,8 @@ function App() {
   const [showSidebar, setShowSidebar] = useState(true);
   const [contextImage, setContextImage] = useState<CanvasItem | null>(null);
   const [showConfigModal, setShowConfigModal] = useState(false);
+  const [authSession, setAuthSession] = useState<AuthSession | null>(() => getStoredAuthSession());
+  const [isAuthReady, setIsAuthReady] = useState(false);
   const [hasLoadedCanvas, setHasLoadedCanvas] = useState(false);
   const [canvasSyncStatus, setCanvasSyncStatus] = useState<'loading' | 'saving' | 'saved' | 'error'>('loading');
   const [projects, setProjects] = useState<CanvasProject[]>([]);
@@ -55,6 +66,25 @@ function App() {
   const pendingSaveRef = useRef<PendingCanvasSave | null>(null);
   const isSavingCanvasRef = useRef(false);
   const saveRevisionRef = useRef(Date.now());
+
+  const resetWorkspace = () => {
+    setItems([]);
+    setMessages([createWelcomeMessage()]);
+    setZoom(1);
+    setPan({ x: window.innerWidth / 4, y: window.innerHeight / 4 });
+    setSelectedIds([]);
+    setContextImage(null);
+    setProjects([]);
+    setCurrentProjectId('');
+    setCurrentProjectTitle('默认画布');
+    if (saveTimerRef.current) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    pendingSaveRef.current = null;
+    isSavingCanvasRef.current = false;
+    resetCanvasPersistenceSession();
+  };
 
   const flushQueuedCanvasSave = () => {
     if (isSavingCanvasRef.current || !pendingSaveRef.current) return;
@@ -113,6 +143,51 @@ function App() {
   useEffect(() => {
     let isMounted = true;
 
+    loadCurrentUser()
+      .then((session) => {
+        if (!isMounted) return;
+        if (session) {
+          setAuthSession(session);
+        } else {
+          clearAuthSession();
+          setAuthSession(null);
+        }
+      })
+      .catch((error) => {
+        console.warn('[auth] restore session failed', error);
+        clearAuthSession();
+        if (isMounted) {
+          setAuthSession(null);
+        }
+      })
+      .finally(() => {
+        if (isMounted) {
+          setIsAuthReady(true);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isAuthReady) return;
+
+    let isMounted = true;
+
+    if (!authSession) {
+      resetWorkspace();
+      setHasLoadedCanvas(false);
+      setCanvasSyncStatus('loading');
+      return () => {
+        isMounted = false;
+      };
+    }
+
+    setHasLoadedCanvas(false);
+    setCanvasSyncStatus('loading');
+
     (async () => {
       const projectList = await listCanvasProjects();
       const initialProject = projectList.length > 0
@@ -145,10 +220,10 @@ function App() {
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [isAuthReady, authSession?.token]);
 
   useEffect(() => {
-    if (!hasLoadedCanvas || !currentProjectId) return;
+    if (!authSession || !hasLoadedCanvas || !currentProjectId) return;
     if (saveTimerRef.current) {
       window.clearTimeout(saveTimerRef.current);
     }
@@ -171,7 +246,7 @@ function App() {
         window.clearTimeout(saveTimerRef.current);
       }
     };
-  }, [items, messages, zoom, pan, hasLoadedCanvas, currentProjectId, currentProjectTitle]);
+  }, [items, messages, zoom, pan, hasLoadedCanvas, currentProjectId, currentProjectTitle, authSession]);
 
   const canvasSyncText = canvasSyncStatus === 'loading'
     ? '永久画布读取中'
@@ -391,6 +466,32 @@ function App() {
     addMessage('已锁定参考图，请输入编辑指令。', 'assistant');
   };
 
+  const handleAuthenticated = (session: AuthSession) => {
+    setAuthSession(session);
+    setHasLoadedCanvas(false);
+    setCanvasSyncStatus('loading');
+  };
+
+  const handleLogout = async () => {
+    flushQueuedCanvasSave();
+    await logout();
+    localStorage.removeItem(LAST_PROJECT_STORAGE_KEY);
+    setAuthSession(null);
+    resetWorkspace();
+  };
+
+  if (!isAuthReady) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-[#fcfcfc] font-sans text-sm font-black text-gray-400">
+        正在恢复登录状态...
+      </div>
+    );
+  }
+
+  if (!authSession) {
+    return <AuthPanel onAuthenticated={handleAuthenticated} />;
+  }
+
   return (
     <div className="flex h-screen bg-[#fcfcfc] overflow-hidden font-sans text-gray-900">
       <div className="flex-1 relative flex flex-col">
@@ -408,8 +509,8 @@ function App() {
                 <Hammer className="text-white" size={18} />
               </div>
               <div className="flex flex-col -gap-1 text-left">
-                <span className="font-black text-lg tracking-tighter text-gray-900 leading-none">灵匠</span>
-                <span className="text-[7px] font-black uppercase tracking-widest text-gray-400">Artisan Lab</span>
+                <span className="font-black text-lg tracking-tighter text-gray-900 leading-none">livart</span>
+                <span className="text-[7px] font-black uppercase tracking-widest text-gray-400">AI Canvas</span>
               </div>
               <span className={`rounded-full px-2.5 py-1 text-[10px] font-black ${
                 canvasSyncStatus === 'error' ? 'bg-red-50 text-red-500' : 'bg-emerald-50 text-emerald-600'
@@ -442,6 +543,18 @@ function App() {
             </div>
           </div>
           <div className="flex items-center gap-3">
+            <div className="hidden items-center gap-2 rounded-2xl border border-gray-100 bg-white/70 px-3 py-2 text-xs font-black text-gray-500 shadow-sm md:flex">
+              <UserRound size={15} className="text-indigo-500" />
+              <span className="max-w-28 truncate">{authSession.user.displayName || authSession.user.username}</span>
+            </div>
+            <button
+              onClick={handleLogout}
+              className="p-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all"
+              title="退出登录"
+            >
+              <LogOut size={18} />
+            </button>
+            <div className="h-4 w-[1px] bg-gray-100 mx-1" />
             <button 
               onClick={() => setShowSidebar(!showSidebar)} 
               className={`p-2 rounded-xl transition-all ${showSidebar ? 'text-indigo-600 bg-indigo-50' : 'text-gray-400 hover:bg-gray-100'}`}

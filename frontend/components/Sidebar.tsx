@@ -289,7 +289,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
           <Hammer className="text-white" size={16} />
         </div>
         <div>
-          <h2 className="font-black text-gray-800 tracking-tight">灵匠 对话</h2>
+          <h2 className="font-black text-gray-800 tracking-tight">livart 对话</h2>
           <p className="text-[9px] text-gray-400 uppercase tracking-widest font-black">直接生成与编辑图像</p>
         </div>
       </div>
@@ -313,7 +313,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
         {isThinking && (
           <div className="flex items-center gap-3 text-black text-sm font-bold animate-pulse">
             <Loader2 className="animate-spin" size={16} />
-            <span>灵匠正在生成中...</span>
+            <span>livart 正在生成中...</span>
           </div>
         )}
       </div>

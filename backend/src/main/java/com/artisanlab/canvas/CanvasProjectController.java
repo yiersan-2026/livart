@@ -1,5 +1,6 @@
 package com.artisanlab.canvas;
 
+import com.artisanlab.auth.AuthContext;
 import com.artisanlab.common.ApiResponse;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
@@ -20,27 +21,29 @@ import java.util.UUID;
 public class CanvasProjectController {
     private final CanvasService canvasService;
     private final CanvasSaveQueueService canvasSaveQueueService;
+    private final AuthContext authContext;
 
-    public CanvasProjectController(CanvasService canvasService, CanvasSaveQueueService canvasSaveQueueService) {
+    public CanvasProjectController(CanvasService canvasService, CanvasSaveQueueService canvasSaveQueueService, AuthContext authContext) {
         this.canvasService = canvasService;
         this.canvasSaveQueueService = canvasSaveQueueService;
+        this.authContext = authContext;
     }
 
     @GetMapping
     public ApiResponse<List<CanvasDtos.CanvasSummary>> listCanvases() {
-        return ApiResponse.ok(canvasService.listCanvases());
+        return ApiResponse.ok(canvasService.listCanvases(authContext.requireUserId()));
     }
 
     @PostMapping
     public ResponseEntity<ApiResponse<CanvasDtos.CanvasResponse>> createCanvas(
             @RequestBody CanvasDtos.CreateCanvasRequest request
     ) {
-        return ResponseEntity.status(HttpStatus.CREATED).body(ApiResponse.ok(canvasService.createCanvas(request)));
+        return ResponseEntity.status(HttpStatus.CREATED).body(ApiResponse.ok(canvasService.createCanvas(authContext.requireUserId(), request)));
     }
 
     @GetMapping("/{id}")
     public ApiResponse<CanvasDtos.CanvasResponse> getCanvas(@PathVariable UUID id) {
-        return ApiResponse.ok(canvasService.getCanvas(id));
+        return ApiResponse.ok(canvasService.getCanvas(authContext.requireUserId(), id));
     }
 
     @PutMapping("/{id}")
@@ -48,7 +51,7 @@ public class CanvasProjectController {
             @PathVariable UUID id,
             @Valid @RequestBody CanvasDtos.SaveCanvasRequest request
     ) {
-        CanvasDtos.CanvasResponse response = canvasSaveQueueService.enqueueCanvasSave(id, request);
+        CanvasDtos.CanvasResponse response = canvasSaveQueueService.enqueueCanvasSave(authContext.requireUserId(), id, request);
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(ApiResponse.ok(response));
     }
 }

@@ -33,13 +33,13 @@ public class CanvasService {
     }
 
     @Transactional(readOnly = true)
-    public CanvasDtos.CanvasResponse getCurrentCanvas() {
-        return getCanvas(defaultCanvasId());
+    public CanvasDtos.CanvasResponse getCurrentCanvas(UUID userId) {
+        return getCanvas(userId, defaultCanvasId());
     }
 
     @Transactional(readOnly = true)
-    public CanvasDtos.CanvasResponse getCanvas(UUID canvasId) {
-        CanvasEntity entity = canvasMapper.findByIdWithJson(canvasId);
+    public CanvasDtos.CanvasResponse getCanvas(UUID userId, UUID canvasId) {
+        CanvasEntity entity = canvasMapper.findByIdAndUserIdWithJson(canvasId, userId);
         if (entity == null) {
             throw new ApiException(HttpStatus.NOT_FOUND, "CANVAS_NOT_FOUND", "项目画布不存在");
         }
@@ -48,29 +48,31 @@ public class CanvasService {
     }
 
     @Transactional
-    public List<CanvasDtos.CanvasSummary> listCanvases() {
-        List<CanvasEntity> summaries = canvasMapper.listSummaries();
+    public List<CanvasDtos.CanvasSummary> listCanvases(UUID userId) {
+        List<CanvasEntity> summaries = canvasMapper.listSummariesByUserId(userId);
         if (summaries.isEmpty()) {
-            createCanvas(new CanvasDtos.CreateCanvasRequest("默认画布"));
-            summaries = canvasMapper.listSummaries();
+            createCanvas(userId, new CanvasDtos.CreateCanvasRequest("默认画布"));
+            summaries = canvasMapper.listSummariesByUserId(userId);
         }
 
         return summaries.stream().map(this::toSummary).toList();
     }
 
     @Transactional
-    public CanvasDtos.CanvasResponse createCanvas(CanvasDtos.CreateCanvasRequest request) {
+    public CanvasDtos.CanvasResponse createCanvas(UUID userId, CanvasDtos.CreateCanvasRequest request) {
         CanvasEntity canvas = new CanvasEntity();
         canvas.setId(UUID.randomUUID());
+        canvas.setUserId(userId);
         canvas.setTitle(normalizeTitle(request.title()));
         canvasMapper.insertEmpty(canvas);
-        return toResponse(canvasMapper.findByIdWithJson(canvas.getId()));
+        return toResponse(canvasMapper.findByIdAndUserIdWithJson(canvas.getId(), userId));
     }
 
     @Transactional
     public boolean persistQueuedCanvasSave(CanvasSaveMessage message) {
         CanvasEntity canvas = new CanvasEntity();
         canvas.setId(message.canvasId());
+        canvas.setUserId(message.userId());
         canvas.setTitle(message.title());
         canvas.setStateJson(message.stateJson());
         canvas.setRevision(message.revision());

@@ -1,4 +1,5 @@
 import { CanvasItem, ChatMessage } from '../types';
+import { authHeaders } from './auth';
 
 export interface CanvasPersistenceState {
   items: CanvasItem[];
@@ -43,6 +44,11 @@ interface AssetResponse {
 
 let currentCanvasId: string | null = null;
 const dataUrlUploadCache = new Map<string, Promise<string>>();
+
+export const resetCanvasPersistenceSession = () => {
+  currentCanvasId = null;
+  dataUrlUploadCache.clear();
+};
 
 const isDataImageUrl = (value: unknown): value is string => {
   return typeof value === 'string' && value.startsWith('data:image/');
@@ -91,6 +97,9 @@ const uploadDataImage = async (dataUrl: string, filenameSeed: string) => {
 
     const response = await fetch('/api/assets', {
       method: 'POST',
+      headers: {
+        ...authHeaders()
+      },
       body: formData
     });
     const asset = await unwrapApiResponse<AssetResponse>(response);
@@ -174,7 +183,10 @@ const normalizeLoadedState = (state: Partial<CanvasPersistenceState> | null): Ca
 
 export const listCanvasProjects = async () => {
   const response = await fetch('/api/canvases', {
-    headers: { Accept: 'application/json' }
+    headers: {
+      Accept: 'application/json',
+      ...authHeaders()
+    }
   });
   const projects = await unwrapApiResponse<CanvasProject[]>(response);
   return projects.map(toCanvasProject);
@@ -185,7 +197,8 @@ export const createCanvasProject = async (title: string) => {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Accept: 'application/json'
+      Accept: 'application/json',
+      ...authHeaders()
     },
     body: JSON.stringify({ title })
   });
@@ -198,7 +211,10 @@ export const createCanvasProject = async (title: string) => {
 
 export const loadCanvasProject = async (canvasId: string): Promise<CanvasLoadResult> => {
   const response = await fetch(`/api/canvases/${canvasId}`, {
-    headers: { Accept: 'application/json' }
+    headers: {
+      Accept: 'application/json',
+      ...authHeaders()
+    }
   });
   const canvas = await unwrapApiResponse<CanvasResponse>(response);
   currentCanvasId = canvas.id;
@@ -235,7 +251,8 @@ export const saveCanvasProject = async (
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
-      Accept: 'application/json'
+      Accept: 'application/json',
+      ...authHeaders()
     },
     body: JSON.stringify({
       title,

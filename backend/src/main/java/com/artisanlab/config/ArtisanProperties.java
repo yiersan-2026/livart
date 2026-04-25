@@ -11,11 +11,18 @@ import java.util.UUID;
 @Validated
 @ConfigurationProperties(prefix = "artisan")
 public record ArtisanProperties(
+        @Valid @NotNull Auth auth,
         @Valid @NotNull Canvas canvas,
         @Valid @NotNull Cors cors,
         @Valid @NotNull Minio minio,
         @Valid @NotNull Rabbitmq rabbitmq
 ) {
+    public record Auth(
+            @NotBlank String jwtSecret,
+            long jwtTtlDays
+    ) {
+    }
+
     public record Canvas(
             @NotNull UUID defaultCanvasId
     ) {

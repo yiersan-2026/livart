@@ -16,12 +16,21 @@ export const AVAILABLE_MODELS = [
   ...LEGACY_GEMINI_MODELS
 ];
 
+export const AVAILABLE_CHAT_MODELS = [
+  'gpt-5.5',
+  'gpt-5.4',
+  'gpt-5.2',
+  'gpt-4.1',
+  'gpt-4o'
+];
+
 export interface ApiConfig {
   baseUrl: string;
   textToImageUrl: string;
   imageToImageUrl: string;
   apiKey: string;
   model: string;
+  chatModel: string;
 }
 
 export const DEFAULT_API_CONFIG: ApiConfig = {
@@ -29,7 +38,8 @@ export const DEFAULT_API_CONFIG: ApiConfig = {
   textToImageUrl: process.env.TEXT_TO_IMAGE_API_URL || process.env.IMAGE_TEXT_TO_IMAGE_URL || joinUrl(process.env.IMAGE_API_BASE_URL || '', 'images/generations'),
   imageToImageUrl: process.env.IMAGE_TO_IMAGE_API_URL || process.env.IMAGE_IMAGE_TO_IMAGE_URL || joinUrl(process.env.IMAGE_API_BASE_URL || '', 'images/edits'),
   apiKey: process.env.IMAGE_API_KEY || '',
-  model: process.env.IMAGE_API_MODEL || 'gpt-image-2'
+  model: process.env.IMAGE_API_MODEL || 'gpt-image-2',
+  chatModel: process.env.PROMPT_OPTIMIZER_MODEL || process.env.CHAT_API_MODEL || 'gpt-5.5'
 };
 
 const normalizeApiConfig = (config: Partial<ApiConfig>): ApiConfig => {
@@ -43,7 +53,8 @@ const normalizeApiConfig = (config: Partial<ApiConfig>): ApiConfig => {
     textToImageUrl: textToImageUrl || DEFAULT_API_CONFIG.textToImageUrl || joinUrl(baseUrl, 'images/generations'),
     imageToImageUrl: imageToImageUrl || DEFAULT_API_CONFIG.imageToImageUrl || joinUrl(baseUrl, 'images/edits'),
     apiKey: config.apiKey || DEFAULT_API_CONFIG.apiKey,
-    model: isLegacyStoredConfig ? DEFAULT_API_CONFIG.model : (config.model || DEFAULT_API_CONFIG.model)
+    model: isLegacyStoredConfig ? DEFAULT_API_CONFIG.model : (config.model || DEFAULT_API_CONFIG.model),
+    chatModel: config.chatModel || DEFAULT_API_CONFIG.chatModel
   };
 };
 

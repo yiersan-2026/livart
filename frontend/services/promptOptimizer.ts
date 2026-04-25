@@ -1,13 +1,23 @@
+import { getApiConfig } from './config';
+
 export type PromptOptimizeMode = 'text-to-image' | 'image-to-image';
 
 export const optimizePrompt = async (prompt: string, mode: PromptOptimizeMode) => {
+  const config = getApiConfig();
+
   const response = await fetch('/api/prompts/optimize', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Accept': 'application/json'
+      'Accept': 'application/json',
+      ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {})
     },
-    body: JSON.stringify({ prompt, mode })
+    body: JSON.stringify({
+      prompt,
+      mode,
+      model: config.chatModel,
+      baseUrl: config.baseUrl
+    })
   });
 
   const data = await response.json().catch(() => null);
