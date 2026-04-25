@@ -858,7 +858,6 @@ const Canvas: React.FC<CanvasProps> = ({
         label: prompt.substring(0, 16) + (prompt.length > 16 ? '...' : '')
       });
       if (useLocalMask) {
-        onItemUpdate(targetItem.id, { maskData: undefined });
         setLocalRedrawItemId(newId);
         setActiveTool('brush');
       }
