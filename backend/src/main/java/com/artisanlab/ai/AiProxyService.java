@@ -30,10 +30,12 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -45,6 +47,7 @@ public class AiProxyService {
     private static final Duration IMAGE_REQUEST_TIMEOUT = Duration.ofMinutes(10);
     private static final Duration IMAGE_JOB_TTL = Duration.ofHours(2);
     private static final Duration PROMPT_OPTIMIZER_TIMEOUT = Duration.ofMinutes(2);
+    private static final Duration IMAGE_REFERENCE_ANALYZER_TIMEOUT = Duration.ofSeconds(45);
     private static final int IMAGE_PROXY_MAX_ATTEMPTS = 1;
     private static final byte[] CRLF = "\r\n".getBytes(StandardCharsets.UTF_8);
     private static final List<String> NEGATIVE_PROMPT_TERMS = List.of(
@@ -211,6 +214,88 @@ public class AiProxyService {
         }
 
         return toJobResponse(job);
+    }
+
+    public AiProxyDtos.ImageReferenceAnalysisResponse analyzeImageReferences(
+            UUID userId,
+            AiProxyDtos.ImageReferenceAnalysisRequest request
+    ) {
+        UserApiConfigDtos.Response config = userApiConfigService.getRequiredConfig(userId);
+        long startedAt = System.currentTimeMillis();
+
+        try {
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("model", config.chatModel());
+            body.put("instructions", getImageReferenceAnalyzerSystemPrompt());
+            body.put("input", buildImageReferenceAnalyzerInput(request));
+
+            log.info(
+                    "[image-reference-analyzer] start model={} promptChars={} images={}",
+                    config.chatModel(),
+                    request.prompt().length(),
+                    request.images().size()
+            );
+
+            HttpRequest upstreamRequest = HttpRequest.newBuilder(URI.create(joinUrl(config.baseUrl(), "responses")))
+                    .timeout(IMAGE_REFERENCE_ANALYZER_TIMEOUT)
+                    .header(HttpHeaders.CONTENT_TYPE, "application/json")
+                    .header(HttpHeaders.ACCEPT, "application/json")
+                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + config.apiKey())
+                    .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body), StandardCharsets.UTF_8))
+                    .build();
+
+            HttpResponse<byte[]> upstreamResponse = httpClient.send(upstreamRequest, HttpResponse.BodyHandlers.ofByteArray());
+            if (upstreamResponse.statusCode() < 200 || upstreamResponse.statusCode() > 299) {
+                String detail = getBodyPreview(upstreamResponse.body());
+                log.warn(
+                        "[image-reference-analyzer] upstream error status={} duration={}ms body={}",
+                        upstreamResponse.statusCode(),
+                        System.currentTimeMillis() - startedAt,
+                        detail
+                );
+                throw new ApiException(
+                        HttpStatus.BAD_GATEWAY,
+                        "IMAGE_REFERENCE_ANALYZER_UPSTREAM_ERROR",
+                        "图片角色分析上游错误：%s（状态 %d）".formatted(detail, upstreamResponse.statusCode())
+                );
+            }
+
+            JsonNode data = objectMapper.readTree(upstreamResponse.body());
+            AiProxyDtos.ImageReferenceAnalysisResponse analysis = parseImageReferenceAnalysis(
+                    extractTextFromAiResponse(data),
+                    request
+            );
+
+            log.info(
+                    "[image-reference-analyzer] done duration={}ms baseImageId={} refs={}",
+                    System.currentTimeMillis() - startedAt,
+                    analysis.baseImageId(),
+                    analysis.referenceImageIds().size()
+            );
+            return analysis;
+        } catch (HttpTimeoutException exception) {
+            throw new ApiException(
+                    HttpStatus.GATEWAY_TIMEOUT,
+                    "IMAGE_REFERENCE_ANALYZER_TIMEOUT",
+                    "图片角色分析超过 45 秒，请稍后重试：%s".formatted(safeMessage(exception))
+            );
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new ApiException(
+                    HttpStatus.BAD_GATEWAY,
+                    "IMAGE_REFERENCE_ANALYZER_INTERRUPTED",
+                    "图片角色分析请求被中断：%s".formatted(safeMessage(exception))
+            );
+        } catch (ApiException exception) {
+            throw exception;
+        } catch (IOException | RuntimeException exception) {
+            log.error("[image-reference-analyzer] failed duration={}ms error={}", System.currentTimeMillis() - startedAt, safeMessage(exception));
+            throw new ApiException(
+                    HttpStatus.BAD_GATEWAY,
+                    "IMAGE_REFERENCE_ANALYZER_FAILED",
+                    "图片角色分析失败：%s".formatted(safeMessage(exception))
+            );
+        }
     }
 
     private void runImageJob(
@@ -698,6 +783,149 @@ public class AiProxyService {
                     "提示词优化失败：%s".formatted(safeMessage(exception))
             );
         }
+    }
+
+    private String getImageReferenceAnalyzerSystemPrompt() {
+        return """
+                你是图片编辑意图路由器。你的任务是根据用户指令判断哪张图片是“原图/主图/编辑目标/承载图”，哪些图片只是素材或参考。
+                只输出严格 JSON，不要 Markdown，不要解释，不要额外字段：
+                {"baseImageId":"候选图片 id","referenceImageIds":["其他候选图片 id"],"reason":"不超过 60 个中文字符的判断理由"}
+
+                判断规则：
+                - baseImageId 是最终要被编辑、承载变化、放置物体、穿戴物体或保留主体的那张图。
+                - referenceImageIds 是提供物体、材质、风格、颜色或局部元素的图。
+                - “把图 1 中的拖鞋穿到图 2 的人物脚上”中，图 2 是主图，图 1 是参考图。
+                - “把图 1 的鞋子换成图 2 里的鞋子”中，图 1 是主图，图 2 是参考图。
+                - 如果用户只说“把这张图/参考图放到另一张图的某处”，被放入的位置所在图片是主图。
+                - 如果没有明确目标位置，优先使用上下文图片作为主图；仍不明确时选择最可能被编辑的图片。
+                - baseImageId 和 referenceImageIds 只能使用候选图片中的 id。
+                """;
+    }
+
+    private String buildImageReferenceAnalyzerInput(AiProxyDtos.ImageReferenceAnalysisRequest request) {
+        StringBuilder builder = new StringBuilder();
+        builder.append("用户指令：").append(request.prompt()).append("\n");
+        if (request.contextImageId() != null && !request.contextImageId().isBlank()) {
+            builder.append("当前上下文图片 id：").append(request.contextImageId()).append("\n");
+        }
+        builder.append("候选图片：\n");
+
+        for (AiProxyDtos.ImageReferenceCandidate image : request.images()) {
+            builder
+                    .append("- id=").append(image.id())
+                    .append("，画布引用=");
+            if (image.index() != null) {
+                builder.append("图").append(image.index()).append("/图片").append(image.index());
+            } else {
+                builder.append("未知");
+            }
+            builder
+                    .append("，名称=").append(image.name() == null || image.name().isBlank() ? "未命名图片" : image.name())
+                    .append("，尺寸=");
+            if (image.width() != null && image.height() != null) {
+                builder.append(image.width()).append("x").append(image.height());
+            } else {
+                builder.append("未知");
+            }
+            builder.append("\n");
+        }
+
+        return builder.toString();
+    }
+
+    private AiProxyDtos.ImageReferenceAnalysisResponse parseImageReferenceAnalysis(
+            String text,
+            AiProxyDtos.ImageReferenceAnalysisRequest request
+    ) throws IOException {
+        JsonNode data = objectMapper.readTree(extractJsonObjectText(text));
+        Set<String> candidateIds = new LinkedHashSet<>();
+        for (AiProxyDtos.ImageReferenceCandidate image : request.images()) {
+            candidateIds.add(image.id());
+        }
+
+        String baseImageId = firstNonBlank(
+                readJsonTextField(data, "baseImageId"),
+                readJsonTextField(data, "mainImageId"),
+                readJsonTextField(data, "targetImageId")
+        );
+        if (!candidateIds.contains(baseImageId)) {
+            throw new ApiException(
+                    HttpStatus.BAD_GATEWAY,
+                    "IMAGE_REFERENCE_ANALYZER_INVALID_BASE",
+                    "图片角色分析返回了无效主图"
+            );
+        }
+
+        List<String> referenceImageIds = readJsonTextArrayField(data, "referenceImageIds");
+        if (referenceImageIds.isEmpty()) {
+            referenceImageIds = readJsonTextArrayField(data, "referenceIds");
+        }
+        if (referenceImageIds.isEmpty()) {
+            referenceImageIds = readJsonTextArrayField(data, "sourceImageIds");
+        }
+
+        List<String> validatedReferenceImageIds = new ArrayList<>();
+        for (String referenceImageId : referenceImageIds) {
+            if (candidateIds.contains(referenceImageId)
+                    && !referenceImageId.equals(baseImageId)
+                    && !validatedReferenceImageIds.contains(referenceImageId)) {
+                validatedReferenceImageIds.add(referenceImageId);
+            }
+        }
+
+        if (validatedReferenceImageIds.isEmpty()) {
+            for (String candidateId : candidateIds) {
+                if (!candidateId.equals(baseImageId)) {
+                    validatedReferenceImageIds.add(candidateId);
+                }
+            }
+        }
+
+        String reason = readJsonTextField(data, "reason");
+        return new AiProxyDtos.ImageReferenceAnalysisResponse(
+                baseImageId,
+                List.copyOf(validatedReferenceImageIds),
+                reason.length() > 120 ? reason.substring(0, 120) : reason,
+                "ai"
+        );
+    }
+
+    private String extractJsonObjectText(String text) {
+        String normalizedText = text == null ? "" : text.trim()
+                .replaceFirst("(?i)^```json\\s*", "")
+                .replaceFirst("(?i)^```\\s*", "")
+                .replaceFirst("\\s*```$", "")
+                .trim();
+        int start = normalizedText.indexOf('{');
+        int end = normalizedText.lastIndexOf('}');
+        if (start < 0 || end < start) {
+            throw new ApiException(
+                    HttpStatus.BAD_GATEWAY,
+                    "IMAGE_REFERENCE_ANALYZER_INVALID_JSON",
+                    "图片角色分析没有返回 JSON"
+            );
+        }
+        return normalizedText.substring(start, end + 1);
+    }
+
+    private String readJsonTextField(JsonNode data, String fieldName) {
+        JsonNode value = data.get(fieldName);
+        return value != null && value.isTextual() ? value.asText().trim() : "";
+    }
+
+    private List<String> readJsonTextArrayField(JsonNode data, String fieldName) {
+        JsonNode value = data.get(fieldName);
+        if (value == null || !value.isArray()) {
+            return List.of();
+        }
+
+        List<String> values = new ArrayList<>();
+        for (JsonNode item : value) {
+            if (item.isTextual() && !item.asText().isBlank()) {
+                values.add(item.asText().trim());
+            }
+        }
+        return values;
     }
 
     private HttpRequest buildImageRequest(

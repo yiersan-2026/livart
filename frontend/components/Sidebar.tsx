@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef } from 'react';
 import type { ChatMessage, CanvasItem, ImageAspectRatio } from '../types';
 import { Loader2, Hammer, Send } from 'lucide-react';
 import { IMAGE_ASPECT_RATIO_OPTIONS } from '../services/imageSizing';
-import { getThumbnailImageSrc } from '../services/imageSources';
+import { getImagePreviewFitStyle, getThumbnailImageSrc } from '../services/imageSources';
 import {
   getImageReferenceDisplayText,
   insertImageMention,
@@ -31,6 +31,10 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
 
   const completedImageItems = useMemo(
     () => imageItems.filter(item => item.type === 'image' && item.status === 'completed' && !!item.content),
+    [imageItems]
+  );
+  const imageItemsById = useMemo(
+    () => new Map(imageItems.map(item => [item.id, item])),
     [imageItems]
   );
 
@@ -104,6 +108,8 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
         );
       }
 
+      const previewStyle = getImagePreviewFitStyle(token.item, 42, 20);
+
       return (
         <button
           key={`mention-${token.item.id}-${index}`}
@@ -116,15 +122,54 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
               : 'bg-indigo-50 text-indigo-700 ring-1 ring-indigo-100 hover:bg-indigo-100'
           }`}
         >
-          <span className={`h-5 w-5 shrink-0 overflow-hidden rounded-md ${
+          <span
+            className={`shrink-0 overflow-hidden rounded-md ${
             isUserMessage ? 'bg-white/20' : 'bg-white'
-          }`}>
+          }`}
+            style={previewStyle}
+          >
             <img src={getThumbnailImageSrc(token.item)} className="h-full w-full object-cover" />
           </span>
           <span className="truncate">{getImageReferenceDisplayText(token.item)}</span>
         </button>
       );
     });
+  };
+
+  const renderMessageImages = (message: ChatMessage) => {
+    const imageIds = message.imageIds || [];
+    if (imageIds.length === 0) return null;
+
+    const attachedImages = imageIds
+      .map(imageId => imageItemsById.get(imageId))
+      .filter((item): item is CanvasItem => !!item && item.type === 'image' && item.status === 'completed' && !!item.content);
+
+    if (attachedImages.length === 0) return null;
+
+    return (
+      <div className="mt-3 grid gap-2">
+        {attachedImages.map((item) => {
+          const previewStyle = getImagePreviewFitStyle(item, 230, 180);
+          return (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => onNavigateToImage(item)}
+              title={`定位到 @${item.id}`}
+              className="group overflow-hidden rounded-2xl bg-white p-2 text-left shadow-sm ring-1 ring-black/5 transition-all hover:-translate-y-0.5 hover:shadow-md hover:ring-indigo-200 active:scale-[0.99]"
+            >
+              <div className="overflow-hidden rounded-xl bg-gray-100" style={previewStyle}>
+                <img src={getThumbnailImageSrc(item)} className="h-full w-full object-cover transition-transform group-hover:scale-[1.02]" />
+              </div>
+              <div className="mt-2 flex items-center justify-between gap-2 text-[11px] font-black text-indigo-700">
+                <span className="truncate">@{item.id}</span>
+                <span className="shrink-0 rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] text-indigo-500">查看</span>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    );
   };
 
   return (
@@ -148,6 +193,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
                 : 'bg-gray-100 text-gray-800'
             }`}>
               {renderMessageText(message.text, message.role)}
+              {renderMessageImages(message)}
             </div>
             <span className="text-[10px] text-gray-400 mt-1 px-1 font-medium">
               {new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}

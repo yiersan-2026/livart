@@ -20,7 +20,7 @@ livart 是一款基于 **无限画布** 的 AI 图像创作工具。它把文生
 
 ## 本版本新增能力
 
-- **Docker 一键部署**：提供多阶段 `Dockerfile` 和 `docker-compose.example.yml`，可同时启动 livart、PostgreSQL、RabbitMQ 和 MinIO。
+- **Docker 一键部署**：提供多阶段 `Dockerfile` 和默认 `docker-compose.yml`，可同时启动 livart、PostgreSQL、RabbitMQ 和 MinIO。
 - **独立生图接口配置**：文生图、图生图和提示词优化统一由后端代理，默认支持 OpenAI Images API 兼容格式，API Key 按用户隔离保存。
 - **图生图与局部重绘**：选中图片后可直接输入指令重绘，也可进入“局部”模式涂抹区域并通过 `mask` 精确修改局部。
 - **非破坏式图片重绘**：直接重绘或局部重绘会在原图右侧创建新图片节点，并用连线保留“原图 → 新图”的派生关系。
@@ -103,19 +103,18 @@ docs/      项目说明和真实截图
 
 ### 环境要求
 
-- Node.js 18+
-- Java 17+
-- PostgreSQL
-- MinIO
-- RabbitMQ
-- 支持 OpenAI Images API 兼容接口或 Gemini 图像接口的网络环境
+- 普通使用者：只需要安装 Docker Desktop
+- 开发者本地调试：Node.js 18+、Java 17+、PostgreSQL、MinIO、RabbitMQ
+- 生图能力：支持 OpenAI Images API 兼容接口或 Gemini 图像接口的网络环境
 
 ### Docker 一键部署
 
-项目根目录提供了多阶段 `Dockerfile` 和自包含的 `docker-compose.example.yml`：Compose 会同时启动 livart、PostgreSQL、RabbitMQ 和 MinIO。浏览器访问同一个 Spring Boot 服务即可，`/api/images/generations`、`/api/images/edits` 和 `/api/image-jobs/*` 都由后端代理；提示词优化已经内置在后端生图链路中，生图任务状态通过同域 `/ws/image-jobs` 推送。
+项目根目录提供了多阶段 `Dockerfile` 和自包含的 `docker-compose.yml`：Compose 会同时启动 livart、PostgreSQL、RabbitMQ 和 MinIO。浏览器访问同一个 Spring Boot 服务即可，`/api/images/generations`、`/api/images/edits` 和 `/api/image-jobs/*` 都由后端代理；提示词优化已经内置在后端生图链路中，生图任务状态通过同域 `/ws/image-jobs` 推送。
+
+先打开 Docker Desktop，等它显示 Docker 正在运行。没有编程经验也可以直接执行这一条命令：
 
 ```bash
-docker compose -f docker-compose.example.yml up -d --build
+docker compose up -d --build
 ```
 
 启动后访问：
@@ -123,23 +122,19 @@ docker compose -f docker-compose.example.yml up -d --build
 - livart：`http://localhost:8080`
 - MinIO 控制台：`http://localhost:9001`，默认只绑定本机 `127.0.0.1`
 
+进入 livart 后先注册一个账号；第一次生图时，在页面配置 AI 中转站 Base URL、API Key、生图模型和对话模型即可。后续项目、图片和配置都会自动保存。
+
 如果要改端口或用于公网部署，建议先创建 `.env` 覆盖默认口令：
 
 ```bash
-cat > .env <<'EOF'
-LIVART_PORT=8080
-POSTGRES_PASSWORD=replace-with-strong-db-password
-RABBITMQ_DEFAULT_USER=livart
-RABBITMQ_DEFAULT_PASS=replace-with-strong-rabbitmq-password
-MINIO_ROOT_USER=livartminio
-MINIO_ROOT_PASSWORD=replace-with-strong-minio-password
-JWT_SECRET=replace-with-at-least-32-chars-secret
-EOF
-
-docker compose -f docker-compose.example.yml --env-file .env up -d --build
+cp .env.example .env
+# 按需修改 .env 后启动
+docker compose up -d --build
 ```
 
 不要把包含数据库密码、MinIO 密钥、RabbitMQ 密码或 AI API Key 的 `.env` 文件提交到仓库。AI 中转站 Base URL、API Key、生图模型和对话模型仍然在用户首次登录后通过页面填写，并按用户保存到数据库。
+
+应用日志默认写入容器内 `/tmp/livart-logs/livart-backend.log`，按天滚动并默认只保留最近 1 天；Docker stdout 日志也限制为单个 10MB 文件，避免长期运行撑满磁盘。如需调整，可在 `.env` 中设置 `LOG_PATH`、`LOG_MAX_HISTORY`、`LOG_TOTAL_SIZE_CAP`。
 
 ### 启动后端
 

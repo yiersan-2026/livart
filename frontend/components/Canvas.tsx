@@ -20,6 +20,7 @@ import { getCanvasImageSrc } from '../services/imageSources';
 import {
   buildImageReferenceRoleContext,
   buildReferencedImageEditPrompt,
+  resolveEditReferencesWithAi,
   resolveMentionedImageReferences
 } from '../services/imageReferences';
 import { ensureCanvasImageAsset, getCanvasItemAssetId } from '../services/canvasPersistence';
@@ -747,17 +748,24 @@ const Canvas: React.FC<CanvasProps> = ({
       const promptToOptimize = useLocalMask
         ? `${prompt}。只修改用户用蒙版涂抹的局部区域，未被蒙版覆盖的区域必须保持原图不变。`
         : prompt;
-      const referenceImages = resolveMentionedImageReferences(prompt, items)
-        .filter(item => item.id !== targetItem.id);
+      const editReferences = useLocalMask
+        ? [
+          targetItem,
+          ...resolveMentionedImageReferences(prompt, items).filter(item => item.id !== targetItem.id)
+        ]
+        : await resolveEditReferencesWithAi(prompt, targetItem, items);
+      const editBaseItem = editReferences[0] || targetItem;
+      const referenceImages = editReferences.slice(1)
+        .filter(item => item.id !== editBaseItem.id);
       const generationPrompt = referenceImages.length > 0
-        ? buildReferencedImageEditPrompt(promptToOptimize, targetItem, referenceImages, { hasLocalMask: useLocalMask })
+        ? buildReferencedImageEditPrompt(promptToOptimize, editBaseItem, referenceImages, { hasLocalMask: useLocalMask, allItems: items })
         : promptToOptimize;
       const effectiveAspectRatio = inlineEditAspectRatio === 'auto'
-        ? inferAspectRatioFromDimensions(targetItem.width, targetItem.height)
+        ? inferAspectRatioFromDimensions(editBaseItem.width, editBaseItem.height)
         : inlineEditAspectRatio;
 
       const persistentEditImages = await Promise.all(
-        [targetItem, ...referenceImages].map(item => ensureCanvasImageAsset(item))
+        [editBaseItem, ...referenceImages].map(item => ensureCanvasImageAsset(item))
       );
       const persistentTargetItem = persistentEditImages[0];
       const persistentReferenceImages = persistentEditImages.slice(1);
@@ -774,7 +782,7 @@ const Canvas: React.FC<CanvasProps> = ({
         promptToOptimize,
         persistentTargetItem,
         persistentReferenceImages,
-        { hasLocalMask: useLocalMask }
+        { hasLocalMask: useLocalMask, allItems: items }
       );
       const editOptions = {
         imageAssetId: getCanvasItemAssetId(persistentTargetItem),
@@ -790,28 +798,28 @@ const Canvas: React.FC<CanvasProps> = ({
         }
       }
 
-      const siblingCount = items.filter(item => item.parentId === targetItem.id).length;
+      const siblingCount = items.filter(item => item.parentId === editBaseItem.id).length;
       const nextZIndex = Math.max(0, ...items.map(item => item.zIndex || 0)) + 1;
       const newId = Math.random().toString(36).substr(2, 9);
-      const resultMaxLongSide = Math.max(targetItem.width, targetItem.height);
+      const resultMaxLongSide = Math.max(editBaseItem.width, editBaseItem.height);
       const resultFrame = getAspectRatioFrame(
         effectiveAspectRatio,
-        targetItem.width,
-        targetItem.height,
+        editBaseItem.width,
+        editBaseItem.height,
         resultMaxLongSide
       );
       const resultItem: CanvasItem = {
         id: newId,
         type: 'image',
         content: '',
-        x: targetItem.x + targetItem.width + 120 + siblingCount * 36,
-        y: targetItem.y + siblingCount * 36,
+        x: editBaseItem.x + editBaseItem.width + 120 + siblingCount * 36,
+        y: editBaseItem.y + siblingCount * 36,
         width: resultFrame.width,
         height: resultFrame.height,
         status: 'loading',
         label: 'AI 重绘中...',
         zIndex: nextZIndex,
-        parentId: targetItem.id,
+        parentId: editBaseItem.id,
         prompt: generationPrompt,
         layers: []
       };

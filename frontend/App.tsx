@@ -1,6 +1,6 @@
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Trash2, Hammer, PanelRightClose, PanelRight, Settings, FolderPlus, LogOut, UserRound, Loader2, X } from 'lucide-react';
+import { Hammer, PanelRightClose, PanelRight, Settings, FolderPlus, LogOut, UserRound, Loader2, X, Download } from 'lucide-react';
 import type { CanvasItem, ChatMessage, ImageAspectRatio } from './types';
 import AuthPanel from './components/AuthPanel';
 import Canvas from './components/Canvas';
@@ -41,10 +41,11 @@ import {
   logout
 } from './services/auth';
 import { loadApiConfig, resetApiConfigSession } from './services/config';
+import { exportCanvasProjectImage } from './services/canvasExport';
 import {
   buildImageReferenceRoleContext,
   buildReferencedImageEditPrompt,
-  resolveEditReferences
+  resolveEditReferencesWithAi
 } from './services/imageReferences';
 
 const MIN_ZOOM = 0.1;
@@ -218,12 +219,15 @@ function App() {
   const [newProjectTitle, setNewProjectTitle] = useState('');
   const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [createProjectError, setCreateProjectError] = useState('');
+  const [isExportingProjectImage, setIsExportingProjectImage] = useState(false);
+  const [exportProjectImageError, setExportProjectImageError] = useState('');
   const saveTimerRef = useRef<number | null>(null);
   const pendingSaveRef = useRef<PendingCanvasSave | null>(null);
   const isSavingCanvasRef = useRef(false);
   const saveRevisionRef = useRef(Date.now());
   const resumedImageJobIdsRef = useRef<Set<string>>(new Set());
   const hasPendingImageJob = items.some(item => item.type === 'image' && item.status === 'loading' && !!item.imageJobId);
+  const hasDownloadableImage = items.some(item => item.type === 'image' && item.status === 'completed' && !!item.content);
 
   const resetWorkspace = () => {
     setItems([]);
@@ -662,8 +666,14 @@ function App() {
     setSelectedIds([newId]);
   };
 
-  const addMessage = (text: string, role: 'user' | 'assistant') => {
-    setMessages(prev => [...prev, { id: Math.random().toString(36).substr(2, 9), role, text, timestamp: Date.now() }]);
+  const addMessage = (text: string, role: 'user' | 'assistant', options: Pick<ChatMessage, 'imageIds'> = {}) => {
+    setMessages(prev => [...prev, {
+      id: Math.random().toString(36).substr(2, 9),
+      role,
+      text,
+      timestamp: Date.now(),
+      ...options
+    }]);
   };
 
   const handleUpdateItem = (id: string, updates: Partial<CanvasItem>) => {
@@ -682,7 +692,7 @@ function App() {
     addMessage(text, 'user');
     setIsThinking(true);
 
-    const editReferences = resolveEditReferences(text, contextImage, items);
+    const editReferences = await resolveEditReferencesWithAi(text, contextImage, items);
     const editBaseImage = editReferences[0] || null;
     const editReferenceImages = editReferences.slice(1);
     const effectiveAspectRatio = editBaseImage && aspectRatio === 'auto'
@@ -734,9 +744,9 @@ function App() {
         const persistedById = new Map(persistedEditImages.map(item => [item.id, item]));
         setItems(prev => prev.map(item => persistedById.get(item.id) || item));
 
-        const editPrompt = buildReferencedImageEditPrompt(text, persistedBaseImage, persistedReferenceImages);
+        const editPrompt = buildReferencedImageEditPrompt(text, persistedBaseImage, persistedReferenceImages, { allItems: items });
         const referenceContents = persistedReferenceImages.map(item => item.content);
-        const imageContext = buildImageReferenceRoleContext(text, persistedBaseImage, persistedReferenceImages);
+        const imageContext = buildImageReferenceRoleContext(text, persistedBaseImage, persistedReferenceImages, { allItems: items });
         const editOptions = {
           imageAssetId: getCanvasItemAssetId(persistedBaseImage),
           referenceAssetIds: persistedReferenceImages.map(getCanvasItemAssetId).filter(Boolean),
@@ -764,7 +774,6 @@ function App() {
             editOptions
           );
         }
-        addMessage(persistedReferenceImages.length > 0 ? '已根据多张引用图完成编辑。' : '已根据参考图完成编辑。', 'assistant');
       } else {
         // 直接文本生成图片
         if (canUseImageJobs()) {
@@ -774,7 +783,6 @@ function App() {
         } else {
           resultImg = await generateImage(text, 'none', aspectRatio);
         }
-        addMessage('已为你生成新的画面。', 'assistant');
       }
 
       const finalFrame = editBaseImage
@@ -798,6 +806,11 @@ function App() {
           label: text.substring(0, 10) + (text.length > 10 ? '...' : '')
         };
       }));
+
+      const completionText = editBaseImage
+        ? `${editReferenceImages.length > 0 ? '已根据多张引用图完成编辑' : '已根据参考图完成编辑'}：@${newId}`
+        : `已为你生成新的画面：@${newId}`;
+      addMessage(completionText, 'assistant', { imageIds: [newId] });
       
       setContextImage(null);
     } catch (error) {
@@ -850,6 +863,24 @@ function App() {
     setApiConfigReady(true);
     setIsApiConfigLoaded(true);
     setShowConfigModal(false);
+  };
+
+  const handleExportProjectImage = async () => {
+    if (isExportingProjectImage) return;
+
+    setExportProjectImageError('');
+    setIsExportingProjectImage(true);
+
+    try {
+      await exportCanvasProjectImage(items, selectedIds, currentProjectTitle);
+    } catch (error) {
+      console.error('导出图片失败', error);
+      const message = error instanceof Error ? error.message : '导出图片失败，请稍后再试';
+      setExportProjectImageError(message);
+      window.setTimeout(() => setExportProjectImageError(''), 4200);
+    } finally {
+      setIsExportingProjectImage(false);
+    }
   };
 
   if (!isAuthReady) {
@@ -935,13 +966,23 @@ function App() {
               {showSidebar ? <PanelRightClose size={18} /> : <PanelRight size={18} />}
             </button>
             <div className="h-4 w-[1px] bg-gray-100 mx-1" />
-            <button onClick={() => { if(confirm('确定清空画布吗？')) { setItems([]); setMessages([]); setSelectedIds([]); setContextImage(null); } }} className="p-2 text-gray-300 hover:text-red-500 rounded-xl transition-all"><Trash2 size={18} /></button>
-            <div className="h-4 w-[1px] bg-gray-100 mx-1" />
-            <button className="px-5 py-2 text-xs font-black bg-black text-white rounded-xl shadow-lg hover:opacity-90 active:scale-95 transition-all uppercase tracking-widest">
-              交付作品
+            <button
+              onClick={handleExportProjectImage}
+              disabled={isExportingProjectImage || !hasDownloadableImage}
+              className="flex items-center gap-2 px-5 py-2 text-xs font-black bg-black text-white rounded-xl shadow-lg hover:opacity-90 active:scale-95 transition-all uppercase tracking-widest disabled:opacity-30"
+              title="打包下载选中的成品图；未选中时打包下载全部成品图"
+            >
+              {isExportingProjectImage ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+              {isExportingProjectImage ? '打包中' : '下载'}
             </button>
           </div>
         </header>
+
+        {exportProjectImageError && (
+          <div className="absolute right-6 top-20 z-[5000000] max-w-sm rounded-2xl border border-red-100 bg-white px-4 py-3 text-sm font-bold text-red-500 shadow-2xl">
+            {exportProjectImageError}
+          </div>
+        )}
 
         <Canvas 
           items={items} 
