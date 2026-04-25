@@ -23,27 +23,38 @@ const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose, onSaved, req
   const [config, setConfig] = useState<ApiConfig>(DEFAULT_API_CONFIG);
   const [error, setError] = useState('');
   const [showApiKey, setShowApiKey] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
       setConfig(getApiConfig());
       setError('');
       setShowApiKey(false);
+      setIsSaving(false);
     }
   }, [isOpen]);
 
   const previewUrls = useMemo(() => buildImageApiUrls(config.baseUrl), [config.baseUrl]);
   const chatResponsesUrl = useMemo(() => joinUrl(config.baseUrl, 'responses'), [config.baseUrl]);
 
-  const handleSave = () => {
+  const handleSave = async () => {
     const normalizedConfig = normalizeApiConfig(config);
     if (!normalizedConfig.baseUrl || !normalizedConfig.apiKey || !normalizedConfig.model || !normalizedConfig.chatModel) {
       setError('请填写中转站 Base URL、API Key、生图模型和对话模型');
       return;
     }
-    saveApiConfig(normalizedConfig);
-    onSaved?.();
-    onClose();
+
+    setError('');
+    setIsSaving(true);
+    try {
+      await saveApiConfig(normalizedConfig);
+      onSaved?.();
+      onClose();
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : '保存配置失败，请稍后重试');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   if (!isOpen) return null;
@@ -55,7 +66,7 @@ const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose, onSaved, req
           <div>
             <h2 className="font-bold text-lg">中转站配置</h2>
             {required && (
-              <p className="mt-1 text-xs font-bold text-gray-400">首次启动需要先完成配置，系统会自动拼接调用地址。</p>
+              <p className="mt-1 text-xs font-bold text-gray-400">首次登录后需要先完成配置，系统会自动拼接调用地址。</p>
             )}
           </div>
           {!required && (
@@ -144,6 +155,7 @@ const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose, onSaved, req
           {!required && (
             <button
               onClick={onClose}
+              disabled={isSaving}
               className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-xl transition-colors"
             >
               取消
@@ -151,10 +163,11 @@ const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose, onSaved, req
           )}
           <button
             onClick={handleSave}
-            className="px-4 py-2 text-sm bg-black text-white rounded-xl hover:opacity-90 transition-all flex items-center gap-2"
+            disabled={isSaving}
+            className="px-4 py-2 text-sm bg-black text-white rounded-xl hover:opacity-90 transition-all flex items-center gap-2 disabled:opacity-40"
           >
             <Save size={14} />
-            保存配置
+            {isSaving ? '保存中...' : '保存配置'}
           </button>
         </div>
       </div>

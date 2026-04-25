@@ -415,6 +415,10 @@ export default defineConfig(({ mode }) => {
             target: backendApiBaseUrl,
             changeOrigin: true
           },
+          '/api/user': {
+            target: backendApiBaseUrl,
+            changeOrigin: true
+          },
           '/api/health': {
             target: backendApiBaseUrl,
             changeOrigin: true

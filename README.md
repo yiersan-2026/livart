@@ -113,7 +113,7 @@ npm run dev
 
 ### API 配置
 
-首次启动会自动弹出中转站配置，之后也可以点击界面左上角的设置图标修改。只需要填入：
+首次登录后会自动弹出中转站配置，之后也可以点击界面左上角的设置图标修改。配置会保存到后端数据库，并按登录用户隔离，不同用户可以使用不同的中转站和模型。只需要填入：
 
 - 中转站 Base URL，例如 `https://example.com/v1/`
 - API Key
@@ -126,7 +126,7 @@ npm run dev
 - 图生图：`{Base URL}/images/edits`
 - 对话：`{Base URL}/responses`，如果接口不可用会直接报错
 
-也可以在 `frontend/.env.local` 中预填：
+也可以在 `frontend/.env.local` 中预填默认值，用户保存后仍以数据库中的个人配置为准：
 
 ```bash
 IMAGE_API_BASE_URL=https://example.com/v1/
@@ -135,7 +135,7 @@ IMAGE_API_KEY=your-api-key
 PROMPT_OPTIMIZER_MODEL=gpt-5.5
 ```
 
-不要把真实 `frontend/.env.local`、`backend/.env` 或任何 API Key 提交到仓库。
+不要把真实 `frontend/.env.local`、`backend/.env` 或任何 API Key 提交到仓库。用户在界面里保存的 API Key 会写入后端数据库的个人配置表。
 
 ## 使用指南
 

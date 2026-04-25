@@ -24,7 +24,7 @@ import {
   loadCurrentUser,
   logout
 } from './services/auth';
-import { hasStoredApiConfig } from './services/config';
+import { loadApiConfig, resetApiConfigSession } from './services/config';
 
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 5;
@@ -55,8 +55,9 @@ function App() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [showSidebar, setShowSidebar] = useState(true);
   const [contextImage, setContextImage] = useState<CanvasItem | null>(null);
-  const [apiConfigReady, setApiConfigReady] = useState(() => hasStoredApiConfig());
-  const [showConfigModal, setShowConfigModal] = useState(() => !hasStoredApiConfig());
+  const [apiConfigReady, setApiConfigReady] = useState(false);
+  const [isApiConfigLoaded, setIsApiConfigLoaded] = useState(false);
+  const [showConfigModal, setShowConfigModal] = useState(false);
   const [authSession, setAuthSession] = useState<AuthSession | null>(() => getStoredAuthSession());
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [hasLoadedCanvas, setHasLoadedCanvas] = useState(false);
@@ -172,6 +173,47 @@ function App() {
       isMounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!isAuthReady) return;
+
+    let isMounted = true;
+
+    if (!authSession) {
+      resetApiConfigSession();
+      setApiConfigReady(false);
+      setIsApiConfigLoaded(false);
+      setShowConfigModal(false);
+      return () => {
+        isMounted = false;
+      };
+    }
+
+    setIsApiConfigLoaded(false);
+    loadApiConfig()
+      .then((config) => {
+        if (!isMounted) return;
+        const hasConfig = !!config;
+        setApiConfigReady(hasConfig);
+        setShowConfigModal(!hasConfig);
+      })
+      .catch((error) => {
+        console.warn('[api-config] load failed', error);
+        if (isMounted) {
+          setApiConfigReady(false);
+          setShowConfigModal(true);
+        }
+      })
+      .finally(() => {
+        if (isMounted) {
+          setIsApiConfigLoaded(true);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isAuthReady, authSession?.token]);
 
   useEffect(() => {
     if (!isAuthReady) return;
@@ -479,11 +521,16 @@ function App() {
     await logout();
     localStorage.removeItem(LAST_PROJECT_STORAGE_KEY);
     setAuthSession(null);
+    resetApiConfigSession();
+    setApiConfigReady(false);
+    setIsApiConfigLoaded(false);
+    setShowConfigModal(false);
     resetWorkspace();
   };
 
   const handleConfigSaved = () => {
     setApiConfigReady(true);
+    setIsApiConfigLoaded(true);
     setShowConfigModal(false);
   };
 
@@ -496,21 +543,7 @@ function App() {
   }
 
   if (!authSession) {
-    return (
-      <>
-        <AuthPanel onAuthenticated={handleAuthenticated} />
-        <ConfigModal
-          isOpen={showConfigModal || !apiConfigReady}
-          required={!apiConfigReady}
-          onSaved={handleConfigSaved}
-          onClose={() => {
-            if (apiConfigReady) {
-              setShowConfigModal(false);
-            }
-          }}
-        />
-      </>
-    );
+    return <AuthPanel onAuthenticated={handleAuthenticated} />;
   }
 
   return (
@@ -632,7 +665,7 @@ function App() {
       </div>
 
       <ConfigModal
-        isOpen={showConfigModal || !apiConfigReady}
+        isOpen={isApiConfigLoaded && (showConfigModal || !apiConfigReady)}
         required={!apiConfigReady}
         onSaved={handleConfigSaved}
         onClose={() => {

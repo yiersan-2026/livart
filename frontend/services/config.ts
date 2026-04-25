@@ -1,4 +1,4 @@
-const CONFIG_KEY = 'livart_api_config';
+import { authHeaders } from './auth';
 
 export const joinUrl = (baseUrl: string, path: string) => {
   if (!baseUrl) return '';
@@ -28,6 +28,15 @@ export interface ApiConfig {
   chatModel: string;
 }
 
+interface ApiResponse<T> {
+  success: boolean;
+  data?: T | null;
+  error?: {
+    message: string;
+    code: string;
+  };
+}
+
 export const buildImageApiUrls = (baseUrl: string) => {
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
   return {
@@ -45,6 +54,9 @@ export const DEFAULT_API_CONFIG: ApiConfig = {
   model: process.env.IMAGE_API_MODEL || 'gpt-image-2',
   chatModel: process.env.PROMPT_OPTIMIZER_MODEL || process.env.CHAT_API_MODEL || 'gpt-5.5'
 };
+
+let currentApiConfig = DEFAULT_API_CONFIG;
+let hasLoadedUserApiConfig = false;
 
 export const normalizeApiConfig = (config: Partial<ApiConfig>): ApiConfig => {
   const baseUrl = normalizeBaseUrl(config.baseUrl || DEFAULT_API_CONFIG.baseUrl);
@@ -65,34 +77,67 @@ export const normalizeApiConfig = (config: Partial<ApiConfig>): ApiConfig => {
   };
 };
 
-export const getApiConfig = (): ApiConfig => {
-  const stored = localStorage.getItem(CONFIG_KEY);
-  if (stored) {
-    try {
-      return normalizeApiConfig(JSON.parse(stored));
-    } catch {
-      localStorage.removeItem(CONFIG_KEY);
-    }
+const unwrapApiResponse = async <T>(response: Response): Promise<T | null> => {
+  const payload = await response.json().catch(() => null) as ApiResponse<T> | null;
+  if (!response.ok || !payload?.success) {
+    throw new Error(payload?.error?.message || `用户配置请求失败：${response.status}`);
   }
-  return normalizeApiConfig(DEFAULT_API_CONFIG);
+  return payload.data ?? null;
 };
 
-export const saveApiConfig = (config: ApiConfig) => {
-  localStorage.setItem(CONFIG_KEY, JSON.stringify(normalizeApiConfig(config)));
+export const getApiConfig = (): ApiConfig => currentApiConfig;
+
+export const loadApiConfig = async (): Promise<ApiConfig | null> => {
+  const response = await fetch('/api/user/config', {
+    headers: {
+      Accept: 'application/json',
+      ...authHeaders()
+    }
+  });
+  const config = await unwrapApiResponse<ApiConfig>(response);
+  if (!config) {
+    currentApiConfig = normalizeApiConfig(DEFAULT_API_CONFIG);
+    hasLoadedUserApiConfig = false;
+    return null;
+  }
+  currentApiConfig = normalizeApiConfig(config);
+  hasLoadedUserApiConfig = true;
+  return currentApiConfig;
+};
+
+export const saveApiConfig = async (config: ApiConfig): Promise<ApiConfig> => {
+  const normalizedConfig = normalizeApiConfig(config);
+  const response = await fetch('/api/user/config', {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      ...authHeaders()
+    },
+    body: JSON.stringify({
+      baseUrl: normalizedConfig.baseUrl,
+      apiKey: normalizedConfig.apiKey,
+      model: normalizedConfig.model,
+      chatModel: normalizedConfig.chatModel
+    })
+  });
+  const savedConfig = await unwrapApiResponse<ApiConfig>(response);
+  currentApiConfig = normalizeApiConfig(savedConfig || normalizedConfig);
+  hasLoadedUserApiConfig = true;
+  return currentApiConfig;
 };
 
 export const hasApiConfig = (): boolean => {
-  const config = getApiConfig();
-  return !!(config.baseUrl && config.apiKey && config.model && config.chatModel);
+  return !!(
+    hasLoadedUserApiConfig &&
+    currentApiConfig.baseUrl &&
+    currentApiConfig.apiKey &&
+    currentApiConfig.model &&
+    currentApiConfig.chatModel
+  );
 };
 
-export const hasStoredApiConfig = (): boolean => {
-  const stored = localStorage.getItem(CONFIG_KEY);
-  if (!stored) return false;
-  try {
-    const config = normalizeApiConfig(JSON.parse(stored));
-    return !!(config.baseUrl && config.apiKey && config.model && config.chatModel);
-  } catch {
-    return false;
-  }
+export const resetApiConfigSession = () => {
+  currentApiConfig = normalizeApiConfig(DEFAULT_API_CONFIG);
+  hasLoadedUserApiConfig = false;
 };
