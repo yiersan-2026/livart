@@ -7,7 +7,14 @@ import Canvas from './components/Canvas';
 import Sidebar from './components/Sidebar';
 import Toolbar from './components/Toolbar';
 import ConfigModal from './components/ConfigModal';
-import { generateImage, generateWorkflowImage } from './services/gemini';
+import {
+  canUseImageJobs,
+  generateImage,
+  generateWorkflowImage,
+  submitImageGenerationJob,
+  submitWorkflowImageJob,
+  waitForImageJob
+} from './services/gemini';
 import {
   DEFAULT_GENERATED_IMAGE_LONG_SIDE,
   centerFrameOnRect,
@@ -75,6 +82,7 @@ function App() {
   const pendingSaveRef = useRef<PendingCanvasSave | null>(null);
   const isSavingCanvasRef = useRef(false);
   const saveRevisionRef = useRef(Date.now());
+  const resumedImageJobIdsRef = useRef<Set<string>>(new Set());
 
   const resetWorkspace = () => {
     setItems([]);
@@ -133,6 +141,7 @@ function App() {
     setPan(state.viewport.pan);
     setSelectedIds([]);
     setContextImage(null);
+    resumedImageJobIdsRef.current = new Set();
   };
 
   const loadProjectById = async (projectId: string) => {
@@ -301,7 +310,8 @@ function App() {
       }
     };
 
-    saveTimerRef.current = window.setTimeout(flushQueuedCanvasSave, 800);
+    const hasPendingImageJob = items.some(item => item.type === 'image' && item.status === 'loading' && !!item.imageJobId);
+    saveTimerRef.current = window.setTimeout(flushQueuedCanvasSave, hasPendingImageJob ? 50 : 800);
 
     return () => {
       if (saveTimerRef.current) {
@@ -309,6 +319,52 @@ function App() {
       }
     };
   }, [items, messages, zoom, pan, hasLoadedCanvas, currentProjectId, currentProjectTitle, authSession]);
+
+  useEffect(() => {
+    if (!hasLoadedCanvas || !currentProjectId) return;
+
+    const pendingJobItems = items.filter(item => (
+      item.type === 'image' &&
+      item.status === 'loading' &&
+      !!item.imageJobId
+    ));
+
+    pendingJobItems.forEach((item) => {
+      const jobId = item.imageJobId;
+      if (!jobId || resumedImageJobIdsRef.current.has(jobId)) return;
+      resumedImageJobIdsRef.current.add(jobId);
+
+      waitForImageJob(jobId)
+        .then(async (resultImg) => {
+          const finalFrame = await getImageFrameFromSource(
+            resultImg,
+            item.width,
+            item.height,
+            Math.max(item.width, item.height)
+          );
+
+          setItems(prev => prev.map(candidate => {
+            if (candidate.id !== item.id) return candidate;
+            const centeredFrame = centerFrameOnRect(candidate, finalFrame);
+            return {
+              ...candidate,
+              ...centeredFrame,
+              content: resultImg,
+              status: 'completed',
+              imageJobId: undefined
+            };
+          }));
+        })
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : '图片任务恢复失败';
+          setItems(prev => prev.map(candidate => (
+            candidate.id === item.id
+              ? { ...candidate, status: 'error', label: message, imageJobId: undefined }
+              : candidate
+          )));
+        });
+    });
+  }, [hasLoadedCanvas, currentProjectId]);
 
   const canvasSyncText = canvasSyncStatus === 'loading'
     ? '永久画布读取中'
@@ -509,11 +565,23 @@ function App() {
       let resultImg: string;
       if (contextImage) {
         // 执行图像编辑
-        resultImg = await generateWorkflowImage(text, contextImage.content, aspectRatio);
+        if (canUseImageJobs()) {
+          const job = await submitWorkflowImageJob(text, contextImage.content, aspectRatio);
+          setItems(prev => prev.map(i => i.id === newId ? { ...i, imageJobId: job.jobId } : i));
+          resultImg = await waitForImageJob(job.jobId);
+        } else {
+          resultImg = await generateWorkflowImage(text, contextImage.content, aspectRatio);
+        }
         addMessage('已根据参考图完成编辑。', 'assistant');
       } else {
         // 直接文本生成图片
-        resultImg = await generateImage(text, 'none', aspectRatio);
+        if (canUseImageJobs()) {
+          const job = await submitImageGenerationJob(text, aspectRatio);
+          setItems(prev => prev.map(i => i.id === newId ? { ...i, imageJobId: job.jobId } : i));
+          resultImg = await waitForImageJob(job.jobId);
+        } else {
+          resultImg = await generateImage(text, 'none', aspectRatio);
+        }
         addMessage('已为你生成新的画面。', 'assistant');
       }
 
@@ -532,6 +600,7 @@ function App() {
           ...centeredFrame,
           content: resultImg,
           status: 'completed',
+          imageJobId: undefined,
           label: text.substring(0, 10) + (text.length > 10 ? '...' : '')
         };
       }));
@@ -539,7 +608,7 @@ function App() {
       setContextImage(null);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : '未知错误';
-      setItems(prev => prev.map(i => i.id === newId ? { ...i, status: 'error' } : i));
+      setItems(prev => prev.map(i => i.id === newId ? { ...i, status: 'error', imageJobId: undefined } : i));
       addMessage(`出错了，没能完成生成：${errorMessage}`, 'assistant');
     } finally {
       setIsThinking(false);

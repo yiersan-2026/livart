@@ -23,6 +23,7 @@ export interface CanvasItem {
   zIndex?: number;
   parentId?: string;
   prompt?: string;
+  imageJobId?: string;
   groundingUrls?: string[];
   // 增强型 Workflow 字段
   layers: CompositionLayer[];

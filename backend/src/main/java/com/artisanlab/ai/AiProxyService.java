@@ -5,6 +5,7 @@ import com.artisanlab.userconfig.UserApiConfigDtos;
 import com.artisanlab.userconfig.UserApiConfigService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PreDestroy;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,11 +27,15 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 @Service
 public class AiProxyService {
     private static final Logger log = LoggerFactory.getLogger(AiProxyService.class);
     private static final Duration IMAGE_REQUEST_TIMEOUT = Duration.ofMinutes(10);
+    private static final Duration IMAGE_JOB_TTL = Duration.ofHours(2);
     private static final Duration PROMPT_OPTIMIZER_TIMEOUT = Duration.ofMinutes(2);
     private static final int IMAGE_PROXY_MAX_ATTEMPTS = 3;
     private static final List<String> NEGATIVE_PROMPT_TERMS = List.of(
@@ -91,6 +96,10 @@ public class AiProxyService {
     private final UserApiConfigService userApiConfigService;
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
+    private final Map<UUID, ImageJobState> imageJobs = new ConcurrentHashMap<>();
+    private final ExecutorService imageJobExecutor = Executors.newFixedThreadPool(
+            Math.max(2, Runtime.getRuntime().availableProcessors())
+    );
 
     public AiProxyService(UserApiConfigService userApiConfigService, ObjectMapper objectMapper) {
         this.userApiConfigService = userApiConfigService;
@@ -101,6 +110,11 @@ public class AiProxyService {
                 .build();
     }
 
+    @PreDestroy
+    public void shutdown() {
+        imageJobExecutor.shutdownNow();
+    }
+
     public ResponseEntity<byte[]> proxyImageRequest(
             UUID userId,
             String label,
@@ -108,8 +122,105 @@ public class AiProxyService {
             HttpServletRequest request
     ) throws IOException {
         UserApiConfigDtos.Response config = userApiConfigService.getRequiredConfig(userId);
+        ImageProxyResult result = executeImageRequest(
+                label,
+                joinUrl(config.baseUrl(), path),
+                config.apiKey(),
+                request.getHeader(HttpHeaders.ACCEPT),
+                request.getContentType(),
+                request.getInputStream().readAllBytes()
+        );
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.add(HttpHeaders.CONTENT_TYPE, result.contentType());
+        headers.add(HttpHeaders.CACHE_CONTROL, "no-store");
+        headers.add("X-Proxy-Attempts", String.valueOf(result.attempts()));
+        if (!result.requestId().isBlank()) {
+            headers.add("X-Upstream-Request-Id", result.requestId());
+        }
+
+        return ResponseEntity.status(result.statusCode()).headers(headers).body(result.body());
+    }
+
+    public ResponseEntity<Map<String, Object>> createImageJob(
+            UUID userId,
+            String label,
+            String path,
+            HttpServletRequest request
+    ) throws IOException {
+        cleanupImageJobs();
+        UserApiConfigDtos.Response config = userApiConfigService.getRequiredConfig(userId);
+        UUID jobId = UUID.randomUUID();
+        ImageJobState job = new ImageJobState(jobId, userId, label);
+        imageJobs.put(jobId, job);
+
+        String accept = request.getHeader(HttpHeaders.ACCEPT);
+        String contentType = request.getContentType();
         byte[] body = request.getInputStream().readAllBytes();
         String targetUrl = joinUrl(config.baseUrl(), path);
+
+        imageJobExecutor.submit(() -> runImageJob(job, targetUrl, config.apiKey(), accept, contentType, body));
+        return ResponseEntity.accepted().body(toJobResponse(job));
+    }
+
+    public ResponseEntity<Map<String, Object>> getImageJob(UUID userId, String jobId) {
+        cleanupImageJobs();
+
+        UUID parsedJobId;
+        try {
+            parsedJobId = UUID.fromString(jobId);
+        } catch (IllegalArgumentException exception) {
+            return ResponseEntity.badRequest().body(Map.of("error", "无效的图片任务 ID"));
+        }
+
+        ImageJobState job = imageJobs.get(parsedJobId);
+        if (job == null || !job.userId().equals(userId)) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "图片任务不存在或已过期"));
+        }
+
+        return ResponseEntity.ok(toJobResponse(job));
+    }
+
+    private void runImageJob(
+            ImageJobState job,
+            String targetUrl,
+            String apiKey,
+            String accept,
+            String contentType,
+            byte[] body
+    ) {
+        job.markRunning();
+
+        try {
+            ImageProxyResult result = executeImageRequest(job.label(), targetUrl, apiKey, accept, contentType, body);
+            if (result.statusCode() >= 200 && result.statusCode() <= 299) {
+                job.markCompleted(result);
+                return;
+            }
+
+            job.markFailed(result.statusCode(), result.body(), result.contentType(), result.attempts(), result.requestId());
+        } catch (Exception exception) {
+            log.error("[image-job] {} failed jobId={} error={}", job.label(), job.id(), safeMessage(exception));
+            try {
+                ImageProxyResult result = jsonImageProxyResult(HttpStatus.BAD_GATEWAY, Map.of(
+                        "error", "%s upstream request failed".formatted(job.label()),
+                        "detail", safeMessage(exception)
+                ), 0);
+                job.markFailed(result.statusCode(), result.body(), result.contentType(), result.attempts(), result.requestId());
+            } catch (IOException ioException) {
+                job.markFailed(502, safeMessage(exception).getBytes(StandardCharsets.UTF_8), "text/plain; charset=utf-8", 0, "");
+            }
+        }
+    }
+
+    private ImageProxyResult executeImageRequest(
+            String label,
+            String targetUrl,
+            String apiKey,
+            String accept,
+            String contentType,
+            byte[] body
+    ) throws IOException {
         long startedAt = System.currentTimeMillis();
         long deadlineAt = startedAt + IMAGE_REQUEST_TIMEOUT.toMillis();
 
@@ -119,19 +230,19 @@ public class AiProxyService {
             long remainingTimeoutMs = Math.max(0, deadlineAt - System.currentTimeMillis());
             if (remainingTimeoutMs <= 0) {
                 log.error("[image-proxy] {} timeout before attempt={} duration={}ms", label, attempt, System.currentTimeMillis() - startedAt);
-                return jsonBytes(HttpStatus.GATEWAY_TIMEOUT, Map.of(
+                return jsonImageProxyResult(HttpStatus.GATEWAY_TIMEOUT, Map.of(
                         "error", "%s upstream request timed out after 10 minutes".formatted(label),
                         "attempts", attempt - 1
-                ));
+                ), attempt - 1);
             }
 
             try {
                 log.info("[image-proxy] {} attempt={}/{}", label, attempt, IMAGE_PROXY_MAX_ATTEMPTS);
                 HttpRequest upstreamRequest = buildImageRequest(
                         targetUrl,
-                        config.apiKey(),
-                        request.getHeader(HttpHeaders.ACCEPT),
-                        request.getContentType(),
+                        apiKey,
+                        accept,
+                        contentType,
                         body,
                         Duration.ofMillis(remainingTimeoutMs)
                 );
@@ -152,14 +263,6 @@ public class AiProxyService {
                     continue;
                 }
 
-                HttpHeaders headers = new HttpHeaders();
-                headers.add(HttpHeaders.CONTENT_TYPE, firstHeader(upstreamResponse, HttpHeaders.CONTENT_TYPE, "application/json; charset=utf-8"));
-                headers.add(HttpHeaders.CACHE_CONTROL, "no-store");
-                headers.add("X-Proxy-Attempts", String.valueOf(attempt));
-                if (!requestId.isBlank()) {
-                    headers.add("X-Upstream-Request-Id", requestId);
-                }
-
                 log.info("[image-proxy] {} done status={} attempts={} duration={}ms requestId={}",
                         label,
                         upstreamResponse.statusCode(),
@@ -167,21 +270,27 @@ public class AiProxyService {
                         System.currentTimeMillis() - startedAt,
                         requestId.isBlank() ? "-" : requestId
                 );
-                return ResponseEntity.status(upstreamResponse.statusCode()).headers(headers).body(responseBody);
+                return new ImageProxyResult(
+                        upstreamResponse.statusCode(),
+                        responseBody,
+                        firstHeader(upstreamResponse, HttpHeaders.CONTENT_TYPE, "application/json; charset=utf-8"),
+                        attempt,
+                        requestId
+                );
             } catch (HttpTimeoutException exception) {
                 log.error("[image-proxy] {} timeout attempts={} duration={}ms", label, attempt, System.currentTimeMillis() - startedAt);
-                return jsonBytes(HttpStatus.GATEWAY_TIMEOUT, Map.of(
+                return jsonImageProxyResult(HttpStatus.GATEWAY_TIMEOUT, Map.of(
                         "error", "%s upstream request timed out after 10 minutes".formatted(label),
                         "detail", safeMessage(exception),
                         "attempts", attempt
-                ));
+                ), attempt);
             } catch (InterruptedException exception) {
                 Thread.currentThread().interrupt();
-                return jsonBytes(HttpStatus.BAD_GATEWAY, Map.of(
+                return jsonImageProxyResult(HttpStatus.BAD_GATEWAY, Map.of(
                         "error", "%s upstream request interrupted".formatted(label),
                         "detail", safeMessage(exception),
                         "attempts", attempt
-                ));
+                ), attempt);
             } catch (IOException exception) {
                 if (attempt < IMAGE_PROXY_MAX_ATTEMPTS) {
                     log.warn("[image-proxy] {} retry error attempt={} duration={}ms error={}", label, attempt, System.currentTimeMillis() - startedAt, safeMessage(exception));
@@ -190,15 +299,15 @@ public class AiProxyService {
                 }
 
                 log.error("[image-proxy] {} failed attempts={} duration={}ms error={}", label, attempt, System.currentTimeMillis() - startedAt, safeMessage(exception));
-                return jsonBytes(HttpStatus.BAD_GATEWAY, Map.of(
+                return jsonImageProxyResult(HttpStatus.BAD_GATEWAY, Map.of(
                         "error", "%s upstream request failed".formatted(label),
                         "detail", safeMessage(exception),
                         "attempts", attempt
-                ));
+                ), attempt);
             }
         }
 
-        return jsonBytes(HttpStatus.BAD_GATEWAY, Map.of("error", "%s upstream request failed".formatted(label)));
+        return jsonImageProxyResult(HttpStatus.BAD_GATEWAY, Map.of("error", "%s upstream request failed".formatted(label)), IMAGE_PROXY_MAX_ATTEMPTS);
     }
 
     public ResponseEntity<Map<String, Object>> optimizePrompt(UUID userId, AiProxyDtos.PromptOptimizeRequest request) {
@@ -288,6 +397,64 @@ public class AiProxyService {
         }
 
         return builder.build();
+    }
+
+    private Map<String, Object> toJobResponse(ImageJobState job) {
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("jobId", job.id().toString());
+        response.put("status", job.status());
+        response.put("label", job.label());
+        response.put("createdAt", job.createdAt());
+        response.put("updatedAt", job.updatedAt());
+        response.put("attempts", job.attempts());
+
+        if (job.requestId() != null && !job.requestId().isBlank()) {
+            response.put("requestId", job.requestId());
+        }
+
+        if ("completed".equals(job.status())) {
+            response.put("upstreamStatus", job.upstreamStatus());
+            response.put("contentType", job.contentType());
+            response.put("response", parseResponsePayload(job.body(), job.contentType()));
+        } else if ("error".equals(job.status())) {
+            response.put("upstreamStatus", job.upstreamStatus());
+            response.put("contentType", job.contentType());
+            response.put("error", parseResponsePayload(job.body(), job.contentType()));
+        }
+
+        return response;
+    }
+
+    private Object parseResponsePayload(byte[] body, String contentType) {
+        if (body == null || body.length == 0) return null;
+        String normalizedContentType = contentType == null ? "" : contentType.toLowerCase(Locale.ROOT);
+        if (normalizedContentType.contains("json")) {
+            try {
+                return objectMapper.readValue(body, Object.class);
+            } catch (IOException ignored) {
+                return getBodyPreview(body);
+            }
+        }
+
+        return getBodyPreview(body);
+    }
+
+    private void cleanupImageJobs() {
+        long expiredBefore = System.currentTimeMillis() - IMAGE_JOB_TTL.toMillis();
+        imageJobs.entrySet().removeIf(entry -> {
+            ImageJobState job = entry.getValue();
+            return job.updatedAt() < expiredBefore && ("completed".equals(job.status()) || "error".equals(job.status()));
+        });
+    }
+
+    private ImageProxyResult jsonImageProxyResult(HttpStatus status, Map<String, Object> payload, int attempts) throws IOException {
+        return new ImageProxyResult(
+                status.value(),
+                objectMapper.writeValueAsBytes(payload),
+                "application/json; charset=utf-8",
+                attempts,
+                ""
+        );
     }
 
     private ResponseEntity<byte[]> jsonBytes(HttpStatus status, Map<String, Object> payload) throws IOException {
@@ -411,5 +578,105 @@ public class AiProxyService {
     private String safeMessage(Exception exception) {
         String message = exception.getMessage();
         return message == null || message.isBlank() ? exception.getClass().getSimpleName() : message;
+    }
+
+    private record ImageProxyResult(
+            int statusCode,
+            byte[] body,
+            String contentType,
+            int attempts,
+            String requestId
+    ) {
+    }
+
+    private static final class ImageJobState {
+        private final UUID id;
+        private final UUID userId;
+        private final String label;
+        private final long createdAt;
+        private volatile long updatedAt;
+        private volatile String status = "queued";
+        private volatile int upstreamStatus = 202;
+        private volatile byte[] body = new byte[0];
+        private volatile String contentType = "application/json; charset=utf-8";
+        private volatile int attempts = 0;
+        private volatile String requestId = "";
+
+        private ImageJobState(UUID id, UUID userId, String label) {
+            this.id = id;
+            this.userId = userId;
+            this.label = label;
+            this.createdAt = System.currentTimeMillis();
+            this.updatedAt = this.createdAt;
+        }
+
+        private UUID id() {
+            return id;
+        }
+
+        private UUID userId() {
+            return userId;
+        }
+
+        private String label() {
+            return label;
+        }
+
+        private long createdAt() {
+            return createdAt;
+        }
+
+        private long updatedAt() {
+            return updatedAt;
+        }
+
+        private String status() {
+            return status;
+        }
+
+        private int upstreamStatus() {
+            return upstreamStatus;
+        }
+
+        private byte[] body() {
+            return body;
+        }
+
+        private String contentType() {
+            return contentType;
+        }
+
+        private int attempts() {
+            return attempts;
+        }
+
+        private String requestId() {
+            return requestId;
+        }
+
+        private void markRunning() {
+            status = "running";
+            updatedAt = System.currentTimeMillis();
+        }
+
+        private void markCompleted(ImageProxyResult result) {
+            upstreamStatus = result.statusCode();
+            body = result.body();
+            contentType = result.contentType();
+            attempts = result.attempts();
+            requestId = result.requestId();
+            status = "completed";
+            updatedAt = System.currentTimeMillis();
+        }
+
+        private void markFailed(int statusCode, byte[] responseBody, String responseContentType, int proxyAttempts, String upstreamRequestId) {
+            upstreamStatus = statusCode;
+            body = responseBody == null ? new byte[0] : responseBody;
+            contentType = responseContentType == null || responseContentType.isBlank() ? "application/json; charset=utf-8" : responseContentType;
+            attempts = proxyAttempts;
+            requestId = upstreamRequestId == null ? "" : upstreamRequestId;
+            status = "error";
+            updatedAt = System.currentTimeMillis();
+        }
     }
 }

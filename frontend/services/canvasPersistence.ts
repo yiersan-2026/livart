@@ -117,6 +117,7 @@ const persistImageValue = async (value: string | undefined, filenameSeed: string
 
 const normalizeTransientItemState = (item: CanvasItem): CanvasItem | null => {
   if (item.status !== 'loading') return item;
+  if (item.type === 'image' && item.imageJobId) return item;
   if (item.type === 'image' && !item.content) return null;
   return {
     ...item,

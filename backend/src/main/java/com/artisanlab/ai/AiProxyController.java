@@ -3,6 +3,8 @@ package com.artisanlab.ai;
 import com.artisanlab.auth.AuthContext;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -30,6 +32,21 @@ public class AiProxyController {
     @PostMapping("/images/edits")
     public ResponseEntity<byte[]> imageToImage(HttpServletRequest request) throws IOException {
         return aiProxyService.proxyImageRequest(authContext.requireUserId(), "image-to-image", "images/edits", request);
+    }
+
+    @PostMapping("/image-jobs/generations")
+    public ResponseEntity<Map<String, Object>> createTextToImageJob(HttpServletRequest request) throws IOException {
+        return aiProxyService.createImageJob(authContext.requireUserId(), "text-to-image", "images/generations", request);
+    }
+
+    @PostMapping("/image-jobs/edits")
+    public ResponseEntity<Map<String, Object>> createImageToImageJob(HttpServletRequest request) throws IOException {
+        return aiProxyService.createImageJob(authContext.requireUserId(), "image-to-image", "images/edits", request);
+    }
+
+    @GetMapping("/image-jobs/{jobId}")
+    public ResponseEntity<Map<String, Object>> getImageJob(@PathVariable String jobId) {
+        return aiProxyService.getImageJob(authContext.requireUserId(), jobId);
     }
 
     @PostMapping("/prompts/optimize")

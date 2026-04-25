@@ -4,10 +4,24 @@ import type { ImageAspectRatio } from '../types';
 import { aspectRatioToGeminiAspectRatio, aspectRatioToImageApiSize } from './imageSizing';
 
 const REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
+const JOB_POLL_INTERVAL_MS = 2 * 1000;
 const TEXT_TO_IMAGE_PROXY_URL = '/api/images/generations';
 const IMAGE_TO_IMAGE_PROXY_URL = '/api/images/edits';
+const TEXT_TO_IMAGE_JOB_URL = '/api/image-jobs/generations';
+const IMAGE_TO_IMAGE_JOB_URL = '/api/image-jobs/edits';
+const IMAGE_JOB_STATUS_URL = '/api/image-jobs';
 
 const isGeminiModel = (model: string) => model.startsWith('gemini-');
+
+export interface ImageJobSubmission {
+  jobId: string;
+  status: 'queued' | 'running' | 'completed' | 'error';
+}
+
+interface ImageJobStatus extends ImageJobSubmission {
+  response?: unknown;
+  error?: unknown;
+}
 
 const extractBase64 = (data: string) => data.includes(',') ? data.split(',')[1] : data;
 
@@ -48,6 +62,8 @@ const imageEditProxyHeaders = (config: ReturnType<typeof getApiConfig>) => ({
   'X-Livart-Api-Key': config.apiKey,
   'X-Livart-Upstream-Url': config.imageToImageUrl
 });
+
+const wait = (delayMs: number) => new Promise(resolve => setTimeout(resolve, delayMs));
 
 const callGeminiApi = async (contents: any, imageConfig?: any) => {
   if (!hasApiConfig()) {
@@ -170,6 +186,122 @@ const extractImageFromResponse = (data: any): string => {
   throw new Error('未能从响应中获取图像数据');
 };
 
+const extractImageJobError = (payload: unknown) => {
+  if (!payload) return '图片任务失败';
+  if (typeof payload === 'string') return payload;
+  if (typeof payload === 'object') {
+    const data = payload as Record<string, unknown>;
+    return String(data.error || data.message || data.detail || '图片任务失败');
+  }
+  return '图片任务失败';
+};
+
+export const canUseImageJobs = () => {
+  const config = getApiConfig();
+  return !isGeminiModel(config.model);
+};
+
+export const submitImageGenerationJob = async (
+  prompt: string,
+  aspectRatio: ImageAspectRatio = 'auto'
+): Promise<ImageJobSubmission> => {
+  if (!hasApiConfig()) {
+    throw new Error('请先配置 API 地址和密钥');
+  }
+
+  const config = getApiConfig();
+  const size = aspectRatioToImageApiSize(aspectRatio);
+  const response = await fetch(TEXT_TO_IMAGE_JOB_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      ...authHeaders()
+    },
+    body: JSON.stringify({
+      model: config.model,
+      prompt,
+      ...(size ? { size } : {})
+    })
+  });
+
+  const data = await response.json().catch(() => null);
+  if (!response.ok || !data?.jobId) {
+    throw new Error(data?.error || `图片任务提交失败：${response.status}`);
+  }
+  return data;
+};
+
+export const submitImageEditJob = async (
+  prompt: string,
+  imageDataUrl: string,
+  maskDataUrl?: string,
+  aspectRatio: ImageAspectRatio = 'auto'
+): Promise<ImageJobSubmission> => {
+  if (!hasApiConfig()) {
+    throw new Error('请先配置 API 地址和密钥');
+  }
+
+  const config = getApiConfig();
+  const size = aspectRatioToImageApiSize(aspectRatio);
+  const formData = new FormData();
+  formData.append('model', config.model);
+  formData.append('prompt', prompt);
+  if (size) {
+    formData.append('size', size);
+  }
+  formData.append('image', await dataUrlToBlob(imageDataUrl), 'canvas.png');
+  if (maskDataUrl) {
+    formData.append('mask', await dataUrlToBlob(maskDataUrl), 'mask.png');
+  }
+
+  const response = await fetch(IMAGE_TO_IMAGE_JOB_URL, {
+    method: 'POST',
+    headers: {
+      'Accept': 'application/json',
+      ...authHeaders()
+    },
+    body: formData
+  });
+
+  const data = await response.json().catch(() => null);
+  if (!response.ok || !data?.jobId) {
+    throw new Error(data?.error || `图片任务提交失败：${response.status}`);
+  }
+  return data;
+};
+
+export const getImageJob = async (jobId: string): Promise<ImageJobStatus> => {
+  const response = await fetch(`${IMAGE_JOB_STATUS_URL}/${encodeURIComponent(jobId)}`, {
+    headers: {
+      'Accept': 'application/json',
+      ...authHeaders()
+    }
+  });
+  const data = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(data?.error || `图片任务查询失败：${response.status}`);
+  }
+  return data;
+};
+
+export const waitForImageJob = async (jobId: string) => {
+  const deadlineAt = Date.now() + REQUEST_TIMEOUT_MS;
+
+  while (Date.now() < deadlineAt) {
+    const job = await getImageJob(jobId);
+    if (job.status === 'completed') {
+      return extractImageFromResponse(job.response);
+    }
+    if (job.status === 'error') {
+      throw new Error(extractImageJobError(job.error));
+    }
+    await wait(JOB_POLL_INTERVAL_MS);
+  }
+
+  throw new Error('图片任务超过 10 分钟仍未完成，请稍后刷新页面查看');
+};
+
 /**
  * 视觉逻辑推理合成：支持无提示词的智能意图推断
  */
@@ -179,14 +311,10 @@ const getGeminiImageConfig = (aspectRatio: ImageAspectRatio) => {
   return { aspectRatio: geminiAspectRatio, imageSize: '1K' };
 };
 
-export const generateWorkflowImage = async (
-  prompt: string,
-  snapshot: string,
-  aspectRatio: ImageAspectRatio = 'auto'
-) => {
+const buildWorkflowInstruction = (prompt: string) => {
   const finalPrompt = prompt.trim() || "请自动分析快照中的视觉逻辑：如果有箭头指向，执行转换；如果有并列的人和衣服，执行换装（Virtual Try-on）；如果有涂鸦，将其转化为特效。请保持人物面貌特征完全一致，输出高清写实结果。";
 
-  const instruction = `你是一位具备顶级视觉直觉和推理能力的 AI 图像专家。
+  return `你是一位具备顶级视觉直觉和推理能力的 AI 图像专家。
 
 任务指令：解析提供的画布快照，并根据其中的"视觉布局"和"用户意图"生成最终的高清图像。
 
@@ -201,11 +329,27 @@ export const generateWorkflowImage = async (
 - 输出必须是一张干净、写实、高画质的单张图像。
 - 严禁出现任何画布 UI 元素（如选中框、工具栏）。
 - 保持主体特征高度一致。`;
+};
+
+export const submitWorkflowImageJob = async (
+  prompt: string,
+  snapshot: string,
+  aspectRatio: ImageAspectRatio = 'auto'
+) => {
+  return submitImageEditJob(buildWorkflowInstruction(prompt), snapshot, undefined, aspectRatio);
+};
+
+export const generateWorkflowImage = async (
+  prompt: string,
+  snapshot: string,
+  aspectRatio: ImageAspectRatio = 'auto'
+) => {
+  const instruction = buildWorkflowInstruction(prompt);
 
   const config = getApiConfig();
   if (!isGeminiModel(config.model)) {
-    const data = await callImageEditApi(instruction, snapshot, undefined, aspectRatio);
-    return extractImageFromResponse(data);
+    const job = await submitImageEditJob(instruction, snapshot, undefined, aspectRatio);
+    return waitForImageJob(job.jobId);
   }
 
   const parts = [
@@ -234,8 +378,8 @@ export const editImage = async (
 ) => {
   const config = getApiConfig();
   if (!isGeminiModel(config.model)) {
-    const data = await callImageEditApi(prompt, imageDataUrl, maskDataUrl, aspectRatio);
-    return extractImageFromResponse(data);
+    const job = await submitImageEditJob(prompt, imageDataUrl, maskDataUrl, aspectRatio);
+    return waitForImageJob(job.jobId);
   }
 
   if (maskDataUrl) {
@@ -252,8 +396,8 @@ export const generateImage = async (
 ) => {
   const config = getApiConfig();
   if (!isGeminiModel(config.model)) {
-    const data = await callImageGenerationApi(prompt, aspectRatio);
-    return extractImageFromResponse(data);
+    const job = await submitImageGenerationJob(prompt, aspectRatio);
+    return waitForImageJob(job.jobId);
   }
 
   const parts = [{ text: prompt }];

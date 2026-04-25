@@ -429,6 +429,10 @@ export default defineConfig(({ mode }) => {
             target: backendApiBaseUrl,
             changeOrigin: true
           },
+          '/api/image-jobs': {
+            target: backendApiBaseUrl,
+            changeOrigin: true
+          },
           '/api/auth': {
             target: backendApiBaseUrl,
             changeOrigin: true

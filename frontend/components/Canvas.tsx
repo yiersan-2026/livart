@@ -8,7 +8,7 @@ import {
   MessageSquarePlus, Pencil,
   Copy, Layers
 } from 'lucide-react';
-import { editImage, generateWorkflowImage } from '../services/gemini';
+import { canUseImageJobs, editImage, generateWorkflowImage, submitImageEditJob, waitForImageJob } from '../services/gemini';
 import { optimizePrompt } from '../services/promptOptimizer';
 import {
   IMAGE_ASPECT_RATIO_OPTIONS,
@@ -702,7 +702,14 @@ const Canvas: React.FC<CanvasProps> = ({
       resultItemId = newId;
       setSelectedIds([newId]);
 
-      const result = await editImage(optimizedPrompt, targetItem.content, maskDataUrl || undefined, inlineEditAspectRatio);
+      let result: string;
+      if (canUseImageJobs()) {
+        const job = await submitImageEditJob(optimizedPrompt, targetItem.content, maskDataUrl || undefined, inlineEditAspectRatio);
+        onItemUpdate(newId, { imageJobId: job.jobId });
+        result = await waitForImageJob(job.jobId);
+      } else {
+        result = await editImage(optimizedPrompt, targetItem.content, maskDataUrl || undefined, inlineEditAspectRatio);
+      }
       const finalFrame = await getImageFrameFromSource(
         result,
         resultFrame.width,
@@ -713,6 +720,7 @@ const Canvas: React.FC<CanvasProps> = ({
         ...centerFrameOnRect(resultItem, finalFrame),
         content: result,
         status: 'completed',
+        imageJobId: undefined,
         label: optimizedPrompt.substring(0, 16) + (optimizedPrompt.length > 16 ? '...' : '')
       });
       if (useLocalMask) {
@@ -726,6 +734,7 @@ const Canvas: React.FC<CanvasProps> = ({
       if (resultItemId) {
         onItemUpdate(resultItemId, {
           status: 'error',
+          imageJobId: undefined,
           label: 'AI 重绘失败'
         });
       }
