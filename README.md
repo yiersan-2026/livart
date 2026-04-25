@@ -12,7 +12,7 @@
 
 ## 项目简介
 
-livart 是一款基于 **无限画布** 的 AI 图像创作工具。它把文生图、图生图、局部重绘、图片引用、拖拽素材、项目画布和历史记录整合到一个自由画布中，适合用视觉布局表达创作意图。
+livart 是一款基于 **无限画布** 的 AI 图像创作工具。它把文生图、图生图、局部重绘、画幅控制、图片引用、拖拽素材、项目画布、历史记录和一键 Docker 部署整合到一个自由画布中，适合用视觉布局表达创作意图。
 
 本项目基于上一个开源系统 [yiqi-software/ArtisanLab](https://gitee.com/yiqi-software/ArtisanLab) 二次开发而来。原项目提供了无限画布、基础 AI 图像生成、画布元素编辑和视觉逻辑工作流能力；livart 在此基础上补充了更完整的图生图、局部重绘、永久画布、账号体系、后端持久化和 Lovart 风格交互。
 
@@ -20,8 +20,12 @@ livart 是一款基于 **无限画布** 的 AI 图像创作工具。它把文生
 
 ## 本版本新增能力
 
-- **独立生图接口配置**：文生图和图生图使用不同接口，默认支持 OpenAI Images API 兼容格式。
+- **Docker 一键部署**：提供多阶段 `Dockerfile` 和 `docker-compose.example.yml`，可同时启动 livart、PostgreSQL、RabbitMQ 和 MinIO。
+- **独立生图接口配置**：文生图、图生图和提示词优化统一由后端代理，默认支持 OpenAI Images API 兼容格式，API Key 按用户隔离保存。
 - **图生图与局部重绘**：选中图片后可直接输入指令重绘，也可进入“局部”模式涂抹区域并通过 `mask` 精确修改局部。
+- **非破坏式图片重绘**：直接重绘或局部重绘会在原图右侧创建新图片节点，并用连线保留“原图 → 新图”的派生关系。
+- **画幅比例选择**：文生图、图生图和局部重绘支持 `自动`、`1:1`、`4:3`、`3:4`、`16:9`、`9:16`。
+- **自适应图片框**：生成或重绘完成后会读取真实图片尺寸，画布图片框自动匹配图片比例，不再强制正方形。
 - **提示词自动优化**：提交前自动调用提示词优化模型，补全画面描述、质量要求和安全约束。
 - **Lovart 风格图片引用**：右侧输入框支持输入 `@` 选择画布图片，并以可删除的内联标签参与提示词上下文。
 - **图片拖入画布**：支持直接把本机图片拖进画布，自动创建图片节点。
@@ -31,7 +35,7 @@ livart 是一款基于 **无限画布** 的 AI 图像创作工具。它把文生
 - **Spring Security JWT 登录**：支持账号注册、登录和 30 天 JWT，会话清理后重新登录即可找回账号下的项目画布。
 - **异步保存队列**：画布保存请求进入 RabbitMQ，后端单消费者按顺序落库，并通过 revision 避免旧数据覆盖新数据。
 - **多项目画布**：支持创建多个项目，一个项目对应一张独立画布，并记住最近打开的项目。
-- **画布体验优化**：缩放逻辑改为以鼠标位置为锚点，输入框滚动和键盘快捷键冲突已修复。
+- **画布体验优化**：缩放逻辑改为以鼠标位置为锚点，输入框滚动、键盘快捷键冲突和重启后临时加载状态残留已修复。
 
 ## 核心功能
 
@@ -58,6 +62,21 @@ livart 会尝试理解画布上的视觉语义：
 ### 局部重绘
 
 选中图片后点击下方输入框里的“局部”按钮，即可使用画笔涂抹需要修改的区域。提交后系统会把涂抹区域转换为 Images API 的 `mask` 参数，只重绘被涂抹的区域，未涂抹区域尽量保持原图不变。
+
+重绘不会覆盖原图，而是在原图右侧生成一个新的图片节点。新图会记录父级图片和提示词，画布上会用虚线箭头展示派生关系，方便持续迭代不同版本。
+
+### 画幅与图片框
+
+生图和重绘入口都支持选择画幅：
+
+| 选项 | 说明 |
+|------|------|
+| 自动 | 文生图使用模型默认画幅；图生图和局部重绘沿用参考图比例 |
+| 1:1 | 方图 |
+| 4:3 / 3:4 | 横向或竖向标准画幅 |
+| 16:9 / 9:16 | 横向宽屏或竖向手机画幅 |
+
+生成完成后，livart 会按返回图片的真实宽高调整画布图片框；如果上游模型实际返回的比例和请求比例不同，画布仍以真实图片形状为准。
 
 ### 永久画布项目
 
@@ -86,6 +105,37 @@ docs/      项目说明和真实截图
 - MinIO
 - RabbitMQ
 - 支持 OpenAI Images API 兼容接口或 Gemini 图像接口的网络环境
+
+### Docker 一键部署
+
+项目根目录提供了多阶段 `Dockerfile` 和自包含的 `docker-compose.example.yml`：Compose 会同时启动 livart、PostgreSQL、RabbitMQ 和 MinIO。浏览器访问同一个 Spring Boot 服务即可，`/api/images/generations`、`/api/images/edits` 和 `/api/prompts/optimize` 都由后端代理。
+
+```bash
+docker compose -f docker-compose.example.yml up -d --build
+```
+
+启动后访问：
+
+- livart：`http://localhost:8080`
+- MinIO 控制台：`http://localhost:9001`，默认只绑定本机 `127.0.0.1`
+
+如果要改端口或用于公网部署，建议先创建 `.env` 覆盖默认口令：
+
+```bash
+cat > .env <<'EOF'
+LIVART_PORT=8080
+POSTGRES_PASSWORD=replace-with-strong-db-password
+RABBITMQ_DEFAULT_USER=livart
+RABBITMQ_DEFAULT_PASS=replace-with-strong-rabbitmq-password
+MINIO_ROOT_USER=livartminio
+MINIO_ROOT_PASSWORD=replace-with-strong-minio-password
+JWT_SECRET=replace-with-at-least-32-chars-secret
+EOF
+
+docker compose -f docker-compose.example.yml --env-file .env up -d --build
+```
+
+不要把包含数据库密码、MinIO 密钥、RabbitMQ 密码或 AI API Key 的 `.env` 文件提交到仓库。AI 中转站 Base URL、API Key、生图模型和对话模型仍然在用户首次登录后通过页面填写，并按用户保存到数据库。
 
 ### 启动后端
 
@@ -148,6 +198,7 @@ PROMPT_OPTIMIZER_MODEL=gpt-5.5
 | 删除元素 | Delete / Backspace |
 | 提交输入框 | Ctrl / ⌘ + Enter |
 | 引用图片 | 在右侧输入框输入 @ |
+| 选择画幅 | 在右侧输入框或图片下方重绘工具条选择 |
 
 ### 创作流程
 
@@ -163,7 +214,8 @@ PROMPT_OPTIMIZER_MODEL=gpt-5.5
 2. 点击图片下方输入框上方的“局部”
 3. 用画笔涂抹需要修改的区域，可用橡皮擦修正
 4. 输入修改指令，例如“把涂抹区域改成蓝色花朵”
-5. 点击提交，系统会自动优化提示词并调用图生图 `mask` 接口
+5. 选择需要的画幅比例，或保持“自动”沿用原图比例
+6. 点击提交，系统会自动优化提示词并调用图生图 `mask` 接口
 
 ## 技术栈
 
@@ -184,8 +236,8 @@ PROMPT_OPTIMIZER_MODEL=gpt-5.5
 
 本项目基于 [yiqi-software/ArtisanLab](https://gitee.com/yiqi-software/ArtisanLab) 继续开发。感谢原项目提供的无限画布和 AI 图像创作基础能力。
 
-livart 当前改动重点是把原有单机画布体验扩展为可长期使用的 AI 创作工作台：增加永久画布后端、项目管理、账号登录、JWT 鉴权、异步保存队列、图片资源存储、提示词优化、Lovart 风格图片引用、选中图片快捷重绘、局部 mask 重绘和更稳定的图像接口代理。
+livart 当前改动重点是把原有单机画布体验扩展为可长期使用的 AI 创作工作台：增加永久画布后端、项目管理、账号登录、JWT 鉴权、异步保存队列、图片资源存储、提示词优化、Lovart 风格图片引用、非破坏式派生重绘、画幅比例选择、局部 mask 重绘、自适应图片框、Docker 一键部署和更稳定的图像接口代理。
 
 ## 开源协议
 
-MIT License
+Apache License 2.0

@@ -77,6 +77,12 @@ public class SecurityConfig {
                 .authorizeHttpRequests(authorize -> authorize
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         .requestMatchers(
+                                "/",
+                                "/index.html",
+                                "/index.css",
+                                "/assets/**",
+                                "/img/**",
+                                "/favicon.ico",
                                 "/api/health",
                                 "/api/auth/register",
                                 "/api/auth/login",

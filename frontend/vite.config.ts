@@ -58,6 +58,22 @@ const getBearerToken = (authorization: string | string[] | undefined) => {
   return match?.[1]?.trim() || '';
 };
 
+const getHeaderValue = (value: string | string[] | undefined) => Array.isArray(value) ? value[0] : value || '';
+const getLivartApiKey = (request: IncomingMessage) => getHeaderValue(request.headers['x-livart-api-key']).trim();
+
+const resolveImageTargetUrl = (request: IncomingMessage, fallbackTargetUrl: string) => {
+  const configuredTargetUrl = getHeaderValue(request.headers['x-livart-upstream-url']).trim();
+  const targetUrl = configuredTargetUrl || fallbackTargetUrl;
+  if (!targetUrl) return '';
+
+  try {
+    const parsedUrl = new URL(targetUrl);
+    return ['http:', 'https:'].includes(parsedUrl.protocol) ? parsedUrl.toString() : '';
+  } catch {
+    return '';
+  }
+};
+
 const sanitizeOptimizedPrompt = (text: string) => {
   return text
     .replace(/^```(?:text|markdown)?/i, '')
@@ -228,7 +244,7 @@ const proxyPromptOptimizeRequest = async (
     const prompt = String(body.prompt || '').trim();
     const mode = body.mode === 'image-to-image' ? 'image-to-image' : 'text-to-image';
     const effectiveBaseUrl = String(body.baseUrl || baseUrl || '').trim();
-    const effectiveApiKey = getBearerToken(request.headers.authorization) || apiKey;
+    const effectiveApiKey = getLivartApiKey(request) || getBearerToken(request.headers.authorization) || apiKey;
     const effectiveModel = String(body.model || model || '').trim();
 
     if (!prompt) {
@@ -299,7 +315,9 @@ const proxyImageRequest = async (
     return;
   }
 
-  if (!targetUrl) {
+  const resolvedTargetUrl = resolveImageTargetUrl(request, targetUrl);
+
+  if (!resolvedTargetUrl) {
     writeJson(response, 500, { error: `${label} upstream URL is missing` });
     return;
   }
@@ -310,14 +328,14 @@ const proxyImageRequest = async (
 
   const headers: Record<string, string> = {
     Accept: String(request.headers.accept || 'application/json'),
-    Authorization: String(request.headers.authorization || `Bearer ${fallbackApiKey}`)
+    Authorization: `Bearer ${getLivartApiKey(request) || getBearerToken(request.headers.authorization) || fallbackApiKey}`
   };
 
   if (request.headers['content-type']) {
     headers['Content-Type'] = String(request.headers['content-type']);
   }
 
-  console.info(`[image-proxy] ${label} start -> ${targetUrl}`);
+  console.info(`[image-proxy] ${label} start -> ${resolvedTargetUrl}`);
 
   for (let attempt = 1; attempt <= IMAGE_PROXY_MAX_ATTEMPTS; attempt += 1) {
     const remainingTimeoutMs = Math.max(0, deadlineAt - Date.now());
@@ -335,7 +353,7 @@ const proxyImageRequest = async (
 
     try {
       console.info(`[image-proxy] ${label} attempt=${attempt}/${IMAGE_PROXY_MAX_ATTEMPTS}`);
-      const upstreamResponse = await fetch(targetUrl, {
+      const upstreamResponse = await fetch(resolvedTargetUrl, {
         method: 'POST',
         headers,
         body,
@@ -389,7 +407,7 @@ export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
     const textToImageUpstreamUrl = env.IMAGE_UPSTREAM_TEXT_TO_IMAGE_URL || env.TEXT_TO_IMAGE_UPSTREAM_URL || joinUrl(env.IMAGE_API_BASE_URL, 'images/generations');
     const imageToImageUpstreamUrl = env.IMAGE_UPSTREAM_IMAGE_TO_IMAGE_URL || env.IMAGE_TO_IMAGE_UPSTREAM_URL || joinUrl(env.IMAGE_API_BASE_URL, 'images/edits');
-    const promptOptimizerBaseUrl = env.PROMPT_OPTIMIZER_BASE_URL || 'https://www.kuyaoapi.com/v1/';
+    const promptOptimizerBaseUrl = env.PROMPT_OPTIMIZER_BASE_URL || env.IMAGE_API_BASE_URL || '';
     const promptOptimizerApiKey = env.PROMPT_OPTIMIZER_API_KEY || env.IMAGE_API_KEY;
     const promptOptimizerModel = env.PROMPT_OPTIMIZER_MODEL || 'gpt-5.5';
     const backendApiBaseUrl = env.BACKEND_API_BASE_URL || 'http://localhost:8080';
@@ -443,10 +461,7 @@ export default defineConfig(({ mode }) => {
         }
       ],
       define: {
-        'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
-        'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
         'process.env.IMAGE_API_BASE_URL': JSON.stringify(env.IMAGE_API_BASE_URL),
-        'process.env.IMAGE_API_KEY': JSON.stringify(env.IMAGE_API_KEY),
         'process.env.IMAGE_API_MODEL': JSON.stringify(env.IMAGE_API_MODEL),
         'process.env.PROMPT_OPTIMIZER_MODEL': JSON.stringify(env.PROMPT_OPTIMIZER_MODEL),
         'process.env.CHAT_API_MODEL': JSON.stringify(env.CHAT_API_MODEL),

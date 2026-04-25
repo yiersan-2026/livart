@@ -1,10 +1,11 @@
 import { getApiConfig, hasApiConfig } from './config';
+import { authHeaders } from './auth';
+import type { ImageAspectRatio } from '../types';
+import { aspectRatioToGeminiAspectRatio, aspectRatioToImageApiSize } from './imageSizing';
 
 const REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
-
-const joinUrl = (baseUrl: string, path: string) => {
-  return `${baseUrl.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`;
-};
+const TEXT_TO_IMAGE_PROXY_URL = '/api/images/generations';
+const IMAGE_TO_IMAGE_PROXY_URL = '/api/images/edits';
 
 const isGeminiModel = (model: string) => model.startsWith('gemini-');
 
@@ -34,6 +35,20 @@ const fetchWithTimeout = async (url: string, options: RequestInit, timeoutMessag
   }
 };
 
+const imageProxyHeaders = (config: ReturnType<typeof getApiConfig>) => ({
+  'Accept': 'application/json',
+  ...authHeaders(),
+  'X-Livart-Api-Key': config.apiKey,
+  'X-Livart-Upstream-Url': config.textToImageUrl
+});
+
+const imageEditProxyHeaders = (config: ReturnType<typeof getApiConfig>) => ({
+  'Accept': 'application/json',
+  ...authHeaders(),
+  'X-Livart-Api-Key': config.apiKey,
+  'X-Livart-Upstream-Url': config.imageToImageUrl
+});
+
 const callGeminiApi = async (contents: any, imageConfig?: any) => {
   if (!hasApiConfig()) {
     throw new Error('请先配置 API 地址和密钥');
@@ -45,10 +60,13 @@ const callGeminiApi = async (contents: any, imageConfig?: any) => {
   const body: any = {
     contents: [{ role: 'user', parts: contents }],
     generationConfig: {
-      responseModalities: ['TEXT', 'IMAGE'],
-      imageConfig: imageConfig || { aspectRatio: '1:1', imageSize: '1K' }
+      responseModalities: ['TEXT', 'IMAGE']
     }
   };
+
+  if (imageConfig) {
+    body.generationConfig.imageConfig = imageConfig;
+  }
 
   const response = await fetchWithTimeout(url, {
     method: 'POST',
@@ -68,22 +86,23 @@ const callGeminiApi = async (contents: any, imageConfig?: any) => {
   return response.json();
 };
 
-const callImageGenerationApi = async (prompt: string) => {
+const callImageGenerationApi = async (prompt: string, aspectRatio: ImageAspectRatio = 'auto') => {
   if (!hasApiConfig()) {
     throw new Error('请先配置 API 地址和密钥');
   }
 
   const config = getApiConfig();
-  const response = await fetchWithTimeout(config.textToImageUrl || joinUrl(config.baseUrl, 'images/generations'), {
+  const size = aspectRatioToImageApiSize(aspectRatio);
+  const response = await fetchWithTimeout(TEXT_TO_IMAGE_PROXY_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Accept': 'application/json',
-      'Authorization': `Bearer ${config.apiKey}`
+      ...imageProxyHeaders(config)
     },
     body: JSON.stringify({
       model: config.model,
-      prompt
+      prompt,
+      ...(size ? { size } : {})
     })
   }, '文生图请求超过 10 分钟仍未完成，请稍后重试');
 
@@ -95,26 +114,32 @@ const callImageGenerationApi = async (prompt: string) => {
   return response.json();
 };
 
-const callImageEditApi = async (prompt: string, imageDataUrl: string, maskDataUrl?: string) => {
+const callImageEditApi = async (
+  prompt: string,
+  imageDataUrl: string,
+  maskDataUrl?: string,
+  aspectRatio: ImageAspectRatio = 'auto'
+) => {
   if (!hasApiConfig()) {
     throw new Error('请先配置 API 地址和密钥');
   }
 
   const config = getApiConfig();
+  const size = aspectRatioToImageApiSize(aspectRatio);
   const formData = new FormData();
   formData.append('model', config.model);
   formData.append('prompt', prompt);
+  if (size) {
+    formData.append('size', size);
+  }
   formData.append('image', await dataUrlToBlob(imageDataUrl), 'canvas.png');
   if (maskDataUrl) {
     formData.append('mask', await dataUrlToBlob(maskDataUrl), 'mask.png');
   }
 
-  const response = await fetchWithTimeout(config.imageToImageUrl || joinUrl(config.baseUrl, 'images/edits'), {
+  const response = await fetchWithTimeout(IMAGE_TO_IMAGE_PROXY_URL, {
     method: 'POST',
-    headers: {
-      'Accept': 'application/json',
-      'Authorization': `Bearer ${config.apiKey}`
-    },
+    headers: imageEditProxyHeaders(config),
     body: formData
   }, '图生图请求超过 10 分钟仍未完成，请稍后重试');
 
@@ -148,7 +173,17 @@ const extractImageFromResponse = (data: any): string => {
 /**
  * 视觉逻辑推理合成：支持无提示词的智能意图推断
  */
-export const generateWorkflowImage = async (prompt: string, snapshot: string) => {
+const getGeminiImageConfig = (aspectRatio: ImageAspectRatio) => {
+  const geminiAspectRatio = aspectRatioToGeminiAspectRatio(aspectRatio);
+  if (!geminiAspectRatio) return undefined;
+  return { aspectRatio: geminiAspectRatio, imageSize: '1K' };
+};
+
+export const generateWorkflowImage = async (
+  prompt: string,
+  snapshot: string,
+  aspectRatio: ImageAspectRatio = 'auto'
+) => {
   const finalPrompt = prompt.trim() || "请自动分析快照中的视觉逻辑：如果有箭头指向，执行转换；如果有并列的人和衣服，执行换装（Virtual Try-on）；如果有涂鸦，将其转化为特效。请保持人物面貌特征完全一致，输出高清写实结果。";
 
   const instruction = `你是一位具备顶级视觉直觉和推理能力的 AI 图像专家。
@@ -169,7 +204,7 @@ export const generateWorkflowImage = async (prompt: string, snapshot: string) =>
 
   const config = getApiConfig();
   if (!isGeminiModel(config.model)) {
-    const data = await callImageEditApi(instruction, snapshot);
+    const data = await callImageEditApi(instruction, snapshot, undefined, aspectRatio);
     return extractImageFromResponse(data);
   }
 
@@ -187,14 +222,19 @@ export const generateWorkflowImage = async (prompt: string, snapshot: string) =>
     }
   ];
 
-  const data = await callGeminiApi(parts, { aspectRatio: '1:1', imageSize: '1K' });
+  const data = await callGeminiApi(parts, getGeminiImageConfig(aspectRatio));
   return extractImageFromResponse(data);
 };
 
-export const editImage = async (prompt: string, imageDataUrl: string, maskDataUrl?: string) => {
+export const editImage = async (
+  prompt: string,
+  imageDataUrl: string,
+  maskDataUrl?: string,
+  aspectRatio: ImageAspectRatio = 'auto'
+) => {
   const config = getApiConfig();
   if (!isGeminiModel(config.model)) {
-    const data = await callImageEditApi(prompt, imageDataUrl, maskDataUrl);
+    const data = await callImageEditApi(prompt, imageDataUrl, maskDataUrl, aspectRatio);
     return extractImageFromResponse(data);
   }
 
@@ -202,18 +242,22 @@ export const editImage = async (prompt: string, imageDataUrl: string, maskDataUr
     throw new Error('当前 Gemini 图像模型不支持 mask 局部重绘，请切换到 gpt-image-2');
   }
 
-  return generateWorkflowImage(prompt, imageDataUrl);
+  return generateWorkflowImage(prompt, imageDataUrl, aspectRatio);
 };
 
-export const generateImage = async (prompt: string, style: string = 'none') => {
+export const generateImage = async (
+  prompt: string,
+  style: string = 'none',
+  aspectRatio: ImageAspectRatio = 'auto'
+) => {
   const config = getApiConfig();
   if (!isGeminiModel(config.model)) {
-    const data = await callImageGenerationApi(prompt);
+    const data = await callImageGenerationApi(prompt, aspectRatio);
     return extractImageFromResponse(data);
   }
 
   const parts = [{ text: prompt }];
-  const data = await callGeminiApi(parts, { aspectRatio: '1:1', imageSize: '1K' });
+  const data = await callGeminiApi(parts, getGeminiImageConfig(aspectRatio));
   return extractImageFromResponse(data);
 };
 

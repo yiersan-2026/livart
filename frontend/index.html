@@ -63,6 +63,36 @@
             color: #9ca3af;
             pointer-events: none;
         }
+        .prompt-optimizing-button {
+            position: relative;
+            isolation: isolate;
+            overflow: visible;
+            background: linear-gradient(135deg, #7c3aed, #06b6d4, #f97316, #ec4899);
+            background-size: 300% 300%;
+            animation: promptGlowShift 1.6s ease-in-out infinite;
+            box-shadow:
+                0 0 0 1px rgba(255, 255, 255, 0.8) inset,
+                0 0 22px rgba(99, 102, 241, 0.55),
+                0 0 42px rgba(236, 72, 153, 0.32);
+        }
+        .prompt-optimizing-button::before {
+            content: "";
+            position: absolute;
+            inset: -6px;
+            z-index: -1;
+            border-radius: inherit;
+            background: conic-gradient(from 0deg, #7c3aed, #06b6d4, #22c55e, #f97316, #ec4899, #7c3aed);
+            filter: blur(12px);
+            opacity: 0.9;
+            animation: promptGlowSpin 1.8s linear infinite;
+        }
+        @keyframes promptGlowShift {
+            0%, 100% { background-position: 0% 50%; transform: scale(1); }
+            50% { background-position: 100% 50%; transform: scale(1.04); }
+        }
+        @keyframes promptGlowSpin {
+            to { transform: rotate(360deg); }
+        }
     </style>
 <script type="importmap">
 {

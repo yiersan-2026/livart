@@ -33,6 +33,8 @@ export interface CanvasItem {
 
 export type DesignStyle = 'none' | 'cyberpunk' | 'minimalist' | '3d-clay' | 'watercolor' | 'sketch';
 
+export type ImageAspectRatio = 'auto' | '1:1' | '4:3' | '3:4' | '16:9' | '9:16';
+
 export interface PlanStep {
   id: string;
   title: string;

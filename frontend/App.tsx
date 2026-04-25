@@ -1,13 +1,19 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { Trash2, Hammer, PanelRightClose, PanelRight, Settings, FolderPlus, LogOut, UserRound } from 'lucide-react';
-import { CanvasItem, ChatMessage } from './types';
+import type { CanvasItem, ChatMessage, ImageAspectRatio } from './types';
 import AuthPanel from './components/AuthPanel';
 import Canvas from './components/Canvas';
 import Sidebar from './components/Sidebar';
 import Toolbar from './components/Toolbar';
 import ConfigModal from './components/ConfigModal';
 import { generateImage, generateWorkflowImage } from './services/gemini';
+import {
+  DEFAULT_GENERATED_IMAGE_LONG_SIDE,
+  centerFrameOnRect,
+  getAspectRatioFrame,
+  getImageFrameFromSource
+} from './services/imageSizing';
 import {
   CanvasPersistenceState,
   CanvasProject,
@@ -449,26 +455,38 @@ function App() {
     }
   };
 
-  const handleSidebarSendMessage = async (text: string) => {
+  const handleSidebarSendMessage = async (text: string, aspectRatio: ImageAspectRatio = 'auto') => {
     addMessage(text, 'user');
     setIsThinking(true);
     
-    // 在画布中心先创建一个加载占位
     const newId = Math.random().toString(36).substr(2, 9);
-    const initialWidth = contextImage ? contextImage.width : 512;
-    const initialHeight = contextImage ? contextImage.height : 512;
+    const siblingCount = contextImage ? items.filter(item => item.parentId === contextImage.id).length : 0;
+    const fallbackWidth = contextImage ? contextImage.width : DEFAULT_GENERATED_IMAGE_LONG_SIDE;
+    const fallbackHeight = contextImage ? contextImage.height : DEFAULT_GENERATED_IMAGE_LONG_SIDE;
+    const maxLongSide = contextImage
+      ? Math.max(contextImage.width, contextImage.height)
+      : DEFAULT_GENERATED_IMAGE_LONG_SIDE;
+    const initialFrame = getAspectRatioFrame(aspectRatio, fallbackWidth, fallbackHeight, maxLongSide);
+    const canvasCenterX = (-pan.x + window.innerWidth / 2) / zoom;
+    const canvasCenterY = (-pan.y + window.innerHeight / 2) / zoom;
     
     const newItem: CanvasItem = {
       id: newId,
       type: 'image',
       content: '',
-      x: (-pan.x + window.innerWidth/2) / zoom - initialWidth / 2,
-      y: (-pan.y + window.innerHeight/2) / zoom - initialHeight / 2,
-      width: initialWidth,
-      height: initialHeight,
+      x: contextImage
+        ? contextImage.x + contextImage.width + 120 + siblingCount * 36
+        : canvasCenterX - initialFrame.width / 2,
+      y: contextImage
+        ? contextImage.y + siblingCount * 36
+        : canvasCenterY - initialFrame.height / 2,
+      width: initialFrame.width,
+      height: initialFrame.height,
       status: 'loading',
       label: contextImage ? 'AI 编辑中...' : 'AI 生成中...',
-      zIndex: 60,
+      zIndex: Math.max(60, ...items.map(item => item.zIndex || 0)) + 1,
+      parentId: contextImage?.id,
+      prompt: text,
       layers: []
     };
     
@@ -479,20 +497,32 @@ function App() {
       let resultImg: string;
       if (contextImage) {
         // 执行图像编辑
-        resultImg = await generateWorkflowImage(text, contextImage.content);
+        resultImg = await generateWorkflowImage(text, contextImage.content, aspectRatio);
         addMessage('已根据参考图完成编辑。', 'assistant');
       } else {
         // 直接文本生成图片
-        resultImg = await generateImage(text, 'none');
+        resultImg = await generateImage(text, 'none', aspectRatio);
         addMessage('已为你生成新的画面。', 'assistant');
       }
+
+      const finalFrame = await getImageFrameFromSource(
+        resultImg,
+        initialFrame.width,
+        initialFrame.height,
+        Math.max(initialFrame.width, initialFrame.height)
+      );
       
-      setItems(prev => prev.map(i => i.id === newId ? { 
-        ...i, 
-        content: resultImg, 
-        status: 'completed',
-        label: text.substring(0, 10) + (text.length > 10 ? '...' : '')
-      } : i));
+      setItems(prev => prev.map(i => {
+        if (i.id !== newId) return i;
+        const centeredFrame = centerFrameOnRect(i, finalFrame);
+        return {
+          ...i,
+          ...centeredFrame,
+          content: resultImg,
+          status: 'completed',
+          label: text.substring(0, 10) + (text.length > 10 ? '...' : '')
+        };
+      }));
       
       setContextImage(null);
     } catch (error) {

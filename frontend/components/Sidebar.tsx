@@ -1,13 +1,14 @@
 
 import React, { useEffect, useMemo, useRef } from 'react';
-import { ChatMessage, CanvasItem } from '../types';
+import type { ChatMessage, CanvasItem, ImageAspectRatio } from '../types';
 import { Image as ImageIcon, Loader2, Hammer, Send } from 'lucide-react';
 import { optimizePrompt } from '../services/promptOptimizer';
+import { IMAGE_ASPECT_RATIO_OPTIONS } from '../services/imageSizing';
 
 interface SidebarProps {
   messages: ChatMessage[];
   isThinking: boolean;
-  onSendMessage: (text: string) => void;
+  onSendMessage: (text: string, aspectRatio: ImageAspectRatio) => void;
   contextImage: CanvasItem | null;
   imageItems: CanvasItem[];
   onSelectContextImage: (item: CanvasItem) => void;
@@ -20,6 +21,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
   const [contextTagOffset, setContextTagOffset] = React.useState<number | null>(null);
   const [isOptimizingPrompt, setIsOptimizingPrompt] = React.useState(false);
   const [optimizationError, setOptimizationError] = React.useState('');
+  const [selectedAspectRatio, setSelectedAspectRatio] = React.useState<ImageAspectRatio>('auto');
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLDivElement>(null);
   const lastContextImageIdRef = useRef<string | null>(null);
@@ -190,7 +192,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
 
       try {
         const optimizedPrompt = await optimizePrompt(prompt, contextImage ? 'image-to-image' : 'text-to-image');
-        onSendMessage(optimizedPrompt);
+        onSendMessage(optimizedPrompt, selectedAspectRatio);
         setInputValue('');
         setMentionQuery(null);
         setContextTagOffset(null);
@@ -352,6 +354,28 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
             </div>
           )}
 
+          <div className="mb-2 flex items-center gap-2 rounded-2xl border border-gray-100 bg-gray-50 p-1.5">
+            <span className="shrink-0 px-2 text-[10px] font-black uppercase tracking-widest text-gray-400">画幅</span>
+            <div className="scrollbar-hide flex min-w-0 flex-1 gap-1 overflow-x-auto">
+              {IMAGE_ASPECT_RATIO_OPTIONS.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  title={option.title}
+                  disabled={isThinking || isOptimizingPrompt}
+                  onClick={() => setSelectedAspectRatio(option.value)}
+                  className={`shrink-0 rounded-xl px-2.5 py-1.5 text-[11px] font-black transition-all ${
+                    selectedAspectRatio === option.value
+                      ? 'bg-black text-white shadow-lg shadow-black/10'
+                      : 'bg-white text-gray-500 hover:bg-indigo-50 hover:text-indigo-600'
+                  } disabled:opacity-40`}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <div className="flex items-end gap-2 w-full pr-2 py-2 pl-3 bg-gray-50 border border-gray-200 rounded-2xl focus-within:ring-4 focus-within:ring-black/5 focus-within:border-black transition-all">
             <div
               ref={inputRef}
@@ -369,9 +393,13 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
             <button
               type="submit"
               disabled={!inputValue.trim() || isThinking || isOptimizingPrompt}
-              className="w-10 h-10 bg-black text-white rounded-xl disabled:opacity-30 hover:scale-105 active:scale-95 transition-all flex items-center justify-center shadow-lg shadow-black/10 flex-shrink-0"
+              className={`w-10 h-10 text-white rounded-xl hover:scale-105 active:scale-95 transition-all flex items-center justify-center shadow-lg shadow-black/10 flex-shrink-0 ${
+                isOptimizingPrompt
+                  ? 'prompt-optimizing-button'
+                  : 'bg-black disabled:opacity-30'
+              }`}
             >
-              <Send size={18} />
+              {isOptimizingPrompt ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
             </button>
           </div>
           {optimizationError && (

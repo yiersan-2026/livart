@@ -1,0 +1,13 @@
+.git
+.claude
+.gstack
+.vite
+.DS_Store
+**/.env
+**/.env.*
+!**/.env.example
+**/node_modules
+**/dist
+**/target
+**/*.log
+docs/screenshots

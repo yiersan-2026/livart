@@ -1,4 +1,5 @@
 import { getApiConfig } from './config';
+import { authHeaders } from './auth';
 
 export type PromptOptimizeMode = 'text-to-image' | 'image-to-image';
 
@@ -10,7 +11,8 @@ export const optimizePrompt = async (prompt: string, mode: PromptOptimizeMode) =
     headers: {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
-      ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {})
+      ...authHeaders(),
+      ...(config.apiKey ? { 'X-Livart-Api-Key': config.apiKey } : {})
     },
     body: JSON.stringify({
       prompt,

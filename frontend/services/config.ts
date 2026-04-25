@@ -50,7 +50,7 @@ const defaultBaseUrl = normalizeBaseUrl(process.env.IMAGE_API_BASE_URL || '');
 export const DEFAULT_API_CONFIG: ApiConfig = {
   baseUrl: defaultBaseUrl,
   ...buildImageApiUrls(defaultBaseUrl),
-  apiKey: process.env.IMAGE_API_KEY || '',
+  apiKey: '',
   model: process.env.IMAGE_API_MODEL || 'gpt-image-2',
   chatModel: process.env.PROMPT_OPTIMIZER_MODEL || process.env.CHAT_API_MODEL || 'gpt-5.5'
 };
@@ -71,7 +71,7 @@ export const normalizeApiConfig = (config: Partial<ApiConfig>): ApiConfig => {
   return {
     baseUrl,
     ...imageApiUrls,
-    apiKey: (config.apiKey || DEFAULT_API_CONFIG.apiKey).trim(),
+    apiKey: (config.apiKey || '').trim(),
     model: imageModel,
     chatModel
   };

@@ -1,6 +1,6 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { CanvasItem } from '../types';
+import type { CanvasItem, ImageAspectRatio } from '../types';
 import { 
   Loader2, Trash2, Type, 
   Sparkles, ChevronUp, ChevronDown, 
@@ -10,6 +10,12 @@ import {
 } from 'lucide-react';
 import { editImage, generateWorkflowImage } from '../services/gemini';
 import { optimizePrompt } from '../services/promptOptimizer';
+import {
+  IMAGE_ASPECT_RATIO_OPTIONS,
+  centerFrameOnRect,
+  getAspectRatioFrame,
+  getImageFrameFromSource
+} from '../services/imageSizing';
 
 interface CanvasProps {
   items: CanvasItem[];
@@ -160,6 +166,7 @@ const Canvas: React.FC<CanvasProps> = ({
   const [inlineEditErrors, setInlineEditErrors] = useState<Record<string, string>>({});
   const [inlineEditingIds, setInlineEditingIds] = useState<Set<string>>(() => new Set());
   const [inlinePromptOptimizingIds, setInlinePromptOptimizingIds] = useState<Set<string>>(() => new Set());
+  const [inlineEditAspectRatio, setInlineEditAspectRatio] = useState<ImageAspectRatio>('auto');
   const [localRedrawItemId, setLocalRedrawItemId] = useState<string | null>(null);
   const inlineEditingIdsRef = useRef<Set<string>>(new Set());
   const inlinePromptOptimizingIdsRef = useRef<Set<string>>(new Set());
@@ -584,14 +591,20 @@ const Canvas: React.FC<CanvasProps> = ({
       const result = await generateWorkflowImage(frameworkPrompt, snapshot);
       
       const newId = Math.random().toString(36).substr(2, 9);
+      const workflowResultFrame = await getImageFrameFromSource(
+        result,
+        selectedItem.width,
+        selectedItem.height,
+        Math.max(selectedItem.width, selectedItem.height)
+      );
       const newItem: CanvasItem = {
         id: newId,
         type: 'image',
         content: result,
         x: selectedItem.x + selectedItem.width + 100, 
         y: selectedItem.y,
-        width: selectedItem.width,
-        height: selectedItem.height,
+        width: workflowResultFrame.width,
+        height: workflowResultFrame.height,
         status: 'completed',
         label: frameworkPrompt || '视觉逻辑生成',
         zIndex: 500,
@@ -617,6 +630,7 @@ const Canvas: React.FC<CanvasProps> = ({
 
     const targetItem = selectedItem;
     const useLocalMask = localRedrawItemId === targetItem.id;
+    let resultItemId: string | null = null;
     setInlineEditingForItem(targetItem.id, true);
     setInlinePromptOptimizingForItem(targetItem.id, true);
     clearInlineEditError(targetItem.id);
@@ -636,7 +650,6 @@ const Canvas: React.FC<CanvasProps> = ({
       const optimizedPrompt = await optimizePrompt(promptToOptimize, 'image-to-image');
       setInlineEditPromptForItem(targetItem.id, optimizedPrompt);
       setInlinePromptOptimizingForItem(targetItem.id, false);
-      onItemUpdate(targetItem.id, { status: 'loading' });
 
       let maskDataUrl: string | null | undefined;
       if (useLocalMask) {
@@ -646,21 +659,63 @@ const Canvas: React.FC<CanvasProps> = ({
         }
       }
 
-      const result = await editImage(optimizedPrompt, targetItem.content, maskDataUrl || undefined);
-      onItemUpdate(targetItem.id, {
+      const siblingCount = items.filter(item => item.parentId === targetItem.id).length;
+      const nextZIndex = Math.max(0, ...items.map(item => item.zIndex || 0)) + 1;
+      const newId = Math.random().toString(36).substr(2, 9);
+      const resultMaxLongSide = Math.max(targetItem.width, targetItem.height);
+      const resultFrame = getAspectRatioFrame(
+        inlineEditAspectRatio,
+        targetItem.width,
+        targetItem.height,
+        resultMaxLongSide
+      );
+      const resultItem: CanvasItem = {
+        id: newId,
+        type: 'image',
+        content: '',
+        x: targetItem.x + targetItem.width + 120 + siblingCount * 36,
+        y: targetItem.y + siblingCount * 36,
+        width: resultFrame.width,
+        height: resultFrame.height,
+        status: 'loading',
+        label: 'AI 重绘中...',
+        zIndex: nextZIndex,
+        parentId: targetItem.id,
+        prompt: optimizedPrompt,
+        layers: []
+      };
+
+      onItemAdd(resultItem);
+      resultItemId = newId;
+      setSelectedIds([newId]);
+
+      const result = await editImage(optimizedPrompt, targetItem.content, maskDataUrl || undefined, inlineEditAspectRatio);
+      const finalFrame = await getImageFrameFromSource(
+        result,
+        resultFrame.width,
+        resultFrame.height,
+        resultMaxLongSide
+      );
+      onItemUpdate(newId, {
+        ...centerFrameOnRect(resultItem, finalFrame),
         content: result,
         status: 'completed',
-        label: optimizedPrompt.substring(0, 16) + (optimizedPrompt.length > 16 ? '...' : ''),
-        maskData: useLocalMask ? undefined : targetItem.maskData
+        label: optimizedPrompt.substring(0, 16) + (optimizedPrompt.length > 16 ? '...' : '')
       });
       if (useLocalMask) {
+        onItemUpdate(targetItem.id, { maskData: undefined });
         setLocalRedrawItemId(prev => prev === targetItem.id ? null : prev);
         setActiveTool('select');
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : '未知错误';
       console.error(error);
-      onItemUpdate(targetItem.id, { status: 'completed' });
+      if (resultItemId) {
+        onItemUpdate(resultItemId, {
+          status: 'error',
+          label: 'AI 重绘失败'
+        });
+      }
       setInlineEditErrors(prev => ({ ...prev, [targetItem.id]: message }));
     } finally {
       setInlinePromptOptimizingForItem(targetItem.id, false);
@@ -697,6 +752,26 @@ const Canvas: React.FC<CanvasProps> = ({
   };
 
   const contextMenuItem = items.find(i => i.id === contextMenu?.id);
+  const parentConnections = items.flatMap((item) => {
+    if (!item.parentId) return [];
+    const parent = items.find(candidate => candidate.id === item.parentId);
+    if (!parent) return [];
+
+    const parentCenterX = parent.x + parent.width / 2;
+    const itemCenterX = item.x + item.width / 2;
+    const connectsToRight = itemCenterX >= parentCenterX;
+    const direction = connectsToRight ? 1 : -1;
+    const startX = connectsToRight ? parent.x + parent.width : parent.x;
+    const endX = connectsToRight ? item.x : item.x + item.width;
+    const startY = parent.y + parent.height / 2;
+    const endY = item.y + item.height / 2;
+    const bend = Math.max(80, Math.abs(endX - startX) * 0.45);
+
+    return [{
+      id: `${parent.id}-${item.id}`,
+      path: `M ${startX} ${startY} C ${startX + direction * bend} ${startY}, ${endX - direction * bend} ${endY}, ${endX} ${endY}`
+    }];
+  });
 
   return (
     <div 
@@ -721,6 +796,32 @@ const Canvas: React.FC<CanvasProps> = ({
         className="absolute transition-transform duration-75 will-change-transform" 
         style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: '0 0' }}
       >
+        {parentConnections.length > 0 && (
+          <svg
+            className="absolute overflow-visible pointer-events-none"
+            style={{ left: 0, top: 0, width: 1, height: 1, zIndex: 0 }}
+          >
+            <defs>
+              <marker id="redraw-connection-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#6366f1" />
+              </marker>
+            </defs>
+            {parentConnections.map(connection => (
+              <path
+                key={connection.id}
+                d={connection.path}
+                fill="none"
+                stroke="#6366f1"
+                strokeWidth={2}
+                strokeDasharray="8 8"
+                strokeLinecap="round"
+                markerEnd="url(#redraw-connection-arrow)"
+                opacity={0.75}
+              />
+            ))}
+          </svg>
+        )}
+
         {/* 底层内容 */}
         {items.map((item) => (
           <div
@@ -862,7 +963,22 @@ const Canvas: React.FC<CanvasProps> = ({
             }}
             onMouseDown={(event) => event.stopPropagation()}
           >
-            <div className="flex w-[420px] max-w-[70vw] items-center gap-2 rounded-2xl border border-gray-100 bg-white/95 p-1.5 shadow-[0_20px_60px_-24px_rgba(0,0,0,0.22)]">
+            <div className="flex w-[520px] max-w-[80vw] items-center gap-2 rounded-2xl border border-gray-100 bg-white/95 p-1.5 shadow-[0_20px_60px_-24px_rgba(0,0,0,0.22)]">
+              <label className="flex shrink-0 items-center gap-1.5 rounded-xl bg-gray-50 px-2 py-1.5 text-[11px] font-black text-gray-500">
+                画幅
+                <select
+                  value={inlineEditAspectRatio}
+                  disabled={selectedItemIsInlineEditing || selectedItem.status === 'loading'}
+                  onChange={(event) => setInlineEditAspectRatio(event.target.value as ImageAspectRatio)}
+                  className="bg-transparent text-[11px] font-black text-gray-700 outline-none disabled:opacity-40"
+                >
+                  {IMAGE_ASPECT_RATIO_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <button
                 type="button"
                 onClick={() => {
@@ -911,7 +1027,7 @@ const Canvas: React.FC<CanvasProps> = ({
                 </>
               )}
             </div>
-            <div className="relative flex items-end w-[420px] max-w-[70vw] p-1.5 bg-white border border-gray-100 rounded-2xl shadow-[0_32px_80px_-16px_rgba(0,0,0,0.18)]">
+            <div className="relative flex items-end w-[520px] max-w-[80vw] p-1.5 bg-white border border-gray-100 rounded-2xl shadow-[0_32px_80px_-16px_rgba(0,0,0,0.18)]">
               <textarea
                 value={inlineEditPrompt}
                 onChange={(event) => setInlineEditPromptForItem(selectedItem.id, event.target.value)}
@@ -930,14 +1046,18 @@ const Canvas: React.FC<CanvasProps> = ({
               <button
                 type="submit"
                 disabled={!inlineEditPrompt.trim() || selectedItemIsInlineEditing || selectedItem.status === 'loading' || selectedItemIsInlinePromptOptimizing}
-                className="absolute right-3 w-9 h-9 bg-black text-white rounded-lg flex items-center justify-center disabled:opacity-30 hover:scale-105 active:scale-95 transition-all shadow-lg"
+                className={`absolute right-3 w-9 h-9 text-white rounded-lg flex items-center justify-center hover:scale-105 active:scale-95 transition-all shadow-lg ${
+                  selectedItemIsInlinePromptOptimizing
+                    ? 'prompt-optimizing-button'
+                    : 'bg-black disabled:opacity-30'
+                }`}
                 title={selectedItemIsLocalRedraw ? '局部重绘当前图片' : '重绘当前图片'}
               >
                 {selectedItemIsInlineEditing || selectedItem.status === 'loading' || selectedItemIsInlinePromptOptimizing ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
               </button>
             </div>
             {selectedInlineEditError && (
-              <div className="max-w-[420px] rounded-xl bg-red-50 border border-red-100 px-3 py-2 text-[11px] font-bold text-red-500 shadow-lg">
+              <div className="max-w-[520px] rounded-xl bg-red-50 border border-red-100 px-3 py-2 text-[11px] font-bold text-red-500 shadow-lg">
                 {selectedInlineEditError}
               </div>
             )}

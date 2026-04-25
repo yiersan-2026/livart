@@ -83,7 +83,7 @@ const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose, onSaved, req
               type="text"
               value={config.baseUrl}
               onChange={(event) => setConfig({ ...config, baseUrl: event.target.value })}
-              placeholder="https://www.kuyaoapi.com/v1/"
+              placeholder="https://your-openai-compatible-endpoint.example/v1/"
               className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-black/10 focus:border-gray-300 transition-all"
             />
             <p className="text-xs text-gray-400 mt-1">只填基础地址即可，例如以 `/v1` 结尾的 OpenAI 兼容中转站地址。</p>

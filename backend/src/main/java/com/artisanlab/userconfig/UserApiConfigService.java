@@ -25,6 +25,15 @@ public class UserApiConfigService {
         return entity == null ? null : toResponse(entity);
     }
 
+    @Transactional(readOnly = true)
+    public UserApiConfigDtos.Response getRequiredConfig(UUID userId) {
+        UserApiConfigEntity entity = mapper.findByUserId(userId);
+        if (entity == null) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "USER_API_CONFIG_REQUIRED", "请先配置中转站 Base URL 和 API Key");
+        }
+        return toResponse(entity);
+    }
+
     @Transactional
     public UserApiConfigDtos.Response saveConfig(UUID userId, UserApiConfigDtos.SaveRequest request) {
         String baseUrl = normalizeBaseUrl(request.baseUrl());

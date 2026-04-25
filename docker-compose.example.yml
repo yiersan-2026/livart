@@ -1,0 +1,89 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-app}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-livart_postgres_change_me}
+    volumes:
+      - livart-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-app}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-livart}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-livart_rabbit_change_me}
+    volumes:
+      - livart-rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-livartminio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-livart_minio_change_me}
+    volumes:
+      - livart-minio-data:/data
+    ports:
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+    restart: unless-stopped
+
+  livart:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: livart:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    ports:
+      - "${LIVART_PORT:-8080}:8080"
+    environment:
+      SERVER_PORT: 8080
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-app}
+      DB_USER: ${POSTGRES_USER:-postgres}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-livart_postgres_change_me}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: ${RABBITMQ_PORT:-5672}
+      RABBITMQ_USER: ${RABBITMQ_DEFAULT_USER:-livart}
+      RABBITMQ_PASSWORD: ${RABBITMQ_DEFAULT_PASS:-livart_rabbit_change_me}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-livartminio}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-livart_minio_change_me}
+      MINIO_BUCKET: ${MINIO_BUCKET:-livart}
+      JWT_SECRET: ${JWT_SECRET:-livart-docker-dev-jwt-secret-change-me-at-least-32-bytes}
+      JWT_TTL_DAYS: ${JWT_TTL_DAYS:-30}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
+      CANVAS_SAVE_QUEUE: ${CANVAS_SAVE_QUEUE:-livart.canvas.save}
+      CANVAS_SAVE_DEAD_LETTER_QUEUE: ${CANVAS_SAVE_DEAD_LETTER_QUEUE:-livart.canvas.save.dead}
+      WAIT_TIMEOUT_SECONDS: ${WAIT_TIMEOUT_SECONDS:-120}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  livart-postgres-data:
+  livart-rabbitmq-data:
+  livart-minio-data:

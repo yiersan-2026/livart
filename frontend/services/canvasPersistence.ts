@@ -115,6 +115,15 @@ const persistImageValue = async (value: string | undefined, filenameSeed: string
   return uploadDataImage(value, filenameSeed);
 };
 
+const normalizeTransientItemState = (item: CanvasItem): CanvasItem | null => {
+  if (item.status !== 'loading') return item;
+  if (item.type === 'image' && !item.content) return null;
+  return {
+    ...item,
+    status: 'completed'
+  };
+};
+
 const persistItemAssets = async (item: CanvasItem): Promise<CanvasItem> => {
   const [content, drawingData, maskData, compositeImage, layers] = await Promise.all([
     persistImageValue(item.content, `${item.id}-content`),
@@ -168,7 +177,9 @@ const toCanvasProject = (canvas: CanvasResponse | CanvasProject): CanvasProject 
 const normalizeLoadedState = (state: Partial<CanvasPersistenceState> | null): CanvasPersistenceState => {
   if (!state || !Array.isArray(state.items)) return createEmptyState();
   return {
-    items: state.items,
+    items: state.items
+      .map(normalizeTransientItemState)
+      .filter((item): item is CanvasItem => item !== null),
     messages: Array.isArray(state.messages) ? state.messages : [],
     viewport: {
       zoom: typeof state.viewport?.zoom === 'number' ? state.viewport.zoom : 1,
@@ -240,7 +251,10 @@ export const saveCanvasProject = async (
   title: string
 ) => {
   currentCanvasId = canvasId;
-  const persistentItems = await Promise.all(state.items.map(persistItemAssets));
+  const durableItems = state.items
+    .map(normalizeTransientItemState)
+    .filter((item): item is CanvasItem => item !== null);
+  const persistentItems = await Promise.all(durableItems.map(persistItemAssets));
   const persistentState: CanvasPersistenceState = {
     ...state,
     items: persistentItems,
