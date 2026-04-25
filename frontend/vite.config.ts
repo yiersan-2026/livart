@@ -5,7 +5,7 @@ import react from '@vitejs/plugin-react';
 
 const REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
 const PROMPT_OPTIMIZER_TIMEOUT_MS = 2 * 60 * 1000;
-const IMAGE_PROXY_MAX_ATTEMPTS = 3;
+const IMAGE_PROXY_MAX_ATTEMPTS = 1;
 
 const joinUrl = (baseUrl: string, route: string) => {
   if (!baseUrl) return '';
@@ -444,6 +444,11 @@ export default defineConfig(({ mode }) => {
           '/api/health': {
             target: backendApiBaseUrl,
             changeOrigin: true
+          },
+          '/ws': {
+            target: backendApiBaseUrl,
+            changeOrigin: true,
+            ws: true
           }
         }
       },

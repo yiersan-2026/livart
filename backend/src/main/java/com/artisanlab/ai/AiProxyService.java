@@ -37,7 +37,7 @@ public class AiProxyService {
     private static final Duration IMAGE_REQUEST_TIMEOUT = Duration.ofMinutes(10);
     private static final Duration IMAGE_JOB_TTL = Duration.ofHours(2);
     private static final Duration PROMPT_OPTIMIZER_TIMEOUT = Duration.ofMinutes(2);
-    private static final int IMAGE_PROXY_MAX_ATTEMPTS = 3;
+    private static final int IMAGE_PROXY_MAX_ATTEMPTS = 1;
     private static final List<String> NEGATIVE_PROMPT_TERMS = List.of(
             "画布 UI",
             "工具栏",
@@ -95,15 +95,21 @@ public class AiProxyService {
 
     private final UserApiConfigService userApiConfigService;
     private final ObjectMapper objectMapper;
+    private final ImageJobEventBroadcaster imageJobEventBroadcaster;
     private final HttpClient httpClient;
     private final Map<UUID, ImageJobState> imageJobs = new ConcurrentHashMap<>();
     private final ExecutorService imageJobExecutor = Executors.newFixedThreadPool(
             Math.max(2, Runtime.getRuntime().availableProcessors())
     );
 
-    public AiProxyService(UserApiConfigService userApiConfigService, ObjectMapper objectMapper) {
+    public AiProxyService(
+            UserApiConfigService userApiConfigService,
+            ObjectMapper objectMapper,
+            ImageJobEventBroadcaster imageJobEventBroadcaster
+    ) {
         this.userApiConfigService = userApiConfigService;
         this.objectMapper = objectMapper;
+        this.imageJobEventBroadcaster = imageJobEventBroadcaster;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(30))
                 .followRedirects(HttpClient.Redirect.NORMAL)
@@ -153,6 +159,7 @@ public class AiProxyService {
         UUID jobId = UUID.randomUUID();
         ImageJobState job = new ImageJobState(jobId, userId, label);
         imageJobs.put(jobId, job);
+        publishImageJob(job);
 
         String accept = request.getHeader(HttpHeaders.ACCEPT);
         String contentType = request.getContentType();
@@ -164,21 +171,32 @@ public class AiProxyService {
     }
 
     public ResponseEntity<Map<String, Object>> getImageJob(UUID userId, String jobId) {
+        try {
+            return ResponseEntity.ok(getImageJobSnapshot(userId, jobId));
+        } catch (ApiException exception) {
+            return ResponseEntity.status(exception.status()).body(Map.of(
+                    "error", exception.getMessage(),
+                    "code", exception.code()
+            ));
+        }
+    }
+
+    public Map<String, Object> getImageJobSnapshot(UUID userId, String jobId) {
         cleanupImageJobs();
 
         UUID parsedJobId;
         try {
             parsedJobId = UUID.fromString(jobId);
         } catch (IllegalArgumentException exception) {
-            return ResponseEntity.badRequest().body(Map.of("error", "无效的图片任务 ID"));
+            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_IMAGE_JOB_ID", "无效的图片任务 ID");
         }
 
         ImageJobState job = imageJobs.get(parsedJobId);
         if (job == null || !job.userId().equals(userId)) {
-            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "图片任务不存在或已过期"));
+            throw new ApiException(HttpStatus.NOT_FOUND, "IMAGE_JOB_NOT_FOUND", "图片任务不存在或已过期");
         }
 
-        return ResponseEntity.ok(toJobResponse(job));
+        return toJobResponse(job);
     }
 
     private void runImageJob(
@@ -190,15 +208,18 @@ public class AiProxyService {
             byte[] body
     ) {
         job.markRunning();
+        publishImageJob(job);
 
         try {
             ImageProxyResult result = executeImageRequest(job.label(), targetUrl, apiKey, accept, contentType, body);
             if (result.statusCode() >= 200 && result.statusCode() <= 299) {
                 job.markCompleted(result);
+                publishImageJob(job);
                 return;
             }
 
             job.markFailed(result.statusCode(), result.body(), result.contentType(), result.attempts(), result.requestId());
+            publishImageJob(job);
         } catch (Exception exception) {
             log.error("[image-job] {} failed jobId={} error={}", job.label(), job.id(), safeMessage(exception));
             try {
@@ -207,10 +228,16 @@ public class AiProxyService {
                         "detail", safeMessage(exception)
                 ), 0);
                 job.markFailed(result.statusCode(), result.body(), result.contentType(), result.attempts(), result.requestId());
+                publishImageJob(job);
             } catch (IOException ioException) {
                 job.markFailed(502, safeMessage(exception).getBytes(StandardCharsets.UTF_8), "text/plain; charset=utf-8", 0, "");
+                publishImageJob(job);
             }
         }
+    }
+
+    private void publishImageJob(ImageJobState job) {
+        imageJobEventBroadcaster.publishImageJob(job.userId(), toJobResponse(job));
     }
 
     private ImageProxyResult executeImageRequest(
@@ -419,10 +446,36 @@ public class AiProxyService {
         } else if ("error".equals(job.status())) {
             response.put("upstreamStatus", job.upstreamStatus());
             response.put("contentType", job.contentType());
-            response.put("error", parseResponsePayload(job.body(), job.contentType()));
+            response.put("error", toJobErrorPayload(job));
         }
 
         return response;
+    }
+
+    private Map<String, Object> toJobErrorPayload(ImageJobState job) {
+        Object upstreamPayload = parseResponsePayload(job.body(), job.contentType());
+        Map<String, Object> error = new LinkedHashMap<>();
+        String message = extractUpstreamErrorMessage(upstreamPayload, job.body());
+        String code = extractUpstreamErrorCode(upstreamPayload);
+        String type = extractUpstreamErrorType(upstreamPayload);
+
+        error.put("message", message.isBlank() ? "上游 AI 接口调用失败" : message);
+        error.put("upstreamStatus", job.upstreamStatus());
+        error.put("attempts", job.attempts());
+        if (!code.isBlank()) {
+            error.put("code", code);
+        }
+        if (!type.isBlank()) {
+            error.put("type", type);
+        }
+        if (job.requestId() != null && !job.requestId().isBlank()) {
+            error.put("requestId", job.requestId());
+        }
+        if (upstreamPayload != null) {
+            error.put("upstream", upstreamPayload);
+        }
+
+        return error;
     }
 
     private Object parseResponsePayload(byte[] body, String contentType) {
@@ -437,6 +490,56 @@ public class AiProxyService {
         }
 
         return getBodyPreview(body);
+    }
+
+    private String extractUpstreamErrorMessage(Object payload, byte[] fallbackBody) {
+        if (payload instanceof Map<?, ?> map) {
+            Object nestedError = map.get("error");
+            String nestedMessage = getStringField(nestedError, "message");
+            String nestedDetail = getStringField(nestedError, "detail");
+            String topMessage = getStringField(map, "message");
+            String topDetail = getStringField(map, "detail");
+            String topError = nestedError instanceof String text ? text : "";
+
+            if (!topDetail.isBlank() && topError.toLowerCase(Locale.ROOT).contains("upstream request failed")) {
+                return topDetail;
+            }
+
+            return firstNonBlank(nestedMessage, topMessage, nestedDetail, topDetail, topError, getBodyPreview(fallbackBody));
+        }
+
+        if (payload instanceof String text) {
+            return text;
+        }
+
+        return getBodyPreview(fallbackBody);
+    }
+
+    private String extractUpstreamErrorCode(Object payload) {
+        if (!(payload instanceof Map<?, ?> map)) return "";
+        Object nestedError = map.get("error");
+        return firstNonBlank(getStringField(nestedError, "code"), getStringField(map, "code"));
+    }
+
+    private String extractUpstreamErrorType(Object payload) {
+        if (!(payload instanceof Map<?, ?> map)) return "";
+        Object nestedError = map.get("error");
+        return firstNonBlank(getStringField(nestedError, "type"), getStringField(map, "type"));
+    }
+
+    private String getStringField(Object source, String fieldName) {
+        if (!(source instanceof Map<?, ?> map)) return "";
+        Object value = map.get(fieldName);
+        return value instanceof String text ? text : "";
+    }
+
+    private String firstNonBlank(String... values) {
+        for (String value : values) {
+            if (value != null && !value.isBlank()) {
+                return value;
+            }
+        }
+        return "";
     }
 
     private void cleanupImageJobs() {

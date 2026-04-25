@@ -1,6 +1,6 @@
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Trash2, Hammer, PanelRightClose, PanelRight, Settings, FolderPlus, LogOut, UserRound } from 'lucide-react';
+import { Trash2, Hammer, PanelRightClose, PanelRight, Settings, FolderPlus, LogOut, UserRound, Loader2, X } from 'lucide-react';
 import type { CanvasItem, ChatMessage, ImageAspectRatio } from './types';
 import AuthPanel from './components/AuthPanel';
 import Canvas from './components/Canvas';
@@ -59,6 +59,97 @@ interface PendingCanvasSave {
   state: CanvasPersistenceState;
 }
 
+interface CreateProjectModalProps {
+  isOpen: boolean;
+  title: string;
+  isCreating: boolean;
+  error: string;
+  onTitleChange: (title: string) => void;
+  onClose: () => void;
+  onSubmit: () => void;
+}
+
+const CreateProjectModal: React.FC<CreateProjectModalProps> = ({
+  isOpen,
+  title,
+  isCreating,
+  error,
+  onTitleChange,
+  onClose,
+  onSubmit
+}) => {
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-[5000000] flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm">
+      <div className="w-full max-w-md overflow-hidden rounded-[28px] border border-white/70 bg-white shadow-[0_40px_100px_-30px_rgba(0,0,0,0.35)]">
+        <div className="flex items-start justify-between gap-4 border-b border-gray-100 px-6 py-5">
+          <div>
+            <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-2xl bg-indigo-50 text-indigo-600">
+              <FolderPlus size={20} />
+            </div>
+            <h2 className="text-xl font-black tracking-tight text-gray-900">新建项目</h2>
+            <p className="mt-1 text-xs font-bold text-gray-400">创建一个独立画布，当前项目会继续自动保存。</p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={isCreating}
+            className="rounded-xl p-2 text-gray-300 transition-all hover:bg-gray-100 hover:text-gray-700 disabled:opacity-30"
+            title="关闭"
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        <form
+          className="space-y-4 px-6 py-5"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onSubmit();
+          }}
+        >
+          <div>
+            <label className="mb-2 block text-sm font-black text-gray-700">项目名称</label>
+            <input
+              autoFocus
+              value={title}
+              onChange={(event) => onTitleChange(event.target.value)}
+              placeholder="例如：品牌海报方案"
+              className="w-full rounded-2xl border border-gray-200 px-4 py-3 text-sm font-bold outline-none transition-all focus:border-indigo-200 focus:ring-4 focus:ring-indigo-500/10"
+            />
+          </div>
+
+          {error && (
+            <div className="rounded-2xl border border-red-100 bg-red-50 px-4 py-3 text-sm font-bold text-red-500">
+              {error}
+            </div>
+          )}
+
+          <div className="flex items-center justify-end gap-3 pt-1">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={isCreating}
+              className="rounded-2xl px-4 py-3 text-sm font-black text-gray-400 transition-all hover:bg-gray-100 hover:text-gray-700 disabled:opacity-30"
+            >
+              取消
+            </button>
+            <button
+              type="submit"
+              disabled={isCreating}
+              className="flex items-center gap-2 rounded-2xl bg-black px-5 py-3 text-sm font-black text-white shadow-lg transition-all hover:opacity-90 active:scale-[0.99] disabled:opacity-40"
+            >
+              {isCreating && <Loader2 size={16} className="animate-spin" />}
+              创建项目
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};
+
 function App() {
   const [items, setItems] = useState<CanvasItem[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([createWelcomeMessage()]);
@@ -78,6 +169,10 @@ function App() {
   const [projects, setProjects] = useState<CanvasProject[]>([]);
   const [currentProjectId, setCurrentProjectId] = useState('');
   const [currentProjectTitle, setCurrentProjectTitle] = useState('默认画布');
+  const [isCreateProjectModalOpen, setIsCreateProjectModalOpen] = useState(false);
+  const [newProjectTitle, setNewProjectTitle] = useState('');
+  const [isCreatingProject, setIsCreatingProject] = useState(false);
+  const [createProjectError, setCreateProjectError] = useState('');
   const saveTimerRef = useRef<number | null>(null);
   const pendingSaveRef = useRef<PendingCanvasSave | null>(null);
   const isSavingCanvasRef = useRef(false);
@@ -384,23 +479,37 @@ function App() {
     });
   };
 
+  const openCreateProjectModal = () => {
+    setNewProjectTitle(`新项目 ${projects.length + 1}`);
+    setCreateProjectError('');
+    setIsCreateProjectModalOpen(true);
+  };
+
   const handleCreateProject = async () => {
-    const title = window.prompt('请输入项目名称', `新项目 ${projects.length + 1}`);
-    if (title === null) return;
+    if (isCreatingProject) return;
+
+    const fallbackTitle = `新项目 ${projects.length + 1}`;
+    const title = newProjectTitle.trim() || fallbackTitle;
 
     flushQueuedCanvasSave();
+    setIsCreatingProject(true);
+    setCreateProjectError('');
     setHasLoadedCanvas(false);
     setCanvasSyncStatus('loading');
 
     try {
-      const created = await createCanvasProject(title.trim() || `新项目 ${projects.length + 1}`);
+      const created = await createCanvasProject(title);
       setProjects(prev => [created.project, ...prev]);
       applyLoadedProject(created.project, created.state);
+      setIsCreateProjectModalOpen(false);
+      setNewProjectTitle('');
       setCanvasSyncStatus('saved');
     } catch (error) {
       console.warn('[canvas-persistence] create project failed', error);
+      setCreateProjectError(error instanceof Error ? error.message : '创建项目失败，请稍后重试');
       setCanvasSyncStatus('error');
     } finally {
+      setIsCreatingProject(false);
       setHasLoadedCanvas(true);
     }
   };
@@ -698,7 +807,7 @@ function App() {
                 ))}
               </select>
               <button
-                onClick={handleCreateProject}
+                onClick={openCreateProjectModal}
                 disabled={!hasLoadedCanvas}
                 className="p-1.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all disabled:opacity-40"
                 title="新建项目"
@@ -784,6 +893,21 @@ function App() {
             setShowConfigModal(false);
           }
         }}
+      />
+
+      <CreateProjectModal
+        isOpen={isCreateProjectModalOpen}
+        title={newProjectTitle}
+        isCreating={isCreatingProject}
+        error={createProjectError}
+        onTitleChange={setNewProjectTitle}
+        onClose={() => {
+          if (!isCreatingProject) {
+            setIsCreateProjectModalOpen(false);
+            setCreateProjectError('');
+          }
+        }}
+        onSubmit={handleCreateProject}
       />
     </div>
   );

@@ -86,7 +86,8 @@ public class SecurityConfig {
                                 "/api/health",
                                 "/api/auth/register",
                                 "/api/auth/login",
-                                "/api/assets/*/content"
+                                "/api/assets/*/content",
+                                "/ws/image-jobs"
                         ).permitAll()
                         .anyRequest().authenticated())
                 .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);

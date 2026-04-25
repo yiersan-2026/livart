@@ -1,5 +1,5 @@
 import { getApiConfig, hasApiConfig } from './config';
-import { authHeaders } from './auth';
+import { authHeaders, getStoredAuthSession } from './auth';
 import type { ImageAspectRatio } from '../types';
 import { aspectRatioToGeminiAspectRatio, aspectRatioToImageApiSize } from './imageSizing';
 
@@ -10,6 +10,7 @@ const IMAGE_TO_IMAGE_PROXY_URL = '/api/images/edits';
 const TEXT_TO_IMAGE_JOB_URL = '/api/image-jobs/generations';
 const IMAGE_TO_IMAGE_JOB_URL = '/api/image-jobs/edits';
 const IMAGE_JOB_STATUS_URL = '/api/image-jobs';
+const IMAGE_JOB_WS_PATH = '/ws/image-jobs';
 
 const isGeminiModel = (model: string) => model.startsWith('gemini-');
 
@@ -21,6 +22,23 @@ export interface ImageJobSubmission {
 interface ImageJobStatus extends ImageJobSubmission {
   response?: unknown;
   error?: unknown;
+  upstreamStatus?: number;
+  requestId?: string;
+  attempts?: number;
+}
+
+interface ImageJobSocketMessage {
+  type?: string;
+  job?: ImageJobStatus;
+  jobId?: string;
+  error?: unknown;
+}
+
+class ImageJobWebSocketUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ImageJobWebSocketUnavailableError';
+  }
 }
 
 const extractBase64 = (data: string) => data.includes(',') ? data.split(',')[1] : data;
@@ -64,6 +82,12 @@ const imageEditProxyHeaders = (config: ReturnType<typeof getApiConfig>) => ({
 });
 
 const wait = (delayMs: number) => new Promise(resolve => setTimeout(resolve, delayMs));
+
+const getImageJobWebSocketUrl = () => {
+  if (typeof window === 'undefined') return '';
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${window.location.host}${IMAGE_JOB_WS_PATH}`;
+};
 
 const callGeminiApi = async (contents: any, imageConfig?: any) => {
   if (!hasApiConfig()) {
@@ -186,14 +210,60 @@ const extractImageFromResponse = (data: any): string => {
   throw new Error('未能从响应中获取图像数据');
 };
 
-const extractImageJobError = (payload: unknown) => {
+const getErrorText = (payload: unknown): string => {
   if (!payload) return '图片任务失败';
   if (typeof payload === 'string') return payload;
   if (typeof payload === 'object') {
     const data = payload as Record<string, unknown>;
-    return String(data.error || data.message || data.detail || '图片任务失败');
+    if (data.message) return String(data.message);
+    if (data.error && typeof data.error === 'object') {
+      const nestedError = data.error as Record<string, unknown>;
+      return String(nestedError.message || nestedError.detail || nestedError.code || '图片任务失败');
+    }
+    if (typeof data.error === 'string') return data.error;
+    return String(data.detail || data.code || '图片任务失败');
   }
   return '图片任务失败';
+};
+
+const extractApiErrorMessage = (payload: unknown) => {
+  if (!payload) return '';
+  if (typeof payload === 'string') return payload;
+  if (typeof payload === 'object') {
+    const data = payload as Record<string, unknown>;
+    if (data.error) return getErrorText(data.error);
+    if (data.message) return String(data.message);
+    if (data.detail) return String(data.detail);
+  }
+  return '';
+};
+
+const getStringField = (payload: unknown, fieldName: string) => {
+  if (!payload || typeof payload !== 'object') return '';
+  const value = (payload as Record<string, unknown>)[fieldName];
+  return typeof value === 'string' ? value : '';
+};
+
+const extractImageJobError = (payload: unknown, job?: ImageJobStatus) => {
+  const message = getErrorText(payload);
+  const upstreamStatus = job?.upstreamStatus || (payload && typeof payload === 'object'
+    ? Number((payload as Record<string, unknown>).upstreamStatus || 0)
+    : 0);
+  const requestId = job?.requestId || getStringField(payload, 'requestId');
+  const code = getStringField(payload, 'code');
+  const type = getStringField(payload, 'type');
+
+  if (upstreamStatus || requestId || code || type) {
+    const details = [
+      upstreamStatus ? `状态 ${upstreamStatus}` : '',
+      code ? `code=${code}` : '',
+      type ? `type=${type}` : '',
+      requestId ? `requestId=${requestId}` : ''
+    ].filter(Boolean).join('，');
+    return `上游 AI 接口错误：${message}${details ? `（${details}）` : ''}`;
+  }
+
+  return message;
 };
 
 export const canUseImageJobs = () => {
@@ -278,14 +348,32 @@ export const getImageJob = async (jobId: string): Promise<ImageJobStatus> => {
       ...authHeaders()
     }
   });
-  const data = await response.json().catch(() => null);
+
+  const responseText = await response.text().catch(() => '');
+  const data = responseText
+    ? (() => {
+      try {
+        return JSON.parse(responseText);
+      } catch {
+        return responseText;
+      }
+    })()
+    : null;
   if (!response.ok) {
-    throw new Error(data?.error || `图片任务查询失败：${response.status}`);
+    if (response.status === 404) {
+      throw new Error('图片任务不存在或已过期。若刚刚重启过后端，生成任务状态会丢失，请重新生成。');
+    }
+    if (response.status >= 500) {
+      const apiMessage = extractApiErrorMessage(data);
+      const detail = apiMessage ? `后端返回：${apiMessage}` : '后端暂时不可用或正在重启';
+      throw new Error(`图片任务查询失败：${detail}。如果任务是在后端重启前创建的，请重新生成。`);
+    }
+    throw new Error(extractApiErrorMessage(data) || `图片任务查询失败：${response.status}`);
   }
   return data;
 };
 
-export const waitForImageJob = async (jobId: string) => {
+const waitForImageJobByPolling = async (jobId: string) => {
   const deadlineAt = Date.now() + REQUEST_TIMEOUT_MS;
 
   while (Date.now() < deadlineAt) {
@@ -294,12 +382,127 @@ export const waitForImageJob = async (jobId: string) => {
       return extractImageFromResponse(job.response);
     }
     if (job.status === 'error') {
-      throw new Error(extractImageJobError(job.error));
+      throw new Error(extractImageJobError(job.error, job));
     }
     await wait(JOB_POLL_INTERVAL_MS);
   }
 
   throw new Error('图片任务超过 10 分钟仍未完成，请稍后刷新页面查看');
+};
+
+const waitForImageJobByWebSocket = async (jobId: string) => {
+  const session = getStoredAuthSession();
+  const socketUrl = getImageJobWebSocketUrl();
+  if (!session?.token || !socketUrl || typeof WebSocket === 'undefined') {
+    throw new ImageJobWebSocketUnavailableError('图片任务 WebSocket 不可用');
+  }
+
+  return new Promise<string>((resolve, reject) => {
+    let settled = false;
+    const socket = new WebSocket(socketUrl);
+    const timeoutId = window.setTimeout(() => {
+      finishReject(new Error('图片任务超过 10 分钟仍未完成，请稍后刷新页面查看'));
+    }, REQUEST_TIMEOUT_MS);
+    const pingIntervalId = window.setInterval(() => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: 'ping' }));
+      }
+    }, 25 * 1000);
+
+    const cleanup = () => {
+      window.clearTimeout(timeoutId);
+      window.clearInterval(pingIntervalId);
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onerror = null;
+      socket.onclose = null;
+      if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+        socket.close();
+      }
+    };
+
+    const finishResolve = (value: string) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+
+    function finishReject(error: Error) {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    }
+
+    socket.onopen = () => {
+      socket.send(JSON.stringify({
+        type: 'auth',
+        token: session.token,
+        jobId
+      }));
+    };
+
+    socket.onmessage = (event) => {
+      let message: ImageJobSocketMessage;
+      try {
+        message = JSON.parse(String(event.data));
+      } catch {
+        finishReject(new ImageJobWebSocketUnavailableError('图片任务 WebSocket 消息格式无效'));
+        return;
+      }
+
+      if (message.type === 'connected' || message.type === 'authenticated' || message.type === 'pong') {
+        return;
+      }
+
+      if (message.type === 'image-job-error' && message.jobId === jobId) {
+        finishReject(new Error(extractApiErrorMessage(message.error) || '图片任务不存在或已过期'));
+        return;
+      }
+
+      if (message.type === 'error') {
+        finishReject(new Error(extractApiErrorMessage(message.error) || '图片任务 WebSocket 连接失败'));
+        return;
+      }
+
+      if (message.type !== 'image-job' || message.job?.jobId !== jobId) {
+        return;
+      }
+
+      if (message.job.status === 'completed') {
+        try {
+          finishResolve(extractImageFromResponse(message.job.response));
+        } catch (error) {
+          finishReject(error instanceof Error ? error : new Error('未能从响应中获取图像数据'));
+        }
+        return;
+      }
+
+      if (message.job.status === 'error') {
+        finishReject(new Error(extractImageJobError(message.job.error, message.job)));
+      }
+    };
+
+    socket.onerror = () => {
+      finishReject(new ImageJobWebSocketUnavailableError('图片任务 WebSocket 连接失败'));
+    };
+
+    socket.onclose = () => {
+      finishReject(new ImageJobWebSocketUnavailableError('图片任务 WebSocket 连接已断开'));
+    };
+  });
+};
+
+export const waitForImageJob = async (jobId: string) => {
+  try {
+    return await waitForImageJobByWebSocket(jobId);
+  } catch (error) {
+    if (error instanceof ImageJobWebSocketUnavailableError) {
+      return waitForImageJobByPolling(jobId);
+    }
+    throw error;
+  }
 };
 
 /**

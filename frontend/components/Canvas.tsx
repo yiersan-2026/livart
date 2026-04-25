@@ -773,6 +773,41 @@ const Canvas: React.FC<CanvasProps> = ({
     );
   };
 
+  const renderWorkflowDrawingLayer = (item: CanvasItem) => {
+    if (item.type !== 'workflow') return null;
+
+    return (selectedIds.includes(item.id) && activeTool !== 'select') ? (
+      <canvas
+        ref={drawingCanvasRef}
+        width={item.width}
+        height={item.height}
+        className="absolute inset-0 z-[60] w-full h-full cursor-crosshair pointer-events-auto"
+      />
+    ) : item.drawingData ? (
+      <img src={item.drawingData} className="absolute inset-0 z-[60] w-full h-full pointer-events-none" />
+    ) : null;
+  };
+
+  const renderImageMaskLayer = (item: CanvasItem) => {
+    if (item.type !== 'image') return null;
+
+    const isActiveMaskItem = selectedItemIsLocalRedraw && selectedItem?.id === item.id;
+    if (!isActiveMaskItem && !item.maskData) return null;
+
+    return isActiveMaskItem ? (
+      <canvas
+        ref={maskCanvasRef}
+        width={getCanvasDimension(item.width)}
+        height={getCanvasDimension(item.height)}
+        className={`absolute inset-0 z-[60] w-full h-full rounded-[14px] ${
+          activeTool === 'select' ? 'pointer-events-none' : 'cursor-crosshair pointer-events-auto'
+        }`}
+      />
+    ) : item.maskData ? (
+      <img src={item.maskData} className="absolute inset-0 z-[60] w-full h-full rounded-[14px] pointer-events-none" />
+    ) : null;
+  };
+
   const contextMenuItem = items.find(i => i.id === contextMenu?.id);
   const parentConnections = items.flatMap((item) => {
     if (!item.parentId) return [];
@@ -877,6 +912,8 @@ const Canvas: React.FC<CanvasProps> = ({
               ) : (
                 <img src={item.content} className="w-full h-full object-contain pointer-events-none" />
               )}
+              {renderWorkflowDrawingLayer(item)}
+              {renderImageMaskLayer(item)}
             </div>
 
             {selectedIds.length === 1 && selectedIds[0] === item.id && (
@@ -884,56 +921,6 @@ const Canvas: React.FC<CanvasProps> = ({
             )}
           </div>
         ))}
-
-        {/* 顶层画笔层 (HYPER-TOP LAYER)：确保在线条在所有图层之上 */}
-        <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 999999 }}>
-          {items.map((item) => {
-            if (item.type !== 'workflow') return null;
-            return (
-              <div 
-                key={`top-draw-${item.id}`}
-                className="absolute"
-                style={{ left: item.x, top: item.y, width: item.width, height: item.height }}
-              >
-                {(selectedIds.includes(item.id) && activeTool !== 'select') ? (
-                  <canvas
-                    ref={drawingCanvasRef}
-                    width={item.width}
-                    height={item.height}
-                    className="absolute inset-0 w-full h-full cursor-crosshair pointer-events-auto"
-                  />
-                ) : item.drawingData ? (
-                  <img src={item.drawingData} className="absolute inset-0 w-full h-full pointer-events-none" />
-                ) : null}
-              </div>
-            );
-          })}
-          {items.map((item) => {
-            if (item.type !== 'image') return null;
-            const isActiveMaskItem = selectedItemIsLocalRedraw && selectedItem?.id === item.id;
-            if (!isActiveMaskItem && !item.maskData) return null;
-            return (
-              <div
-                key={`mask-draw-${item.id}`}
-                className="absolute"
-                style={{ left: item.x, top: item.y, width: item.width, height: item.height }}
-              >
-                {isActiveMaskItem ? (
-                  <canvas
-                    ref={maskCanvasRef}
-                    width={getCanvasDimension(item.width)}
-                    height={getCanvasDimension(item.height)}
-                    className={`absolute inset-0 w-full h-full rounded-[14px] ${
-                      activeTool === 'select' ? 'pointer-events-none' : 'cursor-crosshair pointer-events-auto'
-                    }`}
-                  />
-                ) : item.maskData ? (
-                  <img src={item.maskData} className="absolute inset-0 w-full h-full rounded-[14px] pointer-events-none" />
-                ) : null}
-              </div>
-            );
-          })}
-        </div>
 
         {/* 工具栏栏 */}
         {selectedItem?.type === 'workflow' && selectedIds.length === 1 && (

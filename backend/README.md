@@ -21,6 +21,10 @@ Spring Boot + Spring Security JWT + MyBatis Plus 后端，用 RabbitMQ 串行化
 - `PUT /api/canvas/current`：把画布保存请求放入 RabbitMQ 队列
 - `POST /api/assets`：上传图片资源到 MinIO
 - `GET /api/assets/{id}/content`：读取图片资源内容
+- `POST /api/image-jobs/generations`：提交文生图异步任务
+- `POST /api/image-jobs/edits`：提交图生图/局部重绘异步任务
+- `GET /api/image-jobs/{jobId}`：读取图片任务状态（WebSocket 不可用时兜底）
+- `WS /ws/image-jobs`：推送当前用户的图片任务状态，连接后先发送 `auth` 消息携带 JWT
 
 除健康检查、注册、登录和图片内容读取外，业务接口需要携带 `Authorization: Bearer <token>`。中转站配置、画布项目和上传资源会按登录用户隔离。
 
@@ -35,4 +39,4 @@ set +a
 mvn spring-boot:run
 ```
 
-前端开发环境会把 `/api/auth`、`/api/user`、`/api/canvases`、`/api/canvas`、`/api/assets` 和 `/api/health` 代理到 `http://localhost:8080`。
+前端开发环境会把 `/api/auth`、`/api/user`、`/api/canvases`、`/api/canvas`、`/api/assets`、`/api/health` 和 `/ws/image-jobs` 代理到 `http://localhost:8080`。
