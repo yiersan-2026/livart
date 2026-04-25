@@ -124,7 +124,7 @@ npm run dev
 
 - 文生图：`{Base URL}/images/generations`
 - 图生图：`{Base URL}/images/edits`
-- 对话：优先 `{Base URL}/responses`，失败后回退 `{Base URL}/chat/completions`
+- 对话：`{Base URL}/responses`，如果接口不可用会直接报错
 
 也可以在 `frontend/.env.local` 中预填：
 

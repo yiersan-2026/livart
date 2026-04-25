@@ -247,27 +247,15 @@ const proxyPromptOptimizeRequest = async (
 
     console.info(`[prompt-optimizer] start mode=${mode} model=${effectiveModel}`);
 
-    const responsesResult = await callPromptOptimizerEndpoint(joinUrl(effectiveBaseUrl, 'responses'), effectiveApiKey, {
+    const finalResult = await callPromptOptimizerEndpoint(joinUrl(effectiveBaseUrl, 'responses'), effectiveApiKey, {
       model: effectiveModel,
       instructions: systemPrompt,
       input: userPrompt
     });
 
-    let finalResult = responsesResult;
-    if (!responsesResult.ok && [400, 404, 405].includes(responsesResult.status)) {
-      console.warn(`[prompt-optimizer] responses fallback status=${responsesResult.status} body=${getBodyPreview(responsesResult.body)}`);
-      finalResult = await callPromptOptimizerEndpoint(joinUrl(effectiveBaseUrl, 'chat/completions'), effectiveApiKey, {
-        model: effectiveModel,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ]
-      });
-    }
-
     if (!finalResult.ok) {
       writeJson(response, finalResult.status, {
-        error: '提示词优化请求失败',
+        error: '提示词优化 responses 接口请求失败',
         detail: getBodyPreview(finalResult.body)
       });
       return;

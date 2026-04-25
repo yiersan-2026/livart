@@ -32,7 +32,6 @@ const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose, onSaved, req
 
   const previewUrls = useMemo(() => buildImageApiUrls(config.baseUrl), [config.baseUrl]);
   const chatResponsesUrl = useMemo(() => joinUrl(config.baseUrl, 'responses'), [config.baseUrl]);
-  const chatCompletionsUrl = useMemo(() => joinUrl(config.baseUrl, 'chat/completions'), [config.baseUrl]);
 
   const handleSave = () => {
     const normalizedConfig = normalizeApiConfig(config);
@@ -120,9 +119,6 @@ const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose, onSaved, req
             <div className="break-all">文生图：{previewUrls.textToImageUrl || '填写 Base URL 后自动生成'}</div>
             <div className="break-all">图生图：{previewUrls.imageToImageUrl || '填写 Base URL 后自动生成'}</div>
             <div className="break-all">对话：{chatResponsesUrl || '填写 Base URL 后自动生成'}</div>
-            {chatCompletionsUrl && (
-              <div className="break-all text-gray-400">兼容回退：{chatCompletionsUrl}</div>
-            )}
           </div>
 
           {error && (
