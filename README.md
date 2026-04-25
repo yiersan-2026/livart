@@ -113,21 +113,25 @@ npm run dev
 
 ### API 配置
 
-点击界面左上角的设置图标，填入：
+首次启动会自动弹出中转站配置，之后也可以点击界面左上角的设置图标修改。只需要填入：
 
-- API 地址（支持自定义代理，默认前端代理为 `/api/images/generations` 和 `/api/images/edits`）
-- API 密钥
-- 生图模型（默认 `gpt-image-2`，也兼容部分 Gemini 图像模型）
-- 对话模型（默认 `gpt-5.5`，用于提示词自动优化）
+- 中转站 Base URL，例如 `https://example.com/v1/`
+- API Key
+- 生图模型，下拉框目前固定为 `gpt-image-2`
+- 对话模型，下拉框支持 `gpt-5.5` 和 `gpt-5.4`
 
-也可以在 `frontend/.env.local` 中配置：
+系统会自动拼接：
+
+- 文生图：`{Base URL}/images/generations`
+- 图生图：`{Base URL}/images/edits`
+- 对话：优先 `{Base URL}/responses`，失败后回退 `{Base URL}/chat/completions`
+
+也可以在 `frontend/.env.local` 中预填：
 
 ```bash
 IMAGE_API_BASE_URL=https://example.com/v1/
 IMAGE_API_MODEL=gpt-image-2
 IMAGE_API_KEY=your-api-key
-TEXT_TO_IMAGE_API_URL=/api/images/generations
-IMAGE_TO_IMAGE_API_URL=/api/images/edits
 PROMPT_OPTIMIZER_MODEL=gpt-5.5
 ```
 

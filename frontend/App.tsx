@@ -24,6 +24,7 @@ import {
   loadCurrentUser,
   logout
 } from './services/auth';
+import { hasStoredApiConfig } from './services/config';
 
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 5;
@@ -54,7 +55,8 @@ function App() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [showSidebar, setShowSidebar] = useState(true);
   const [contextImage, setContextImage] = useState<CanvasItem | null>(null);
-  const [showConfigModal, setShowConfigModal] = useState(false);
+  const [apiConfigReady, setApiConfigReady] = useState(() => hasStoredApiConfig());
+  const [showConfigModal, setShowConfigModal] = useState(() => !hasStoredApiConfig());
   const [authSession, setAuthSession] = useState<AuthSession | null>(() => getStoredAuthSession());
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [hasLoadedCanvas, setHasLoadedCanvas] = useState(false);
@@ -480,6 +482,11 @@ function App() {
     resetWorkspace();
   };
 
+  const handleConfigSaved = () => {
+    setApiConfigReady(true);
+    setShowConfigModal(false);
+  };
+
   if (!isAuthReady) {
     return (
       <div className="flex h-screen items-center justify-center bg-[#fcfcfc] font-sans text-sm font-black text-gray-400">
@@ -489,7 +496,21 @@ function App() {
   }
 
   if (!authSession) {
-    return <AuthPanel onAuthenticated={handleAuthenticated} />;
+    return (
+      <>
+        <AuthPanel onAuthenticated={handleAuthenticated} />
+        <ConfigModal
+          isOpen={showConfigModal || !apiConfigReady}
+          required={!apiConfigReady}
+          onSaved={handleConfigSaved}
+          onClose={() => {
+            if (apiConfigReady) {
+              setShowConfigModal(false);
+            }
+          }}
+        />
+      </>
+    );
   }
 
   return (
@@ -563,7 +584,7 @@ function App() {
               {showSidebar ? <PanelRightClose size={18} /> : <PanelRight size={18} />}
             </button>
             <div className="h-4 w-[1px] bg-gray-100 mx-1" />
-            <button onClick={() => { if(confirm('确定清空匠心画布吗？')) { setItems([]); setMessages([]); setSelectedIds([]); setContextImage(null); } }} className="p-2 text-gray-300 hover:text-red-500 rounded-xl transition-all"><Trash2 size={18} /></button>
+            <button onClick={() => { if(confirm('确定清空画布吗？')) { setItems([]); setMessages([]); setSelectedIds([]); setContextImage(null); } }} className="p-2 text-gray-300 hover:text-red-500 rounded-xl transition-all"><Trash2 size={18} /></button>
             <div className="h-4 w-[1px] bg-gray-100 mx-1" />
             <button className="px-5 py-2 text-xs font-black bg-black text-white rounded-xl shadow-lg hover:opacity-90 active:scale-95 transition-all uppercase tracking-widest">
               交付作品
@@ -610,7 +631,16 @@ function App() {
         />
       </div>
 
-      <ConfigModal isOpen={showConfigModal} onClose={() => setShowConfigModal(false)} />
+      <ConfigModal
+        isOpen={showConfigModal || !apiConfigReady}
+        required={!apiConfigReady}
+        onSaved={handleConfigSaved}
+        onClose={() => {
+          if (apiConfigReady) {
+            setShowConfigModal(false);
+          }
+        }}
+      />
     </div>
   );
 }
