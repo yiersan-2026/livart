@@ -12,6 +12,8 @@ public final class AssetDtos {
             UUID canvasId,
             UUID userId,
             String urlPath,
+            String previewUrlPath,
+            String thumbnailUrlPath,
             String originalFilename,
             String mimeType,
             long sizeBytes,

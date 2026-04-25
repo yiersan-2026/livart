@@ -9,22 +9,25 @@ import Toolbar from './components/Toolbar';
 import ConfigModal from './components/ConfigModal';
 import {
   canUseImageJobs,
+  editImage,
   generateImage,
-  generateWorkflowImage,
+  submitImageEditJob,
   submitImageGenerationJob,
-  submitWorkflowImageJob,
   waitForImageJob
 } from './services/gemini';
 import {
   DEFAULT_GENERATED_IMAGE_LONG_SIDE,
   centerFrameOnRect,
   getAspectRatioFrame,
-  getImageFrameFromSource
+  getImageFrameFromSource,
+  inferAspectRatioFromDimensions
 } from './services/imageSizing';
 import {
   CanvasPersistenceState,
   CanvasProject,
   createCanvasProject,
+  ensureCanvasImageAsset,
+  getCanvasItemAssetId,
   listCanvasProjects,
   loadCanvasProject,
   resetCanvasPersistenceSession,
@@ -38,11 +41,53 @@ import {
   logout
 } from './services/auth';
 import { loadApiConfig, resetApiConfigSession } from './services/config';
+import {
+  buildImageReferenceRoleContext,
+  buildReferencedImageEditPrompt,
+  resolveEditReferences
+} from './services/imageReferences';
 
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 5;
 const SIDEBAR_WIDTH = 384;
 const LAST_PROJECT_STORAGE_KEY = 'livart_last_project_id';
+
+const isDataImageUrl = (value: unknown) => {
+  return typeof value === 'string' && value.startsWith('data:image/');
+};
+
+const mergePersistedImageAssets = (
+  currentItems: CanvasItem[],
+  persistedItems: CanvasItem[]
+) => {
+  const persistedById = new Map(persistedItems.map(item => [item.id, item]));
+  let changed = false;
+
+  const nextItems = currentItems.map(item => {
+    const persisted = persistedById.get(item.id);
+    if (!persisted || item.type !== 'image') return item;
+
+    const updates: Partial<CanvasItem> = {};
+    if (isDataImageUrl(item.content) && persisted.content && persisted.content !== item.content) {
+      updates.content = persisted.content;
+    }
+    if (persisted.assetId && persisted.assetId !== item.assetId) {
+      updates.assetId = persisted.assetId;
+    }
+    if (persisted.previewContent && persisted.previewContent !== item.previewContent) {
+      updates.previewContent = persisted.previewContent;
+    }
+    if (persisted.thumbnailContent && persisted.thumbnailContent !== item.thumbnailContent) {
+      updates.thumbnailContent = persisted.thumbnailContent;
+    }
+
+    if (Object.keys(updates).length === 0) return item;
+    changed = true;
+    return { ...item, ...updates };
+  });
+
+  return changed ? nextItems : currentItems;
+};
 
 const clampZoom = (value: number) => Math.min(Math.max(value, MIN_ZOOM), MAX_ZOOM);
 
@@ -209,8 +254,9 @@ function App() {
     setCanvasSyncStatus('saving');
 
     saveCanvasProject(savePayload.canvasId, savePayload.state, saveRevisionRef.current, savePayload.title)
-      .then(() => {
+      .then((persistentState) => {
         if (!pendingSaveRef.current) {
+          setItems(prev => mergePersistedImageAssets(prev, persistentState.items));
           setCanvasSyncStatus('saved');
         }
       })
@@ -635,15 +681,22 @@ function App() {
   const handleSidebarSendMessage = async (text: string, aspectRatio: ImageAspectRatio = 'auto') => {
     addMessage(text, 'user');
     setIsThinking(true);
+
+    const editReferences = resolveEditReferences(text, contextImage, items);
+    const editBaseImage = editReferences[0] || null;
+    const editReferenceImages = editReferences.slice(1);
+    const effectiveAspectRatio = editBaseImage && aspectRatio === 'auto'
+      ? inferAspectRatioFromDimensions(editBaseImage.width, editBaseImage.height)
+      : aspectRatio;
     
     const newId = Math.random().toString(36).substr(2, 9);
-    const siblingCount = contextImage ? items.filter(item => item.parentId === contextImage.id).length : 0;
-    const fallbackWidth = contextImage ? contextImage.width : DEFAULT_GENERATED_IMAGE_LONG_SIDE;
-    const fallbackHeight = contextImage ? contextImage.height : DEFAULT_GENERATED_IMAGE_LONG_SIDE;
-    const maxLongSide = contextImage
-      ? Math.max(contextImage.width, contextImage.height)
+    const siblingCount = editBaseImage ? items.filter(item => item.parentId === editBaseImage.id).length : 0;
+    const fallbackWidth = editBaseImage ? editBaseImage.width : DEFAULT_GENERATED_IMAGE_LONG_SIDE;
+    const fallbackHeight = editBaseImage ? editBaseImage.height : DEFAULT_GENERATED_IMAGE_LONG_SIDE;
+    const maxLongSide = editBaseImage
+      ? Math.max(editBaseImage.width, editBaseImage.height)
       : DEFAULT_GENERATED_IMAGE_LONG_SIDE;
-    const initialFrame = getAspectRatioFrame(aspectRatio, fallbackWidth, fallbackHeight, maxLongSide);
+    const initialFrame = getAspectRatioFrame(effectiveAspectRatio, fallbackWidth, fallbackHeight, maxLongSide);
     const canvasCenterX = (-pan.x + window.innerWidth / 2) / zoom;
     const canvasCenterY = (-pan.y + window.innerHeight / 2) / zoom;
     
@@ -651,18 +704,18 @@ function App() {
       id: newId,
       type: 'image',
       content: '',
-      x: contextImage
-        ? contextImage.x + contextImage.width + 120 + siblingCount * 36
+      x: editBaseImage
+        ? editBaseImage.x + editBaseImage.width + 120 + siblingCount * 36
         : canvasCenterX - initialFrame.width / 2,
-      y: contextImage
-        ? contextImage.y + siblingCount * 36
+      y: editBaseImage
+        ? editBaseImage.y + siblingCount * 36
         : canvasCenterY - initialFrame.height / 2,
       width: initialFrame.width,
       height: initialFrame.height,
       status: 'loading',
-      label: contextImage ? 'AI 编辑中...' : 'AI 生成中...',
+      label: editBaseImage ? 'AI 编辑中...' : 'AI 生成中...',
       zIndex: Math.max(60, ...items.map(item => item.zIndex || 0)) + 1,
-      parentId: contextImage?.id,
+      parentId: editBaseImage?.id,
       prompt: text,
       layers: []
     };
@@ -672,16 +725,46 @@ function App() {
 
     try {
       let resultImg: string;
-      if (contextImage) {
+      if (editBaseImage) {
+        const persistedEditImages = await Promise.all(
+          [editBaseImage, ...editReferenceImages].map(item => ensureCanvasImageAsset(item))
+        );
+        const persistedBaseImage = persistedEditImages[0];
+        const persistedReferenceImages = persistedEditImages.slice(1);
+        const persistedById = new Map(persistedEditImages.map(item => [item.id, item]));
+        setItems(prev => prev.map(item => persistedById.get(item.id) || item));
+
+        const editPrompt = buildReferencedImageEditPrompt(text, persistedBaseImage, persistedReferenceImages);
+        const referenceContents = persistedReferenceImages.map(item => item.content);
+        const imageContext = buildImageReferenceRoleContext(text, persistedBaseImage, persistedReferenceImages);
+        const editOptions = {
+          imageAssetId: getCanvasItemAssetId(persistedBaseImage),
+          referenceAssetIds: persistedReferenceImages.map(getCanvasItemAssetId).filter(Boolean),
+          imageContext
+        };
         // 执行图像编辑
         if (canUseImageJobs()) {
-          const job = await submitWorkflowImageJob(text, contextImage.content, aspectRatio);
+          const job = await submitImageEditJob(
+            editPrompt,
+            persistedBaseImage.content,
+            undefined,
+            effectiveAspectRatio,
+            referenceContents,
+            editOptions
+          );
           setItems(prev => prev.map(i => i.id === newId ? { ...i, imageJobId: job.jobId } : i));
           resultImg = await waitForImageJob(job.jobId);
         } else {
-          resultImg = await generateWorkflowImage(text, contextImage.content, aspectRatio);
+          resultImg = await editImage(
+            editPrompt,
+            persistedBaseImage.content,
+            undefined,
+            effectiveAspectRatio,
+            referenceContents,
+            editOptions
+          );
         }
-        addMessage('已根据参考图完成编辑。', 'assistant');
+        addMessage(persistedReferenceImages.length > 0 ? '已根据多张引用图完成编辑。' : '已根据参考图完成编辑。', 'assistant');
       } else {
         // 直接文本生成图片
         if (canUseImageJobs()) {
@@ -694,12 +777,14 @@ function App() {
         addMessage('已为你生成新的画面。', 'assistant');
       }
 
-      const finalFrame = await getImageFrameFromSource(
-        resultImg,
-        initialFrame.width,
-        initialFrame.height,
-        Math.max(initialFrame.width, initialFrame.height)
-      );
+      const finalFrame = editBaseImage
+        ? initialFrame
+        : await getImageFrameFromSource(
+          resultImg,
+          initialFrame.width,
+          initialFrame.height,
+          Math.max(initialFrame.width, initialFrame.height)
+        );
       
       setItems(prev => prev.map(i => {
         if (i.id !== newId) return i;
@@ -728,6 +813,19 @@ function App() {
     setContextImage(item);
     setShowSidebar(true);
     addMessage('已锁定参考图，请输入编辑指令。', 'assistant');
+  };
+
+  const handleNavigateToImage = (item: CanvasItem) => {
+    const latestItem = items.find(candidate => candidate.id === item.id) || item;
+    const availableWidth = window.innerWidth - (showSidebar ? SIDEBAR_WIDTH : 0);
+    const targetCenterX = latestItem.x + latestItem.width / 2;
+    const targetCenterY = latestItem.y + latestItem.height / 2;
+
+    setSelectedIds([latestItem.id]);
+    setPan({
+      x: availableWidth / 2 - targetCenterX * zoom,
+      y: window.innerHeight / 2 - targetCenterY * zoom
+    });
   };
 
   const handleAuthenticated = (session: AuthSession) => {
@@ -881,6 +979,7 @@ function App() {
           imageItems={items.filter(item => item.type === 'image' && !!item.content)}
           onSelectContextImage={setContextImage}
           onClearContextImage={() => setContextImage(null)}
+          onNavigateToImage={handleNavigateToImage}
         />
       </div>
 

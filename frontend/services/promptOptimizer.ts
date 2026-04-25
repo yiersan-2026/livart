@@ -1,36 +1,14 @@
-import { getApiConfig } from './config';
-import { authHeaders } from './auth';
+export const restoreMissingReferenceMentions = (
+  optimizedPrompt: string,
+  originalPrompt: string,
+  requiredReferenceMentions: string[]
+) => {
+  const missingReferences = requiredReferenceMentions.filter(reference => !optimizedPrompt.includes(reference));
+  if (missingReferences.length === 0) return optimizedPrompt;
 
-export type PromptOptimizeMode = 'text-to-image' | 'image-to-image';
-
-export const optimizePrompt = async (prompt: string, mode: PromptOptimizeMode) => {
-  const config = getApiConfig();
-
-  const response = await fetch('/api/prompts/optimize', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-      ...authHeaders(),
-      ...(config.apiKey ? { 'X-Livart-Api-Key': config.apiKey } : {})
-    },
-    body: JSON.stringify({
-      prompt,
-      mode,
-      model: config.chatModel,
-      baseUrl: config.baseUrl
-    })
-  });
-
-  const data = await response.json().catch(() => null);
-
-  if (!response.ok) {
-    throw new Error(data?.error || data?.detail || '提示词优化失败');
-  }
-
-  if (!data?.optimizedPrompt) {
-    throw new Error('提示词优化结果为空');
-  }
-
-  return String(data.optimizedPrompt).trim();
+  return [
+    optimizedPrompt,
+    `必须使用这些参考图标记：${missingReferences.join(' ')}。`,
+    `原始用户指令：${originalPrompt}`
+  ].join('\n');
 };

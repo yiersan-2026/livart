@@ -1,7 +1,7 @@
 import { getApiConfig, hasApiConfig } from './config';
 import { authHeaders, getStoredAuthSession } from './auth';
 import type { ImageAspectRatio } from '../types';
-import { aspectRatioToGeminiAspectRatio, aspectRatioToImageApiSize } from './imageSizing';
+import { aspectRatioToGeminiAspectRatio } from './imageSizing';
 
 const REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
 const JOB_POLL_INTERVAL_MS = 2 * 1000;
@@ -34,6 +34,12 @@ interface ImageJobSocketMessage {
   error?: unknown;
 }
 
+export interface ImageEditAssetOptions {
+  imageAssetId?: string;
+  referenceAssetIds?: string[];
+  imageContext?: string;
+}
+
 class ImageJobWebSocketUnavailableError extends Error {
   constructor(message: string) {
     super(message);
@@ -46,6 +52,29 @@ const extractBase64 = (data: string) => data.includes(',') ? data.split(',')[1] 
 const dataUrlToBlob = async (dataUrl: string) => {
   const response = await fetch(dataUrl);
   return response.blob();
+};
+
+const appendImageEditImages = async (
+  formData: FormData,
+  imageDataUrl: string,
+  referenceImageDataUrls: string[],
+  assetOptions: ImageEditAssetOptions = {}
+) => {
+  if (assetOptions.imageAssetId) {
+    formData.append('imageAssetId', assetOptions.imageAssetId);
+  } else {
+    formData.append('image', await dataUrlToBlob(imageDataUrl), 'canvas.png');
+  }
+
+  const referenceAssetIds = assetOptions.referenceAssetIds || [];
+  for (const [index, referenceImageDataUrl] of referenceImageDataUrls.entries()) {
+    const referenceAssetId = referenceAssetIds[index];
+    if (referenceAssetId) {
+      formData.append('referenceAssetId', referenceAssetId);
+    } else {
+      formData.append('image', await dataUrlToBlob(referenceImageDataUrl), `reference-${index + 1}.png`);
+    }
+  }
 };
 
 const fetchWithTimeout = async (url: string, options: RequestInit, timeoutMessage: string) => {
@@ -87,6 +116,32 @@ const getImageJobWebSocketUrl = () => {
   if (typeof window === 'undefined') return '';
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${protocol}//${window.location.host}${IMAGE_JOB_WS_PATH}`;
+};
+
+const aspectRatioToPromptInstruction = (aspectRatio: ImageAspectRatio) => {
+  switch (aspectRatio) {
+    case '1:1':
+      return '画幅比例要求：最终输出为 1:1 方图构图，不要添加白边、相框或多余留白来凑比例。';
+    case '4:3':
+      return '画幅比例要求：最终输出为 4:3 横向标准构图，不要添加白边、相框或多余留白来凑比例。';
+    case '3:4':
+      return '画幅比例要求：最终输出为 3:4 竖向标准构图，不要添加白边、相框或多余留白来凑比例。';
+    case '16:9':
+      return '画幅比例要求：最终输出为 16:9 横向宽屏构图，不要添加白边、相框或多余留白来凑比例。';
+    case '9:16':
+      return '画幅比例要求：最终输出为 9:16 竖向手机屏幕构图，不要添加白边、相框或多余留白来凑比例。';
+    default:
+      return '';
+  }
+};
+
+const appendAspectRatioToPrompt = (prompt: string, aspectRatio: ImageAspectRatio) => {
+  const instruction = aspectRatioToPromptInstruction(aspectRatio);
+  if (!instruction || prompt.includes('画幅比例要求')) return prompt;
+  const trimmedPrompt = prompt.trim();
+  if (!trimmedPrompt) return instruction;
+  const separator = /[。.!！？?]$/.test(trimmedPrompt) ? '\n' : '。\n';
+  return `${trimmedPrompt}${separator}${instruction}`;
 };
 
 const callGeminiApi = async (contents: any, imageConfig?: any) => {
@@ -132,7 +187,7 @@ const callImageGenerationApi = async (prompt: string, aspectRatio: ImageAspectRa
   }
 
   const config = getApiConfig();
-  const size = aspectRatioToImageApiSize(aspectRatio);
+  const finalPrompt = appendAspectRatioToPrompt(prompt, aspectRatio);
   const response = await fetchWithTimeout(TEXT_TO_IMAGE_PROXY_URL, {
     method: 'POST',
     headers: {
@@ -141,8 +196,7 @@ const callImageGenerationApi = async (prompt: string, aspectRatio: ImageAspectRa
     },
     body: JSON.stringify({
       model: config.model,
-      prompt,
-      ...(size ? { size } : {})
+      prompt: finalPrompt
     })
   }, '文生图请求超过 10 分钟仍未完成，请稍后重试');
 
@@ -158,21 +212,23 @@ const callImageEditApi = async (
   prompt: string,
   imageDataUrl: string,
   maskDataUrl?: string,
-  aspectRatio: ImageAspectRatio = 'auto'
+  aspectRatio: ImageAspectRatio = 'auto',
+  referenceImageDataUrls: string[] = [],
+  assetOptions: ImageEditAssetOptions = {}
 ) => {
   if (!hasApiConfig()) {
     throw new Error('请先配置 API 地址和密钥');
   }
 
   const config = getApiConfig();
-  const size = aspectRatioToImageApiSize(aspectRatio);
+  const finalPrompt = appendAspectRatioToPrompt(prompt, aspectRatio);
   const formData = new FormData();
   formData.append('model', config.model);
-  formData.append('prompt', prompt);
-  if (size) {
-    formData.append('size', size);
+  formData.append('prompt', finalPrompt);
+  if (assetOptions.imageContext?.trim()) {
+    formData.append('imageContext', assetOptions.imageContext.trim());
   }
-  formData.append('image', await dataUrlToBlob(imageDataUrl), 'canvas.png');
+  await appendImageEditImages(formData, imageDataUrl, referenceImageDataUrls, assetOptions);
   if (maskDataUrl) {
     formData.append('mask', await dataUrlToBlob(maskDataUrl), 'mask.png');
   }
@@ -280,7 +336,7 @@ export const submitImageGenerationJob = async (
   }
 
   const config = getApiConfig();
-  const size = aspectRatioToImageApiSize(aspectRatio);
+  const finalPrompt = appendAspectRatioToPrompt(prompt, aspectRatio);
   const response = await fetch(TEXT_TO_IMAGE_JOB_URL, {
     method: 'POST',
     headers: {
@@ -290,8 +346,7 @@ export const submitImageGenerationJob = async (
     },
     body: JSON.stringify({
       model: config.model,
-      prompt,
-      ...(size ? { size } : {})
+      prompt: finalPrompt
     })
   });
 
@@ -306,21 +361,23 @@ export const submitImageEditJob = async (
   prompt: string,
   imageDataUrl: string,
   maskDataUrl?: string,
-  aspectRatio: ImageAspectRatio = 'auto'
+  aspectRatio: ImageAspectRatio = 'auto',
+  referenceImageDataUrls: string[] = [],
+  assetOptions: ImageEditAssetOptions = {}
 ): Promise<ImageJobSubmission> => {
   if (!hasApiConfig()) {
     throw new Error('请先配置 API 地址和密钥');
   }
 
   const config = getApiConfig();
-  const size = aspectRatioToImageApiSize(aspectRatio);
+  const finalPrompt = appendAspectRatioToPrompt(prompt, aspectRatio);
   const formData = new FormData();
   formData.append('model', config.model);
-  formData.append('prompt', prompt);
-  if (size) {
-    formData.append('size', size);
+  formData.append('prompt', finalPrompt);
+  if (assetOptions.imageContext?.trim()) {
+    formData.append('imageContext', assetOptions.imageContext.trim());
   }
-  formData.append('image', await dataUrlToBlob(imageDataUrl), 'canvas.png');
+  await appendImageEditImages(formData, imageDataUrl, referenceImageDataUrls, assetOptions);
   if (maskDataUrl) {
     formData.append('mask', await dataUrlToBlob(maskDataUrl), 'mask.png');
   }
@@ -577,16 +634,21 @@ export const editImage = async (
   prompt: string,
   imageDataUrl: string,
   maskDataUrl?: string,
-  aspectRatio: ImageAspectRatio = 'auto'
+  aspectRatio: ImageAspectRatio = 'auto',
+  referenceImageDataUrls: string[] = [],
+  assetOptions: ImageEditAssetOptions = {}
 ) => {
   const config = getApiConfig();
   if (!isGeminiModel(config.model)) {
-    const job = await submitImageEditJob(prompt, imageDataUrl, maskDataUrl, aspectRatio);
+    const job = await submitImageEditJob(prompt, imageDataUrl, maskDataUrl, aspectRatio, referenceImageDataUrls, assetOptions);
     return waitForImageJob(job.jobId);
   }
 
   if (maskDataUrl) {
     throw new Error('当前 Gemini 图像模型不支持 mask 局部重绘，请切换到 gpt-image-2');
+  }
+  if (referenceImageDataUrls.length > 0) {
+    throw new Error('当前 Gemini 图像模型暂不支持多参考图编辑，请切换到 gpt-image-2');
   }
 
   return generateWorkflowImage(prompt, imageDataUrl, aspectRatio);

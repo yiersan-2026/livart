@@ -39,11 +39,14 @@ interface CanvasResponse {
 }
 
 interface AssetResponse {
+  id: string;
   urlPath: string;
+  previewUrlPath?: string;
+  thumbnailUrlPath?: string;
 }
 
 let currentCanvasId: string | null = null;
-const dataUrlUploadCache = new Map<string, Promise<string>>();
+const dataUrlUploadCache = new Map<string, Promise<AssetResponse>>();
 
 export const resetCanvasPersistenceSession = () => {
   currentCanvasId = null;
@@ -52,6 +55,21 @@ export const resetCanvasPersistenceSession = () => {
 
 const isDataImageUrl = (value: unknown): value is string => {
   return typeof value === 'string' && value.startsWith('data:image/');
+};
+
+export const getAssetIdFromImageUrl = (value: unknown) => {
+  if (typeof value !== 'string') return '';
+  const match = value.match(/\/api\/assets\/([^/]+)\/(?:content|preview|thumbnail)(?:[?#].*)?$/);
+  if (!match) return '';
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
+};
+
+export const getCanvasItemAssetId = (item: CanvasItem) => {
+  return item.assetId || getAssetIdFromImageUrl(item.content) || getAssetIdFromImageUrl(item.previewContent);
 };
 
 const unwrapApiResponse = async <T>(response: Response): Promise<T> => {
@@ -103,16 +121,62 @@ const uploadDataImage = async (dataUrl: string, filenameSeed: string) => {
       body: formData
     });
     const asset = await unwrapApiResponse<AssetResponse>(response);
-    return asset.urlPath;
+    return asset;
   })();
 
   dataUrlUploadCache.set(dataUrl, uploadPromise);
   return uploadPromise;
 };
 
-const persistImageValue = async (value: string | undefined, filenameSeed: string) => {
+const persistRawImageValue = async (value: string | undefined, filenameSeed: string) => {
   if (!isDataImageUrl(value)) return value;
-  return uploadDataImage(value, filenameSeed);
+  return (await uploadDataImage(value, filenameSeed)).urlPath;
+};
+
+const persistCanvasImageValue = async (item: CanvasItem) => {
+  if (!isDataImageUrl(item.content)) {
+    return {
+      content: item.content,
+      assetId: getCanvasItemAssetId(item) || undefined,
+      previewContent: item.previewContent,
+      thumbnailContent: item.thumbnailContent
+    };
+  }
+
+  const asset = await uploadDataImage(item.content, `${item.id}-content`);
+  return {
+    content: asset.urlPath,
+    assetId: asset.id,
+    previewContent: asset.previewUrlPath || asset.urlPath,
+    thumbnailContent: asset.thumbnailUrlPath || asset.previewUrlPath || asset.urlPath
+  };
+};
+
+export const ensureCanvasImageAsset = async (item: CanvasItem) => {
+  if (item.type !== 'image') {
+    throw new Error('只有图片元素可以作为编辑素材');
+  }
+
+  const currentAssetId = getCanvasItemAssetId(item);
+  if (currentAssetId) {
+    return {
+      ...item,
+      assetId: currentAssetId
+    };
+  }
+
+  if (!isDataImageUrl(item.content)) {
+    throw new Error('图片缺少可用的资源 ID，无法提交编辑');
+  }
+
+  const imageContent = await persistCanvasImageValue(item);
+  return {
+    ...item,
+    content: imageContent.content,
+    assetId: imageContent.assetId,
+    previewContent: imageContent.previewContent,
+    thumbnailContent: imageContent.thumbnailContent
+  };
 };
 
 const normalizeTransientItemState = (item: CanvasItem): CanvasItem | null => {
@@ -126,22 +190,29 @@ const normalizeTransientItemState = (item: CanvasItem): CanvasItem | null => {
 };
 
 const persistItemAssets = async (item: CanvasItem): Promise<CanvasItem> => {
-  const [content, drawingData, maskData, compositeImage, layers] = await Promise.all([
-    persistImageValue(item.content, `${item.id}-content`),
-    persistImageValue(item.drawingData, `${item.id}-drawing`),
-    persistImageValue(item.maskData, `${item.id}-mask`),
-    persistImageValue(item.compositeImage, `${item.id}-composite`),
+  const [imageContent, drawingData, maskData, compositeImage, layers] = await Promise.all([
+    item.type === 'image' ? persistCanvasImageValue(item) : Promise.resolve({
+      content: item.content,
+      previewContent: item.previewContent,
+      thumbnailContent: item.thumbnailContent
+    }),
+    persistRawImageValue(item.drawingData, `${item.id}-drawing`),
+    persistRawImageValue(item.maskData, `${item.id}-mask`),
+    persistRawImageValue(item.compositeImage, `${item.id}-composite`),
     Promise.all((item.layers || []).map(async layer => ({
       ...layer,
       content: layer.type === 'image'
-        ? await persistImageValue(layer.content, `${item.id}-${layer.id}`)
+        ? await persistRawImageValue(layer.content, `${item.id}-${layer.id}`)
         : layer.content
     })))
   ]);
 
   return {
     ...item,
-    content: content || item.content,
+    content: imageContent.content || item.content,
+    assetId: imageContent.assetId || item.assetId,
+    previewContent: imageContent.previewContent,
+    thumbnailContent: imageContent.thumbnailContent,
     drawingData,
     maskData,
     compositeImage,

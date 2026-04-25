@@ -2,7 +2,7 @@
 
 Spring Boot + Spring Security JWT + MyBatis Plus 后端，用 RabbitMQ 串行化画布保存请求，用 PostgreSQL 保存项目画布状态，用 MinIO 保存画布图片资源。
 
-本后端是 livart 在原开源前端画布项目基础上新增的永久画布服务层，负责账号登录、JWT 鉴权、用户中转站配置、项目管理、画布状态保存、图片资源上传和异步保存队列。
+本后端是 livart 在原开源前端画布项目基础上新增的永久画布服务层，负责账号登录、JWT 鉴权、用户中转站配置、项目管理、画布状态保存、图片资源上传、异步保存队列和 AI 生图代理。提示词优化不再暴露单独接口，而是在后端调用上游文生图/图生图接口前自动执行。
 
 ## 接口
 
@@ -21,6 +21,10 @@ Spring Boot + Spring Security JWT + MyBatis Plus 后端，用 RabbitMQ 串行化
 - `PUT /api/canvas/current`：把画布保存请求放入 RabbitMQ 队列
 - `POST /api/assets`：上传图片资源到 MinIO
 - `GET /api/assets/{id}/content`：读取图片资源内容
+- `GET /api/assets/{id}/preview`：读取画布显示用预览图，缺失时回退原图
+- `GET /api/assets/{id}/thumbnail`：读取侧栏/选择器缩略图，缺失时回退原图
+- `POST /api/images/generations`：同步代理文生图请求，请求上游前自动优化 `prompt`
+- `POST /api/images/edits`：同步代理图生图/局部重绘请求，请求上游前自动优化 `prompt`
 - `POST /api/image-jobs/generations`：提交文生图异步任务
 - `POST /api/image-jobs/edits`：提交图生图/局部重绘异步任务
 - `GET /api/image-jobs/{jobId}`：读取图片任务状态（WebSocket 不可用时兜底）
@@ -39,4 +43,4 @@ set +a
 mvn spring-boot:run
 ```
 
-前端开发环境会把 `/api/auth`、`/api/user`、`/api/canvases`、`/api/canvas`、`/api/assets`、`/api/health` 和 `/ws/image-jobs` 代理到 `http://localhost:8080`。
+前端开发环境会把 `/api/auth`、`/api/user`、`/api/canvases`、`/api/canvas`、`/api/assets`、`/api/images`、`/api/image-jobs`、`/api/health` 和 `/ws/image-jobs` 代理到 `http://localhost:8080`。

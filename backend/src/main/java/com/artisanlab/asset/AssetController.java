@@ -42,7 +42,21 @@ public class AssetController {
     @GetMapping("/{id}/content")
     public void content(@PathVariable UUID id, HttpServletResponse response) throws IOException {
         AssetService.AssetContent content = assetService.getContent(id);
-        response.setContentType(content.entity().getMimeType());
+        writeContent(content, response);
+    }
+
+    @GetMapping("/{id}/preview")
+    public void preview(@PathVariable UUID id, HttpServletResponse response) throws IOException {
+        writeContent(assetService.getPreview(id), response);
+    }
+
+    @GetMapping("/{id}/thumbnail")
+    public void thumbnail(@PathVariable UUID id, HttpServletResponse response) throws IOException {
+        writeContent(assetService.getThumbnail(id), response);
+    }
+
+    private void writeContent(AssetService.AssetContent content, HttpServletResponse response) throws IOException {
+        response.setContentType(content.contentType());
         response.setHeader(HttpHeaders.CACHE_CONTROL, CacheControl.maxAge(365, TimeUnit.DAYS).cachePublic().getHeaderValue());
         response.setHeader(HttpHeaders.CONTENT_DISPOSITION, "inline");
         try (InputStream inputStream = content.stream()) {

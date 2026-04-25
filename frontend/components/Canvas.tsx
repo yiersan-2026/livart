@@ -1,5 +1,5 @@
 
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import type { CanvasItem, ImageAspectRatio } from '../types';
 import { 
   Loader2, Trash2, Type, 
@@ -9,13 +9,21 @@ import {
   Copy, Layers
 } from 'lucide-react';
 import { canUseImageJobs, editImage, generateWorkflowImage, submitImageEditJob, waitForImageJob } from '../services/gemini';
-import { optimizePrompt } from '../services/promptOptimizer';
 import {
   IMAGE_ASPECT_RATIO_OPTIONS,
   centerFrameOnRect,
   getAspectRatioFrame,
-  getImageFrameFromSource
+  getImageFrameFromSource,
+  inferAspectRatioFromDimensions
 } from '../services/imageSizing';
+import { getCanvasImageSrc } from '../services/imageSources';
+import {
+  buildImageReferenceRoleContext,
+  buildReferencedImageEditPrompt,
+  resolveMentionedImageReferences
+} from '../services/imageReferences';
+import { ensureCanvasImageAsset, getCanvasItemAssetId } from '../services/canvasPersistence';
+import ImageMentionEditor from './ImageMentionEditor';
 
 interface CanvasProps {
   items: CanvasItem[];
@@ -58,6 +66,85 @@ const getImageDimensions = async (src: string, fallbackWidth: number, fallbackHe
       height: getCanvasDimension(fallbackHeight)
     };
   }
+};
+
+const buildEditableMaskFromPaintPixels = (paintPixels: ImageData, width: number, height: number) => {
+  const totalPixels = width * height;
+  const paintedPixels = new Uint8Array(totalPixels);
+  const blockedPixels = new Uint8Array(totalPixels);
+  let hasPaintedArea = false;
+
+  for (let index = 0; index < totalPixels; index += 1) {
+    const alpha = paintPixels.data[index * 4 + 3];
+    if (alpha > 12) {
+      paintedPixels[index] = 1;
+      blockedPixels[index] = 1;
+      hasPaintedArea = true;
+    }
+  }
+
+  if (!hasPaintedArea) {
+    return { editablePixels: paintedPixels, hasPaintedArea: false };
+  }
+
+  const dilationRadius = 2;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      if (!paintedPixels[index]) continue;
+
+      for (let dy = -dilationRadius; dy <= dilationRadius; dy += 1) {
+        const nextY = y + dy;
+        if (nextY < 0 || nextY >= height) continue;
+
+        for (let dx = -dilationRadius; dx <= dilationRadius; dx += 1) {
+          const nextX = x + dx;
+          if (nextX < 0 || nextX >= width) continue;
+          blockedPixels[nextY * width + nextX] = 1;
+        }
+      }
+    }
+  }
+
+  const outsidePixels = new Uint8Array(totalPixels);
+  const queue = new Int32Array(totalPixels);
+  let queueStart = 0;
+  let queueEnd = 0;
+
+  const enqueueOutside = (index: number) => {
+    if (index < 0 || index >= totalPixels || blockedPixels[index] || outsidePixels[index]) return;
+    outsidePixels[index] = 1;
+    queue[queueEnd] = index;
+    queueEnd += 1;
+  };
+
+  for (let x = 0; x < width; x += 1) {
+    enqueueOutside(x);
+    enqueueOutside((height - 1) * width + x);
+  }
+  for (let y = 0; y < height; y += 1) {
+    enqueueOutside(y * width);
+    enqueueOutside(y * width + width - 1);
+  }
+
+  while (queueStart < queueEnd) {
+    const index = queue[queueStart];
+    queueStart += 1;
+    const x = index % width;
+    const y = Math.floor(index / width);
+
+    if (x > 0) enqueueOutside(index - 1);
+    if (x + 1 < width) enqueueOutside(index + 1);
+    if (y > 0) enqueueOutside(index - width);
+    if (y + 1 < height) enqueueOutside(index + width);
+  }
+
+  const editablePixels = new Uint8Array(totalPixels);
+  for (let index = 0; index < totalPixels; index += 1) {
+    editablePixels[index] = paintedPixels[index] || (!blockedPixels[index] && !outsidePixels[index]) ? 1 : 0;
+  }
+
+  return { editablePixels, hasPaintedArea: true };
 };
 
 const createTransparentEditMask = async (
@@ -108,6 +195,11 @@ const createTransparentEditMask = async (
   );
 
   const paintPixels = normalizedPaintContext.getImageData(0, 0, imageDimensions.width, imageDimensions.height);
+  const { editablePixels, hasPaintedArea } = buildEditableMaskFromPaintPixels(
+    paintPixels,
+    imageDimensions.width,
+    imageDimensions.height
+  );
   const apiMaskCanvas = document.createElement('canvas');
   apiMaskCanvas.width = imageDimensions.width;
   apiMaskCanvas.height = imageDimensions.height;
@@ -115,15 +207,14 @@ const createTransparentEditMask = async (
   if (!apiMaskContext) throw new Error('无法创建局部重绘蒙版');
 
   const apiMaskPixels = apiMaskContext.createImageData(imageDimensions.width, imageDimensions.height);
-  let hasPaintedArea = false;
 
-  for (let index = 0; index < paintPixels.data.length; index += 4) {
-    const isPainted = paintPixels.data[index + 3] > 12;
-    if (isPainted) hasPaintedArea = true;
-    apiMaskPixels.data[index] = 0;
-    apiMaskPixels.data[index + 1] = 0;
-    apiMaskPixels.data[index + 2] = 0;
-    apiMaskPixels.data[index + 3] = isPainted ? 0 : 255;
+  for (let pixelIndex = 0; pixelIndex < editablePixels.length; pixelIndex += 1) {
+    const outputIndex = pixelIndex * 4;
+    const isEditable = editablePixels[pixelIndex] === 1;
+    apiMaskPixels.data[outputIndex] = 0;
+    apiMaskPixels.data[outputIndex + 1] = 0;
+    apiMaskPixels.data[outputIndex + 2] = 0;
+    apiMaskPixels.data[outputIndex + 3] = isEditable ? 0 : 255;
   }
 
   if (!hasPaintedArea) return null;
@@ -165,21 +256,29 @@ const Canvas: React.FC<CanvasProps> = ({
   const [inlineEditPrompts, setInlineEditPrompts] = useState<Record<string, string>>({});
   const [inlineEditErrors, setInlineEditErrors] = useState<Record<string, string>>({});
   const [inlineEditingIds, setInlineEditingIds] = useState<Set<string>>(() => new Set());
-  const [inlinePromptOptimizingIds, setInlinePromptOptimizingIds] = useState<Set<string>>(() => new Set());
   const [inlineEditAspectRatio, setInlineEditAspectRatio] = useState<ImageAspectRatio>('auto');
   const [localRedrawItemId, setLocalRedrawItemId] = useState<string | null>(null);
   const inlineEditingIdsRef = useRef<Set<string>>(new Set());
-  const inlinePromptOptimizingIdsRef = useRef<Set<string>>(new Set());
   const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const inlineRedrawFormRef = useRef<HTMLFormElement | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const selectedItem = items.find(i => selectedIds.length === 1 && i.id === selectedIds[0]);
   const selectedItemIsInlineEditing = selectedItem ? inlineEditingIds.has(selectedItem.id) : false;
-  const selectedItemIsInlinePromptOptimizing = selectedItem ? inlinePromptOptimizingIds.has(selectedItem.id) : false;
   const selectedItemIsLocalRedraw = selectedItem?.type === 'image' && selectedItem.id === localRedrawItemId;
   const selectedInlineEditError = selectedItem ? inlineEditErrors[selectedItem.id] : '';
   const inlineEditPrompt = selectedItem?.type === 'image' ? inlineEditPrompts[selectedItem.id] || '' : '';
-  const hasActiveCanvasGeneration = isGenerating || inlineEditingIds.size > 0 || inlinePromptOptimizingIds.size > 0;
+  const hasActiveCanvasGeneration = isGenerating || inlineEditingIds.size > 0;
+  const completedImageItems = useMemo(
+    () => items.filter(item => item.type === 'image' && item.status === 'completed' && !!item.content),
+    [items]
+  );
+  const inlineReferenceImageItems = useMemo(
+    () => selectedItem?.type === 'image'
+      ? completedImageItems.filter(item => item.id !== selectedItem.id)
+      : [],
+    [completedImageItems, selectedItem?.id, selectedItem?.type]
+  );
 
   // 全局右键菜单状态
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, id: string } | null>(null);
@@ -247,17 +346,6 @@ const Canvas: React.FC<CanvasProps> = ({
     }
     inlineEditingIdsRef.current = nextEditingIds;
     setInlineEditingIds(nextEditingIds);
-  };
-
-  const setInlinePromptOptimizingForItem = (id: string, isOptimizing: boolean) => {
-    const nextOptimizingIds = new Set(inlinePromptOptimizingIdsRef.current);
-    if (isOptimizing) {
-      nextOptimizingIds.add(id);
-    } else {
-      nextOptimizingIds.delete(id);
-    }
-    inlinePromptOptimizingIdsRef.current = nextOptimizingIds;
-    setInlinePromptOptimizingIds(nextOptimizingIds);
   };
 
   const clearInlineEditError = (id: string) => {
@@ -581,7 +669,7 @@ const Canvas: React.FC<CanvasProps> = ({
         if (item.type === 'image' || item.type === 'workflow') {
           const img = new Image();
           img.crossOrigin = "anonymous";
-          img.src = item.content || item.compositeImage || '';
+          img.src = getCanvasImageSrc(item) || item.compositeImage || '';
           await new Promise(r => { img.onload = r; img.onerror = r; });
           ctx.drawImage(img, item.x - selectedItem.x, item.y - selectedItem.y, item.width, item.height);
         } else if (item.type === 'text') {
@@ -639,13 +727,12 @@ const Canvas: React.FC<CanvasProps> = ({
   const handleInlineImageRedraw = async (event: React.FormEvent) => {
     event.preventDefault();
     const prompt = inlineEditPrompt.trim();
-    if (!prompt || !selectedItem || selectedItem.type !== 'image' || inlineEditingIdsRef.current.has(selectedItem.id) || inlinePromptOptimizingIdsRef.current.has(selectedItem.id)) return;
+    if (!prompt || !selectedItem || selectedItem.type !== 'image' || inlineEditingIdsRef.current.has(selectedItem.id)) return;
 
     const targetItem = selectedItem;
     const useLocalMask = localRedrawItemId === targetItem.id;
     let resultItemId: string | null = null;
     setInlineEditingForItem(targetItem.id, true);
-    setInlinePromptOptimizingForItem(targetItem.id, true);
     clearInlineEditError(targetItem.id);
 
     try {
@@ -660,13 +747,44 @@ const Canvas: React.FC<CanvasProps> = ({
       const promptToOptimize = useLocalMask
         ? `${prompt}。只修改用户用蒙版涂抹的局部区域，未被蒙版覆盖的区域必须保持原图不变。`
         : prompt;
-      const optimizedPrompt = await optimizePrompt(promptToOptimize, 'image-to-image');
-      setInlineEditPromptForItem(targetItem.id, optimizedPrompt);
-      setInlinePromptOptimizingForItem(targetItem.id, false);
+      const referenceImages = resolveMentionedImageReferences(prompt, items)
+        .filter(item => item.id !== targetItem.id);
+      const generationPrompt = referenceImages.length > 0
+        ? buildReferencedImageEditPrompt(promptToOptimize, targetItem, referenceImages, { hasLocalMask: useLocalMask })
+        : promptToOptimize;
+      const effectiveAspectRatio = inlineEditAspectRatio === 'auto'
+        ? inferAspectRatioFromDimensions(targetItem.width, targetItem.height)
+        : inlineEditAspectRatio;
+
+      const persistentEditImages = await Promise.all(
+        [targetItem, ...referenceImages].map(item => ensureCanvasImageAsset(item))
+      );
+      const persistentTargetItem = persistentEditImages[0];
+      const persistentReferenceImages = persistentEditImages.slice(1);
+      for (const item of persistentEditImages) {
+        onItemUpdate(item.id, {
+          content: item.content,
+          assetId: item.assetId,
+          previewContent: item.previewContent,
+          thumbnailContent: item.thumbnailContent
+        });
+      }
+      const referenceContents = persistentReferenceImages.map(item => item.content);
+      const imageContext = buildImageReferenceRoleContext(
+        promptToOptimize,
+        persistentTargetItem,
+        persistentReferenceImages,
+        { hasLocalMask: useLocalMask }
+      );
+      const editOptions = {
+        imageAssetId: getCanvasItemAssetId(persistentTargetItem),
+        referenceAssetIds: persistentReferenceImages.map(getCanvasItemAssetId).filter(Boolean),
+        imageContext
+      };
 
       let maskDataUrl: string | null | undefined;
       if (useLocalMask) {
-        maskDataUrl = await createTransparentEditMask(currentMaskData!, targetItem.content, targetItem.width, targetItem.height);
+        maskDataUrl = await createTransparentEditMask(currentMaskData!, persistentTargetItem.content, targetItem.width, targetItem.height);
         if (!maskDataUrl) {
           throw new Error('请先用画笔涂抹需要局部重绘的区域');
         }
@@ -677,7 +795,7 @@ const Canvas: React.FC<CanvasProps> = ({
       const newId = Math.random().toString(36).substr(2, 9);
       const resultMaxLongSide = Math.max(targetItem.width, targetItem.height);
       const resultFrame = getAspectRatioFrame(
-        inlineEditAspectRatio,
+        effectiveAspectRatio,
         targetItem.width,
         targetItem.height,
         resultMaxLongSide
@@ -694,7 +812,7 @@ const Canvas: React.FC<CanvasProps> = ({
         label: 'AI 重绘中...',
         zIndex: nextZIndex,
         parentId: targetItem.id,
-        prompt: optimizedPrompt,
+        prompt: generationPrompt,
         layers: []
       };
 
@@ -704,24 +822,32 @@ const Canvas: React.FC<CanvasProps> = ({
 
       let result: string;
       if (canUseImageJobs()) {
-        const job = await submitImageEditJob(optimizedPrompt, targetItem.content, maskDataUrl || undefined, inlineEditAspectRatio);
+        const job = await submitImageEditJob(
+          generationPrompt,
+          persistentTargetItem.content,
+          maskDataUrl || undefined,
+          effectiveAspectRatio,
+          referenceContents,
+          editOptions
+        );
         onItemUpdate(newId, { imageJobId: job.jobId });
         result = await waitForImageJob(job.jobId);
       } else {
-        result = await editImage(optimizedPrompt, targetItem.content, maskDataUrl || undefined, inlineEditAspectRatio);
+        result = await editImage(
+          generationPrompt,
+          persistentTargetItem.content,
+          maskDataUrl || undefined,
+          effectiveAspectRatio,
+          referenceContents,
+          editOptions
+        );
       }
-      const finalFrame = await getImageFrameFromSource(
-        result,
-        resultFrame.width,
-        resultFrame.height,
-        resultMaxLongSide
-      );
       onItemUpdate(newId, {
-        ...centerFrameOnRect(resultItem, finalFrame),
+        ...centerFrameOnRect(resultItem, resultFrame),
         content: result,
         status: 'completed',
         imageJobId: undefined,
-        label: optimizedPrompt.substring(0, 16) + (optimizedPrompt.length > 16 ? '...' : '')
+        label: prompt.substring(0, 16) + (prompt.length > 16 ? '...' : '')
       });
       if (useLocalMask) {
         onItemUpdate(targetItem.id, { maskData: undefined });
@@ -740,7 +866,6 @@ const Canvas: React.FC<CanvasProps> = ({
       }
       setInlineEditErrors(prev => ({ ...prev, [targetItem.id]: message }));
     } finally {
-      setInlinePromptOptimizingForItem(targetItem.id, false);
       setInlineEditingForItem(targetItem.id, false);
     }
   };
@@ -910,7 +1035,7 @@ const Canvas: React.FC<CanvasProps> = ({
               ) : item.type === 'workflow' ? (
                 <div className="w-full h-full bg-white/30" />
               ) : (
-                <img src={item.content} className="w-full h-full object-contain pointer-events-none" />
+                <img src={getCanvasImageSrc(item)} className="w-full h-full object-contain pointer-events-none" />
               )}
               {renderWorkflowDrawingLayer(item)}
               {renderImageMaskLayer(item)}
@@ -963,6 +1088,7 @@ const Canvas: React.FC<CanvasProps> = ({
 
         {selectedItem?.type === 'image' && selectedIds.length === 1 && (
           <form
+            ref={inlineRedrawFormRef}
             onSubmit={handleInlineImageRedraw}
             className="absolute z-[2000000] flex flex-col items-center gap-2 animate-in fade-in zoom-in-95 pointer-events-auto"
             style={{
@@ -1037,32 +1163,30 @@ const Canvas: React.FC<CanvasProps> = ({
               )}
             </div>
             <div className="relative flex items-end w-[520px] max-w-[80vw] p-1.5 bg-white border border-gray-100 rounded-2xl shadow-[0_32px_80px_-16px_rgba(0,0,0,0.18)]">
-              <textarea
+              <ImageMentionEditor
                 value={inlineEditPrompt}
-                onChange={(event) => setInlineEditPromptForItem(selectedItem.id, event.target.value)}
-                onKeyDown={(event) => {
-                  event.stopPropagation();
-                  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
-                    event.preventDefault();
-                    event.currentTarget.form?.requestSubmit();
+                imageItems={completedImageItems}
+                selectableImageItems={inlineReferenceImageItems}
+                onChange={(nextValue) => setInlineEditPromptForItem(selectedItem.id, nextValue)}
+                disabled={selectedItemIsInlineEditing || selectedItem.status === 'loading'}
+                placeholder={selectedItemIsLocalRedraw ? '先涂抹区域，再输入局部重绘指令，可输入 @ 引用图片' : '输入重绘指令，可输入 @ 选择参考图'}
+                dropdownTitle="选择参考图片"
+                emptyText="没有匹配的画布图片"
+                itemHint={() => '插入稳定 ID 引用作为参考图'}
+                onSubmitShortcut={() => {
+                  if (selectedItem.status !== 'loading' && !selectedItemIsInlineEditing && inlineEditPrompt.trim()) {
+                    inlineRedrawFormRef.current?.requestSubmit();
                   }
                 }}
-                disabled={selectedItemIsInlineEditing || selectedItem.status === 'loading'}
-                rows={3}
-                placeholder={selectedItemIsLocalRedraw ? '先涂抹区域，再输入局部重绘指令' : '输入重绘指令，例如：换成赛博朋克风格'}
-                className="scrollbar-hide w-full min-h-[72px] max-h-28 resize-none overflow-y-auto overflow-x-hidden pl-4 pr-12 py-3 bg-gray-50 border border-gray-100 rounded-xl text-sm leading-5 font-bold outline-none focus:ring-4 focus:ring-indigo-500/10 disabled:opacity-60 transition-all"
+                className="prompt-editor scrollbar-hide w-full min-h-[72px] max-h-28 overflow-y-auto overflow-x-hidden pl-4 pr-12 py-3 bg-gray-50 border border-gray-100 rounded-xl text-sm leading-5 font-bold outline-none focus:ring-4 focus:ring-indigo-500/10 aria-disabled:opacity-60 transition-all whitespace-pre-wrap break-words"
               />
               <button
                 type="submit"
-                disabled={!inlineEditPrompt.trim() || selectedItemIsInlineEditing || selectedItem.status === 'loading' || selectedItemIsInlinePromptOptimizing}
-                className={`absolute right-3 w-9 h-9 text-white rounded-lg flex items-center justify-center hover:scale-105 active:scale-95 transition-all shadow-lg ${
-                  selectedItemIsInlinePromptOptimizing
-                    ? 'prompt-optimizing-button'
-                    : 'bg-black disabled:opacity-30'
-                }`}
+                disabled={!inlineEditPrompt.trim() || selectedItemIsInlineEditing || selectedItem.status === 'loading'}
+                className="absolute right-3 w-9 h-9 text-white rounded-lg flex items-center justify-center hover:scale-105 active:scale-95 transition-all shadow-lg bg-black disabled:opacity-30"
                 title={selectedItemIsLocalRedraw ? '局部重绘当前图片' : '重绘当前图片'}
               >
-                {selectedItemIsInlineEditing || selectedItem.status === 'loading' || selectedItemIsInlinePromptOptimizing ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
+                {selectedItemIsInlineEditing || selectedItem.status === 'loading' ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
               </button>
             </div>
             {selectedInlineEditError && (

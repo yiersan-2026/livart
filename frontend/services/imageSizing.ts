@@ -15,7 +15,6 @@ export const IMAGE_ASPECT_RATIO_OPTIONS: Array<{
   { value: '9:16', label: '9:16', title: '竖向手机画幅' }
 ];
 
-type ImageApiSize = '1024x1024' | '1024x768' | '768x1024' | '1280x720' | '720x1280';
 type GeminiAspectRatio = '1:1' | '4:3' | '3:4' | '16:9' | '9:16';
 
 interface FrameDimensions {
@@ -78,6 +77,28 @@ export const getAspectRatioFrame = (
   };
 };
 
+export const inferAspectRatioFromDimensions = (
+  width: number,
+  height: number
+): Exclude<ImageAspectRatio, 'auto'> => {
+  const safeWidth = getCanvasDimension(width);
+  const safeHeight = getCanvasDimension(height);
+  const sourceRatio = safeWidth / safeHeight;
+
+  return (Object.entries(ASPECT_RATIO_DIMENSIONS) as Array<[Exclude<ImageAspectRatio, 'auto'>, FrameDimensions]>)
+    .reduce((bestMatch, [aspectRatio, dimensions]) => {
+      const candidateRatio = dimensions.width / dimensions.height;
+      const candidateDistance = Math.abs(Math.log(sourceRatio / candidateRatio));
+      if (candidateDistance < bestMatch.distance) {
+        return { aspectRatio, distance: candidateDistance };
+      }
+      return bestMatch;
+    }, {
+      aspectRatio: '1:1' as Exclude<ImageAspectRatio, 'auto'>,
+      distance: Number.POSITIVE_INFINITY
+    }).aspectRatio;
+};
+
 export const getImageFrameFromSource = (
   src: string,
   fallbackWidth: number,
@@ -107,23 +128,6 @@ export const centerFrameOnRect = (
   width: frame.width,
   height: frame.height
 });
-
-export const aspectRatioToImageApiSize = (aspectRatio: ImageAspectRatio): ImageApiSize | undefined => {
-  switch (aspectRatio) {
-    case '1:1':
-      return '1024x1024';
-    case '4:3':
-      return '1024x768';
-    case '3:4':
-      return '768x1024';
-    case '16:9':
-      return '1280x720';
-    case '9:16':
-      return '720x1280';
-    default:
-      return undefined;
-  }
-};
 
 export const aspectRatioToGeminiAspectRatio = (aspectRatio: ImageAspectRatio): GeminiAspectRatio | undefined => {
   if (aspectRatio === 'auto') return undefined;

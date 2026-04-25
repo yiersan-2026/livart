@@ -1,9 +1,15 @@
-
 import React, { useEffect, useMemo, useRef } from 'react';
 import type { ChatMessage, CanvasItem, ImageAspectRatio } from '../types';
-import { Image as ImageIcon, Loader2, Hammer, Send } from 'lucide-react';
-import { optimizePrompt } from '../services/promptOptimizer';
+import { Loader2, Hammer, Send } from 'lucide-react';
 import { IMAGE_ASPECT_RATIO_OPTIONS } from '../services/imageSizing';
+import { getThumbnailImageSrc } from '../services/imageSources';
+import {
+  getImageReferenceDisplayText,
+  insertImageMention,
+  resolveMentionedImageReferences,
+  tokenizeImageReferenceText
+} from '../services/imageReferences';
+import ImageMentionEditor from './ImageMentionEditor';
 
 interface SidebarProps {
   messages: ChatMessage[];
@@ -13,28 +19,20 @@ interface SidebarProps {
   imageItems: CanvasItem[];
   onSelectContextImage: (item: CanvasItem) => void;
   onClearContextImage: () => void;
+  onNavigateToImage: (item: CanvasItem) => void;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, contextImage, imageItems, onSelectContextImage, onClearContextImage }) => {
+const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, contextImage, imageItems, onClearContextImage, onNavigateToImage }) => {
   const [inputValue, setInputValue] = React.useState('');
-  const [mentionQuery, setMentionQuery] = React.useState<string | null>(null);
-  const [contextTagOffset, setContextTagOffset] = React.useState<number | null>(null);
-  const [isOptimizingPrompt, setIsOptimizingPrompt] = React.useState(false);
-  const [optimizationError, setOptimizationError] = React.useState('');
   const [selectedAspectRatio, setSelectedAspectRatio] = React.useState<ImageAspectRatio>('auto');
   const scrollRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLDivElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
   const lastContextImageIdRef = useRef<string | null>(null);
 
-  const mentionImageItems = useMemo(() => {
-    if (mentionQuery === null) return [];
-    const normalizedQuery = mentionQuery.trim().toLowerCase();
-    const availableImages = imageItems.filter(item => item.status === 'completed' && !!item.content);
-    if (!normalizedQuery) return availableImages.slice(0, 6);
-    return availableImages
-      .filter(item => (item.label || '图片').toLowerCase().includes(normalizedQuery))
-      .slice(0, 6);
-  }, [imageItems, mentionQuery]);
+  const completedImageItems = useMemo(
+    () => imageItems.filter(item => item.type === 'image' && item.status === 'completed' && !!item.content),
+    [imageItems]
+  );
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -42,246 +40,91 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
     }
   }, [messages, isThinking]);
 
-  const readEditorState = (root: ParentNode) => {
-    let text = '';
-    let tagOffset: number | null = null;
-
-    const walk = (node: Node) => {
-      if (node.nodeType === Node.TEXT_NODE) {
-        text += node.textContent?.replace(/\u00a0/g, ' ') || '';
-        return;
-      }
-
-      if (!(node instanceof HTMLElement) && !(node instanceof DocumentFragment)) return;
-
-      if (node instanceof HTMLElement) {
-        if (node.dataset.contextTag !== undefined) {
-          tagOffset = text.length;
-          return;
-        }
-        if (node.dataset.placeholder !== undefined) {
-          return;
-        }
-        if (node.tagName === 'BR') {
-          text += '\n';
-          return;
-        }
-      }
-
-      node.childNodes.forEach(walk);
-    };
-
-    root.childNodes.forEach(walk);
-    return { text, tagOffset };
-  };
-
-  const moveCaretToEnd = () => {
-    requestAnimationFrame(() => {
-      const editor = inputRef.current;
-      if (!editor) return;
-
-      editor.focus();
-      const range = document.createRange();
-      range.selectNodeContents(editor);
-      range.collapse(false);
-      const selection = window.getSelection();
-      selection?.removeAllRanges();
-      selection?.addRange(range);
-    });
-  };
-
-  const insertPlainTextAtSelection = (text: string) => {
-    document.execCommand('insertText', false, text);
-  };
-
-  const buildContextTagElement = (item: CanvasItem) => {
-    const tag = document.createElement('span');
-    tag.dataset.contextTag = '';
-    tag.contentEditable = 'false';
-    tag.tabIndex = 0;
-    tag.title = '按 Backspace 或 Delete 删除引用';
-    tag.className = 'mx-1 inline-flex max-w-[168px] translate-y-1 items-center gap-1.5 rounded-xl border border-indigo-100 bg-indigo-50 px-2 py-1 text-indigo-700 align-baseline outline-none focus:ring-2 focus:ring-indigo-300';
-
-    const thumbnail = document.createElement('span');
-    thumbnail.className = 'h-5 w-5 overflow-hidden rounded-md border border-indigo-100 bg-white';
-
-    const image = document.createElement('img');
-    image.src = item.content;
-    image.className = 'h-full w-full object-cover';
-    thumbnail.appendChild(image);
-
-    const label = document.createElement('span');
-    label.className = 'truncate text-xs font-black';
-    label.textContent = `@${item.label || '参考图'}`;
-
-    const closeButton = document.createElement('span');
-    closeButton.role = 'button';
-    closeButton.title = '移除引用图片';
-    closeButton.className = 'rounded-md p-0.5 text-indigo-400 hover:bg-indigo-100';
-    closeButton.textContent = '×';
-    closeButton.addEventListener('click', (event) => {
-      event.stopPropagation();
-      clearContextTag();
-    });
-
-    tag.addEventListener('keydown', (event) => {
-      if (event.key !== 'Backspace' && event.key !== 'Delete') return;
-      event.preventDefault();
-      clearContextTag();
-    });
-
-    tag.append(thumbnail, label, closeButton);
-    return tag;
-  };
-
-  const syncEditorContent = (
-    value: string,
-    item: CanvasItem | null,
-    tagOffset: number | null,
-    focusEnd = false
-  ) => {
-    const editor = inputRef.current;
-    if (!editor) return;
-
-    editor.replaceChildren();
-
-    if (item && tagOffset !== null) {
-      const safeOffset = Math.max(0, Math.min(tagOffset, value.length));
-      const beforeTag = value.slice(0, safeOffset);
-      const afterTag = value.slice(safeOffset);
-      if (beforeTag) editor.appendChild(document.createTextNode(beforeTag));
-      editor.appendChild(buildContextTagElement(item));
-      if (afterTag) editor.appendChild(document.createTextNode(afterTag));
-    } else if (value) {
-      editor.appendChild(document.createTextNode(value));
-    }
-
-    if (focusEnd) moveCaretToEnd();
-  };
-
-  const clearContextTag = () => {
-    setContextTagOffset(null);
-    lastContextImageIdRef.current = null;
-    onClearContextImage();
-    syncEditorContent(inputValue, null, null, true);
-  };
-
   useEffect(() => {
     const currentContextImageId = contextImage?.id ?? null;
     if (currentContextImageId === lastContextImageIdRef.current) return;
 
     lastContextImageIdRef.current = currentContextImageId;
+    if (!contextImage) return;
 
-    if (!contextImage) {
-      setContextTagOffset(null);
-      syncEditorContent(inputValue, null, null);
-      return;
-    }
+    setInputValue(prevValue => {
+      const mentionedImages = resolveMentionedImageReferences(prevValue, completedImageItems);
+      if (mentionedImages.some(item => item.id === contextImage.id)) return prevValue;
+      return insertImageMention(prevValue.trimEnd(), contextImage, completedImageItems);
+    });
+  }, [completedImageItems, contextImage]);
 
-    const nextTagOffset = inputValue.length;
-    setContextTagOffset(nextTagOffset);
-    requestAnimationFrame(() => syncEditorContent(inputValue, contextImage, nextTagOffset, true));
-  }, [contextImage?.id]);
+  const handleInputChange = (nextValue: string) => {
+    setInputValue(nextValue);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const prompt = inputValue.trim();
-    if (prompt && !isThinking && !isOptimizingPrompt) {
-      setIsOptimizingPrompt(true);
-      setOptimizationError('');
+    if (!contextImage) return;
 
-      try {
-        const optimizedPrompt = await optimizePrompt(prompt, contextImage ? 'image-to-image' : 'text-to-image');
-        onSendMessage(optimizedPrompt, selectedAspectRatio);
-        setInputValue('');
-        setMentionQuery(null);
-        setContextTagOffset(null);
-        setOptimizationError('');
-        syncEditorContent('', null, null);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : '提示词优化失败';
-        setOptimizationError(message);
-      } finally {
-        setIsOptimizingPrompt(false);
-      }
-    }
-  };
-
-  const updateMentionQuery = (value: string) => {
-    const match = value.match(/@([^\s@]*)$/);
-    setMentionQuery(match ? match[1] : null);
-  };
-
-  const handleInputChange = (event: React.FormEvent<HTMLDivElement>) => {
-    const nextState = readEditorState(event.currentTarget);
-    setInputValue(nextState.text);
-    setContextTagOffset(nextState.tagOffset);
-    updateMentionQuery(nextState.text);
-
-    if (contextImage && nextState.tagOffset === null) {
+    const mentionedImages = resolveMentionedImageReferences(nextValue, completedImageItems);
+    if (!mentionedImages.some(item => item.id === contextImage.id)) {
+      lastContextImageIdRef.current = null;
       onClearContextImage();
     }
   };
 
-  const handleMentionSelect = (item: CanvasItem) => {
-    const match = inputValue.match(/@([^\s@]*)$/);
-    const nextValue = inputValue.replace(/@([^\s@]*)$/, '');
-    const nextTagOffset = match?.index ?? nextValue.length;
+  const isInputBusy = isThinking;
 
-    lastContextImageIdRef.current = item.id;
-    onSelectContextImage(item);
-    setInputValue(nextValue);
-    setContextTagOffset(nextTagOffset);
-    setMentionQuery(null);
-    syncEditorContent(nextValue, item, nextTagOffset, true);
-  };
-
-  const handleInputKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    event.stopPropagation();
-
-    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
-      event.preventDefault();
-      event.currentTarget.closest('form')?.requestSubmit();
-      return;
-    }
-
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      insertPlainTextAtSelection('\n');
-      return;
-    }
-
-    if (!contextImage) return;
-
-    const editor = event.currentTarget;
-    const selection = window.getSelection();
-    const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
-    if (!range || !editor.contains(range.startContainer)) return;
-
-    const beforeRange = document.createRange();
-    beforeRange.selectNodeContents(editor);
-    beforeRange.setEnd(range.startContainer, range.startOffset);
-    const textBeforeCaret = readEditorState(beforeRange.cloneContents()).text;
-    const shouldDeleteTag = event.key === 'Backspace' && textBeforeCaret.length === (contextTagOffset ?? 0);
-
-    if (shouldDeleteTag) {
-      event.preventDefault();
-      clearContextTag();
-    }
-  };
-
-  const handleInputPaste = (event: React.ClipboardEvent<HTMLDivElement>) => {
+  const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
-    insertPlainTextAtSelection(event.clipboardData.getData('text/plain'));
+    const prompt = inputValue.trim();
+    if (!prompt || isInputBusy) return;
+
+    onSendMessage(prompt, selectedAspectRatio);
+    setInputValue('');
   };
 
-  const renderText = (text: string) => {
-    return text.split('\n').map((line, i) => (
-      <span key={i}>
-        {line.split('**').map((part, j) => j % 2 === 1 ? <strong key={j}>{part}</strong> : part)}
-        <br />
-      </span>
-    ));
+  const renderFormattedText = (text: string, keyPrefix: string) => {
+    return text.split('\n').flatMap((line, lineIndex) => {
+      const lineParts = line.split('**').map((part, partIndex) => (
+        partIndex % 2 === 1
+          ? <strong key={`${keyPrefix}-${lineIndex}-${partIndex}`}>{part}</strong>
+          : <React.Fragment key={`${keyPrefix}-${lineIndex}-${partIndex}`}>{part}</React.Fragment>
+      ));
+
+      return lineIndex === 0
+        ? lineParts
+        : [<br key={`${keyPrefix}-${lineIndex}-br`} />, ...lineParts];
+    });
+  };
+
+  const renderMessageText = (text: string, role: ChatMessage['role']) => {
+    const tokens = tokenizeImageReferenceText(text, completedImageItems);
+    const isUserMessage = role === 'user';
+
+    return tokens.map((token, index) => {
+      if (token.type === 'text') {
+        return (
+          <React.Fragment key={`text-${index}`}>
+            {renderFormattedText(token.text, `text-${index}`)}
+          </React.Fragment>
+        );
+      }
+
+      return (
+        <button
+          key={`mention-${token.item.id}-${index}`}
+          type="button"
+          title={`定位到 ${getImageReferenceDisplayText(token.item)}`}
+          onClick={() => onNavigateToImage(token.item)}
+          className={`mx-1 inline-flex max-w-full translate-y-1 items-center gap-1.5 rounded-xl px-2 py-1 align-baseline text-xs font-black shadow-sm transition-all hover:scale-[1.02] active:scale-95 ${
+            isUserMessage
+              ? 'bg-white/15 text-white ring-1 ring-white/25 hover:bg-white/25'
+              : 'bg-indigo-50 text-indigo-700 ring-1 ring-indigo-100 hover:bg-indigo-100'
+          }`}
+        >
+          <span className={`h-5 w-5 shrink-0 overflow-hidden rounded-md ${
+            isUserMessage ? 'bg-white/20' : 'bg-white'
+          }`}>
+            <img src={getThumbnailImageSrc(token.item)} className="h-full w-full object-cover" />
+          </span>
+          <span className="truncate">{getImageReferenceDisplayText(token.item)}</span>
+        </button>
+      );
+    });
   };
 
   return (
@@ -297,17 +140,17 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
       </div>
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-6 scrollbar-hide">
-        {messages.map((msg) => (
-          <div key={msg.id} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+        {messages.map((message) => (
+          <div key={message.id} className={`flex flex-col ${message.role === 'user' ? 'items-end' : 'items-start'}`}>
             <div className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
-              msg.role === 'user' 
-                ? 'bg-black text-white shadow-lg' 
+              message.role === 'user'
+                ? 'bg-black text-white shadow-lg'
                 : 'bg-gray-100 text-gray-800'
             }`}>
-              {renderText(msg.text)}
+              {renderMessageText(message.text, message.role)}
             </div>
             <span className="text-[10px] text-gray-400 mt-1 px-1 font-medium">
-              {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              {new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
             </span>
           </div>
         ))}
@@ -321,39 +164,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
       </div>
 
       <div className="p-4 bg-white border-t border-gray-100 space-y-3">
-        <form onSubmit={handleSubmit} className="relative">
-          {mentionQuery !== null && (
-            <div className="absolute bottom-full left-0 right-0 mb-2 p-2 bg-white border border-gray-100 rounded-2xl shadow-2xl z-20 space-y-1">
-              <div className="flex items-center gap-2 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-gray-400">
-                <ImageIcon size={12} />
-                选择画布图片
-              </div>
-              {mentionImageItems.length > 0 ? (
-                mentionImageItems.map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => handleMentionSelect(item)}
-                    className="w-full flex items-center gap-3 p-2 rounded-xl hover:bg-indigo-50 text-left transition-all"
-                  >
-                    <div className="w-10 h-10 rounded-lg overflow-hidden bg-gray-100 border border-gray-100 flex-shrink-0">
-                      <img src={item.content} className="w-full h-full object-cover" />
-                    </div>
-                    <div className="min-w-0">
-                      <p className="text-xs font-black text-gray-800 truncate">{item.label || '未命名图片'}</p>
-                      <p className="text-[10px] font-bold text-gray-400">点击后锁定为参考图</p>
-                    </div>
-                  </button>
-                ))
-              ) : (
-                <div className="px-3 py-4 text-xs font-bold text-gray-400 text-center">
-                  没有匹配的画布图片
-                </div>
-              )}
-            </div>
-          )}
-
+        <form ref={formRef} onSubmit={handleSubmit} className="relative">
           <div className="mb-2 flex items-center gap-2 rounded-2xl border border-gray-100 bg-gray-50 p-1.5">
             <span className="shrink-0 px-2 text-[10px] font-black uppercase tracking-widest text-gray-400">画幅</span>
             <div className="scrollbar-hide flex min-w-0 flex-1 gap-1 overflow-x-auto">
@@ -362,7 +173,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
                   key={option.value}
                   type="button"
                   title={option.title}
-                  disabled={isThinking || isOptimizingPrompt}
+                  disabled={isInputBusy}
                   onClick={() => setSelectedAspectRatio(option.value)}
                   className={`shrink-0 rounded-xl px-2.5 py-1.5 text-[11px] font-black transition-all ${
                     selectedAspectRatio === option.value
@@ -377,36 +188,24 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
           </div>
 
           <div className="flex items-end gap-2 w-full pr-2 py-2 pl-3 bg-gray-50 border border-gray-200 rounded-2xl focus-within:ring-4 focus-within:ring-black/5 focus-within:border-black transition-all">
-            <div
-              ref={inputRef}
-              role="textbox"
-              aria-multiline="true"
-              data-placeholder={contextImage ? "输入对这张图的修改要求..." : "描述画面，或输入 @ 选择参考图..."}
-              contentEditable
-              suppressContentEditableWarning
-              onInput={handleInputChange}
-              onKeyDown={handleInputKeyDown}
-              onFocus={() => updateMentionQuery(inputValue)}
-              onPaste={handleInputPaste}
+            <ImageMentionEditor
+              value={inputValue}
+              imageItems={completedImageItems}
+              onChange={handleInputChange}
+              disabled={isInputBusy}
+              placeholder={contextImage ? '输入对这张图的修改要求...' : '描述画面，或输入 @ 选择参考图...'}
               className="prompt-editor scrollbar-hide min-w-0 flex-1 min-h-[72px] max-h-28 overflow-y-auto overflow-x-hidden bg-transparent py-1.5 text-sm leading-6 font-medium outline-none whitespace-pre-wrap break-words"
+              itemHint={() => '点击后插入稳定 ID 引用'}
+              onSubmitShortcut={() => formRef.current?.requestSubmit()}
             />
             <button
               type="submit"
-              disabled={!inputValue.trim() || isThinking || isOptimizingPrompt}
-              className={`w-10 h-10 text-white rounded-xl hover:scale-105 active:scale-95 transition-all flex items-center justify-center shadow-lg shadow-black/10 flex-shrink-0 ${
-                isOptimizingPrompt
-                  ? 'prompt-optimizing-button'
-                  : 'bg-black disabled:opacity-30'
-              }`}
+              disabled={!inputValue.trim() || isInputBusy}
+              className="w-10 h-10 text-white rounded-xl hover:scale-105 active:scale-95 transition-all flex items-center justify-center shadow-lg shadow-black/10 flex-shrink-0 bg-black disabled:opacity-30"
             >
-              {isOptimizingPrompt ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
+              <Send size={18} />
             </button>
           </div>
-          {optimizationError && (
-            <div className="mt-2 rounded-xl bg-red-50 border border-red-100 px-3 py-2 text-[11px] font-bold text-red-500">
-              提示词优化失败：{optimizationError}
-            </div>
-          )}
         </form>
       </div>
     </div>
