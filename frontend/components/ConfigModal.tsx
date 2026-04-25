@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { X, Save } from 'lucide-react';
+import { Eye, EyeOff, X, Save } from 'lucide-react';
 import {
   getApiConfig,
   saveApiConfig,
@@ -22,11 +22,13 @@ interface ConfigModalProps {
 const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose, onSaved, required = false }) => {
   const [config, setConfig] = useState<ApiConfig>(DEFAULT_API_CONFIG);
   const [error, setError] = useState('');
+  const [showApiKey, setShowApiKey] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
       setConfig(getApiConfig());
       setError('');
+      setShowApiKey(false);
     }
   }, [isOpen]);
 
@@ -78,13 +80,23 @@ const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose, onSaved, req
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">API Key</label>
-            <input
-              type="password"
-              value={config.apiKey}
-              onChange={(event) => setConfig({ ...config, apiKey: event.target.value })}
-              placeholder="sk-..."
-              className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-black/10 focus:border-gray-300 transition-all"
-            />
+            <div className="relative">
+              <input
+                type={showApiKey ? 'text' : 'password'}
+                value={config.apiKey}
+                onChange={(event) => setConfig({ ...config, apiKey: event.target.value })}
+                placeholder="sk-..."
+                className="w-full px-4 py-3 pr-12 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-black/10 focus:border-gray-300 transition-all"
+              />
+              <button
+                type="button"
+                onClick={() => setShowApiKey(prev => !prev)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 p-1.5 rounded-lg text-gray-400 hover:bg-gray-100 hover:text-gray-700 transition-colors"
+                title={showApiKey ? '隐藏 API Key' : '显示 API Key 原文'}
+              >
+                {showApiKey ? <EyeOff size={17} /> : <Eye size={17} />}
+              </button>
+            </div>
           </div>
 
           <div>
