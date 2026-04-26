@@ -27,6 +27,8 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
@@ -53,10 +55,7 @@ public class AssetService {
         this.assetMapper = assetMapper;
         this.canvasMapper = canvasMapper;
         this.properties = properties;
-        this.minioClient = MinioClient.builder()
-                .endpoint(properties.minio().endpoint())
-                .credentials(properties.minio().accessKey(), properties.minio().secretKey())
-                .build();
+        this.minioClient = createMinioClient(properties.minio().endpoint(), properties.minio().accessKey(), properties.minio().secretKey());
     }
 
     @PostConstruct
@@ -130,6 +129,50 @@ public class AssetService {
         assetMapper.insertAsset(entity);
 
         return toResponse(assetMapper.findById(assetId));
+    }
+
+    private static MinioClient createMinioClient(String endpoint, String accessKey, String secretKey) {
+        MinioEndpoint minioEndpoint = parseMinioEndpoint(endpoint);
+        return MinioClient.builder()
+                .endpoint(minioEndpoint.host(), minioEndpoint.port(), minioEndpoint.secure())
+                .credentials(stripWrappingBackticks(accessKey), stripWrappingBackticks(secretKey))
+                .build();
+    }
+
+    private static MinioEndpoint parseMinioEndpoint(String endpoint) {
+        String normalizedEndpoint = stripWrappingBackticks(endpoint).trim();
+        if (normalizedEndpoint.isEmpty()) {
+            throw new IllegalArgumentException("MinIO endpoint is empty");
+        }
+
+        String uriText = normalizedEndpoint.matches("^[a-zA-Z][a-zA-Z0-9+.-]*://.*")
+                ? normalizedEndpoint
+                : "http://" + normalizedEndpoint;
+        try {
+            URI uri = new URI(uriText);
+            if (uri.getHost() == null || uri.getHost().isBlank()) {
+                throw new IllegalArgumentException("MinIO endpoint host is empty");
+            }
+            boolean secure = "https".equalsIgnoreCase(uri.getScheme());
+            int port = uri.getPort() > 0 ? uri.getPort() : (secure ? 443 : 80);
+            return new MinioEndpoint(uri.getHost(), port, secure);
+        } catch (URISyntaxException exception) {
+            throw new IllegalArgumentException("Invalid MinIO endpoint", exception);
+        }
+    }
+
+    private static String stripWrappingBackticks(String value) {
+        if (value == null) {
+            return "";
+        }
+        String trimmedValue = value.trim();
+        if (trimmedValue.length() >= 2 && trimmedValue.startsWith("`") && trimmedValue.endsWith("`")) {
+            return trimmedValue.substring(1, trimmedValue.length() - 1);
+        }
+        return trimmedValue;
+    }
+
+    private record MinioEndpoint(String host, int port, boolean secure) {
     }
 
     public AssetContent getContent(UUID assetId) {

@@ -1,11 +1,11 @@
 package com.artisanlab.canvas;
 
-import com.artisanlab.common.ApiException;
 import com.artisanlab.config.ArtisanProperties;
 import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.core.MessageDeliveryMode;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
-import org.springframework.http.HttpStatus;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.time.OffsetDateTime;
@@ -13,11 +13,15 @@ import java.util.UUID;
 
 @Service
 public class CanvasSaveQueueService {
+    private static final Logger log = LoggerFactory.getLogger(CanvasSaveQueueService.class);
+
     private final RabbitTemplate rabbitTemplate;
+    private final CanvasService canvasService;
     private final ArtisanProperties properties;
 
-    public CanvasSaveQueueService(RabbitTemplate rabbitTemplate, ArtisanProperties properties) {
+    public CanvasSaveQueueService(RabbitTemplate rabbitTemplate, CanvasService canvasService, ArtisanProperties properties) {
         this.rabbitTemplate = rabbitTemplate;
+        this.canvasService = canvasService;
         this.properties = properties;
     }
 
@@ -44,7 +48,18 @@ public class CanvasSaveQueueService {
                 return rabbitMessage;
             });
         } catch (AmqpException exception) {
-            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "CANVAS_SAVE_QUEUE_UNAVAILABLE", "画布保存队列暂时不可用");
+            log.warn("Canvas save queue unavailable; persisting directly messageId={} canvasId={}",
+                    message.messageId(), message.canvasId(), exception);
+            canvasService.persistQueuedCanvasSave(message);
+            return new CanvasDtos.CanvasResponse(
+                    message.canvasId(),
+                    title,
+                    request.state(),
+                    null,
+                    message.requestedAt(),
+                    revision,
+                    false
+            );
         }
 
         return new CanvasDtos.CanvasResponse(
