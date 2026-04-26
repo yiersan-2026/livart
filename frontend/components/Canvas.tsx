@@ -44,6 +44,9 @@ interface CanvasProps {
 }
 
 type ResizeDirection = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
+type MaskPoint = { x: number; y: number };
+
+const REMOVER_PROMPT = '把圈起来的地方删除掉。';
 
 const getCanvasDimension = (value: number) => Math.max(1, Math.round(value));
 
@@ -69,10 +72,80 @@ const getImageDimensions = async (src: string, fallbackWidth: number, fallbackHe
   }
 };
 
-const buildEditableMaskFromPaintPixels = (paintPixels: ImageData, width: number, height: number) => {
+const dilatePixels = (sourcePixels: Uint8Array, width: number, height: number, radius: number) => {
+  if (radius <= 0) return sourcePixels;
+
+  const dilatedPixels = new Uint8Array(sourcePixels);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      if (!sourcePixels[index]) continue;
+
+      for (let dy = -radius; dy <= radius; dy += 1) {
+        const nextY = y + dy;
+        if (nextY < 0 || nextY >= height) continue;
+
+        for (let dx = -radius; dx <= radius; dx += 1) {
+          const nextX = x + dx;
+          if (nextX < 0 || nextX >= width) continue;
+          if (dx * dx + dy * dy > radius * radius) continue;
+          dilatedPixels[nextY * width + nextX] = 1;
+        }
+      }
+    }
+  }
+
+  return dilatedPixels;
+};
+
+const getPolygonArea = (points: MaskPoint[]) => {
+  let area = 0;
+  for (let index = 0; index < points.length; index += 1) {
+    const current = points[index];
+    const next = points[(index + 1) % points.length];
+    area += current.x * next.y - next.x * current.y;
+  }
+  return Math.abs(area) / 2;
+};
+
+const fillRemoverLassoSelection = (canvas: HTMLCanvasElement | null, points: MaskPoint[], brushSize: number) => {
+  if (!canvas || points.length < 3) return;
+
+  const area = getPolygonArea(points);
+  if (area < Math.max(64, brushSize * brushSize * 1.5)) return;
+
+  const context = canvas.getContext('2d');
+  if (!context) return;
+
+  context.save();
+  context.globalCompositeOperation = 'source-over';
+  context.lineCap = 'round';
+  context.lineJoin = 'round';
+  context.lineWidth = brushSize;
+  context.strokeStyle = 'rgba(239, 68, 68, 0.7)';
+  context.fillStyle = 'rgba(239, 68, 68, 0.28)';
+  context.beginPath();
+  context.moveTo(points[0].x, points[0].y);
+  for (const point of points.slice(1)) {
+    context.lineTo(point.x, point.y);
+  }
+  context.closePath();
+  context.fill();
+  context.stroke();
+  context.restore();
+};
+
+const buildEditableMaskFromPaintPixels = (
+  paintPixels: ImageData,
+  width: number,
+  height: number,
+  options: { outlineDilationRadius?: number; editableDilationRadius?: number } = {}
+) => {
   const totalPixels = width * height;
   const paintedPixels = new Uint8Array(totalPixels);
   const blockedPixels = new Uint8Array(totalPixels);
+  const outlineDilationRadius = options.outlineDilationRadius ?? 2;
+  const editableDilationRadius = options.editableDilationRadius ?? 0;
   let hasPaintedArea = false;
 
   for (let index = 0; index < totalPixels; index += 1) {
@@ -88,7 +161,7 @@ const buildEditableMaskFromPaintPixels = (paintPixels: ImageData, width: number,
     return { editablePixels: paintedPixels, hasPaintedArea: false };
   }
 
-  const dilationRadius = 2;
+  const dilationRadius = outlineDilationRadius;
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const index = y * width + x;
@@ -145,14 +218,18 @@ const buildEditableMaskFromPaintPixels = (paintPixels: ImageData, width: number,
     editablePixels[index] = paintedPixels[index] || (!blockedPixels[index] && !outsidePixels[index]) ? 1 : 0;
   }
 
-  return { editablePixels, hasPaintedArea: true };
+  return {
+    editablePixels: dilatePixels(editablePixels, width, height, editableDilationRadius),
+    hasPaintedArea: true
+  };
 };
 
 const createTransparentEditMask = async (
   paintMaskDataUrl: string,
   imageDataUrl: string,
   displayWidth: number,
-  displayHeight: number
+  displayHeight: number,
+  options: { outlineDilationRadius?: number; editableDilationRadius?: number } = {}
 ) => {
   const displayCanvasWidth = getCanvasDimension(displayWidth);
   const displayCanvasHeight = getCanvasDimension(displayHeight);
@@ -199,7 +276,8 @@ const createTransparentEditMask = async (
   const { editablePixels, hasPaintedArea } = buildEditableMaskFromPaintPixels(
     paintPixels,
     imageDimensions.width,
-    imageDimensions.height
+    imageDimensions.height,
+    options
   );
   const apiMaskCanvas = document.createElement('canvas');
   apiMaskCanvas.width = imageDimensions.width;
@@ -259,14 +337,19 @@ const Canvas: React.FC<CanvasProps> = ({
   const [inlineEditingIds, setInlineEditingIds] = useState<Set<string>>(() => new Set());
   const [inlineEditAspectRatio, setInlineEditAspectRatio] = useState<ImageAspectRatio>('auto');
   const [localRedrawItemId, setLocalRedrawItemId] = useState<string | null>(null);
+  const [localRemoverItemId, setLocalRemoverItemId] = useState<string | null>(null);
   const inlineEditingIdsRef = useRef<Set<string>>(new Set());
   const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const maskStrokePointsRef = useRef<MaskPoint[]>([]);
   const inlineRedrawFormRef = useRef<HTMLFormElement | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const selectedItem = items.find(i => selectedIds.length === 1 && i.id === selectedIds[0]);
   const selectedItemIsInlineEditing = selectedItem ? inlineEditingIds.has(selectedItem.id) : false;
   const selectedItemIsLocalRedraw = selectedItem?.type === 'image' && selectedItem.id === localRedrawItemId;
+  const selectedItemIsRemover = selectedItem?.type === 'image' && selectedItem.id === localRemoverItemId;
+  const selectedItemHasImageMaskTool = selectedItemIsLocalRedraw || selectedItemIsRemover;
+  const activeImageMaskStrokeColor = selectedItemIsRemover ? 'rgba(239, 68, 68, 0.55)' : 'rgba(99, 102, 241, 0.55)';
   const selectedInlineEditError = selectedItem ? inlineEditErrors[selectedItem.id] : '';
   const inlineEditPrompt = selectedItem?.type === 'image' ? inlineEditPrompts[selectedItem.id] || '' : '';
   const hasActiveCanvasGeneration = isGenerating || inlineEditingIds.size > 0;
@@ -298,15 +381,15 @@ const Canvas: React.FC<CanvasProps> = ({
 
   // 修复假死：当选中项改变时，确保重置绘图状态，防止 Ref 冲突或状态死循环
   useEffect(() => {
-    const canUseDrawingTool = selectedItem?.type === 'workflow' || selectedItemIsLocalRedraw;
+    const canUseDrawingTool = selectedItem?.type === 'workflow' || selectedItemHasImageMaskTool;
     if (!canUseDrawingTool || activeTool === 'select') {
       setIsDrawing(false);
       if (activeTool !== 'select') setActiveTool('select');
     }
-  }, [activeTool, selectedIds, localRedrawItemId, selectedItem?.type, selectedItemIsLocalRedraw]);
+  }, [activeTool, selectedIds, localRedrawItemId, localRemoverItemId, selectedItem?.type, selectedItemHasImageMaskTool]);
 
   useEffect(() => {
-    if (!selectedItemIsLocalRedraw || !selectedItem) return;
+    if (!selectedItemHasImageMaskTool || !selectedItem) return;
 
     const canvas = maskCanvasRef.current;
     if (!canvas) return;
@@ -336,7 +419,7 @@ const Canvas: React.FC<CanvasProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [selectedItemIsLocalRedraw, selectedItem?.id, selectedItem?.maskData, selectedItem?.width, selectedItem?.height]);
+  }, [selectedItemHasImageMaskTool, selectedItem?.id, selectedItem?.maskData, selectedItem?.width, selectedItem?.height]);
 
   const setInlineEditingForItem = (id: string, isEditing: boolean) => {
     const nextEditingIds = new Set(inlineEditingIdsRef.current);
@@ -363,7 +446,7 @@ const Canvas: React.FC<CanvasProps> = ({
   };
 
   const getCurrentMaskDataForItem = (id: string, fallbackMaskData?: string) => {
-    if (localRedrawItemId === id && maskCanvasRef.current) {
+    if ((localRedrawItemId === id || localRemoverItemId === id) && maskCanvasRef.current) {
       return maskCanvasRef.current.toDataURL('image/png');
     }
     return fallbackMaskData;
@@ -430,7 +513,7 @@ const Canvas: React.FC<CanvasProps> = ({
     }
 
     // 图片局部重绘蒙版：置顶层画布捕获
-    if (activeTool !== 'select' && selectedItemIsLocalRedraw) {
+    if (activeTool !== 'select' && selectedItemHasImageMaskTool) {
       setIsDrawing(true);
       const rect = maskCanvasRef.current?.getBoundingClientRect();
       if (rect) {
@@ -438,11 +521,12 @@ const Canvas: React.FC<CanvasProps> = ({
         if (ctx) {
           const x = (e.clientX - rect.left) / zoom;
           const y = (e.clientY - rect.top) / zoom;
+          maskStrokePointsRef.current = selectedItemIsRemover && activeTool === 'brush' ? [{ x, y }] : [];
           ctx.beginPath();
           ctx.lineCap = 'round';
           ctx.lineJoin = 'round';
           ctx.lineWidth = brushSize;
-          ctx.strokeStyle = 'rgba(99, 102, 241, 0.55)';
+          ctx.strokeStyle = activeImageMaskStrokeColor;
           ctx.globalCompositeOperation = activeTool === 'eraser' ? 'destination-out' : 'source-over';
           ctx.moveTo(x, y);
           ctx.lineTo(x + 0.01, y + 0.01);
@@ -496,15 +580,20 @@ const Canvas: React.FC<CanvasProps> = ({
       return;
     }
 
-    if (isDrawing && selectedItemIsLocalRedraw) {
+    if (isDrawing && selectedItemHasImageMaskTool) {
       const rect = maskCanvasRef.current?.getBoundingClientRect();
       if (rect) {
         const ctx = maskCanvasRef.current?.getContext('2d');
         if (ctx) {
-          ctx.strokeStyle = 'rgba(99, 102, 241, 0.55)';
+          const x = (e.clientX - rect.left) / zoom;
+          const y = (e.clientY - rect.top) / zoom;
+          if (selectedItemIsRemover && activeTool === 'brush') {
+            maskStrokePointsRef.current = [...maskStrokePointsRef.current, { x, y }];
+          }
+          ctx.strokeStyle = activeImageMaskStrokeColor;
           ctx.lineWidth = brushSize;
           ctx.globalCompositeOperation = activeTool === 'eraser' ? 'destination-out' : 'source-over';
-          ctx.lineTo((e.clientX - rect.left) / zoom, (e.clientY - rect.top) / zoom);
+          ctx.lineTo(x, y);
           ctx.stroke();
         }
       }
@@ -568,8 +657,12 @@ const Canvas: React.FC<CanvasProps> = ({
   };
 
   const handleMouseUp = () => {
-    if (isDrawing && selectedItemIsLocalRedraw) {
+    if (isDrawing && selectedItemHasImageMaskTool) {
       setIsDrawing(false);
+      if (selectedItemIsRemover && activeTool === 'brush') {
+        fillRemoverLassoSelection(maskCanvasRef.current, maskStrokePointsRef.current, brushSize);
+      }
+      maskStrokePointsRef.current = [];
       const data = maskCanvasRef.current?.toDataURL('image/png');
       if (data && selectedItem) onItemUpdate(selectedItem.id, { maskData: data });
     } else if (isDrawing && selectedItem?.type === 'workflow') {
@@ -727,11 +820,17 @@ const Canvas: React.FC<CanvasProps> = ({
 
   const handleInlineImageRedraw = async (event: React.FormEvent) => {
     event.preventDefault();
-    const prompt = inlineEditPrompt.trim();
-    if (!prompt || !selectedItem || selectedItem.type !== 'image' || inlineEditingIdsRef.current.has(selectedItem.id)) return;
+    const rawPrompt = inlineEditPrompt.trim();
+    const isRemoverMode = selectedItem?.type === 'image' && localRemoverItemId === selectedItem.id;
+    if ((!rawPrompt && !isRemoverMode) || !selectedItem || selectedItem.type !== 'image' || inlineEditingIdsRef.current.has(selectedItem.id)) return;
 
     const targetItem = selectedItem;
-    const useLocalMask = localRedrawItemId === targetItem.id;
+    const prompt = isRemoverMode
+      ? rawPrompt
+        ? `${REMOVER_PROMPT} 用户补充要求：${rawPrompt}`
+        : REMOVER_PROMPT
+      : rawPrompt;
+    const useLocalMask = localRedrawItemId === targetItem.id || localRemoverItemId === targetItem.id;
     let resultItemId: string | null = null;
     setInlineEditingForItem(targetItem.id, true);
     clearInlineEditError(targetItem.id);
@@ -742,11 +841,13 @@ const Canvas: React.FC<CanvasProps> = ({
         : undefined;
 
       if (useLocalMask && !currentMaskData) {
-        throw new Error('请先用画笔涂抹需要局部重绘的区域');
+        throw new Error(isRemoverMode ? '请先用画笔涂抹需要删除的物体' : '请先用画笔涂抹需要局部重绘的区域');
       }
 
       const promptToOptimize = useLocalMask
-        ? `${prompt}。只修改用户用蒙版涂抹的局部区域，未被蒙版覆盖的区域必须保持原图不变。`
+        ? isRemoverMode
+          ? `${prompt}。只删除或修复用户用蒙版涂抹的局部区域，未被蒙版覆盖的区域必须保持原图不变。`
+          : `${prompt}。只修改用户用蒙版涂抹的局部区域，未被蒙版覆盖的区域必须保持原图不变。`
         : prompt;
       const editReferences = useLocalMask
         ? [
@@ -760,7 +861,7 @@ const Canvas: React.FC<CanvasProps> = ({
       const generationPrompt = referenceImages.length > 0
         ? buildReferencedImageEditPrompt(promptToOptimize, editBaseItem, referenceImages, { hasLocalMask: useLocalMask, allItems: items })
         : promptToOptimize;
-      const effectiveAspectRatio = inlineEditAspectRatio === 'auto'
+      const effectiveAspectRatio = isRemoverMode || inlineEditAspectRatio === 'auto'
         ? inferAspectRatioFromDimensions(editBaseItem.width, editBaseItem.height)
         : inlineEditAspectRatio;
 
@@ -784,17 +885,35 @@ const Canvas: React.FC<CanvasProps> = ({
         persistentReferenceImages,
         { hasLocalMask: useLocalMask, allItems: items }
       );
+      const removerImageContext = isRemoverMode
+        ? [
+          '任务类型：image-remover / object removal / inpainting。',
+          '这不是普通图生图，也不是 logo 强化；模型必须删除 mask 透明区域内的内容。',
+          'mask 透明区域就是用户圈选/涂抹的删除区域；区域内出现的英文、中文、logo、品牌字样、图标、水印都必须移除。',
+          '删除后要根据周围背景、材质、光影、透视自然补洞；未被 mask 覆盖的区域必须尽量保持原样。',
+          imageContext
+        ].join('\n')
+        : imageContext;
       const editOptions = {
         imageAssetId: getCanvasItemAssetId(persistentTargetItem),
         referenceAssetIds: persistentReferenceImages.map(getCanvasItemAssetId).filter(Boolean),
-        imageContext
+        imageContext: removerImageContext,
+        promptOptimizationMode: isRemoverMode ? 'image-remover' as const : undefined
       };
 
       let maskDataUrl: string | null | undefined;
       if (useLocalMask) {
-        maskDataUrl = await createTransparentEditMask(currentMaskData!, persistentTargetItem.content, targetItem.width, targetItem.height);
+        maskDataUrl = await createTransparentEditMask(
+          currentMaskData!,
+          persistentTargetItem.content,
+          targetItem.width,
+          targetItem.height,
+          isRemoverMode
+            ? { outlineDilationRadius: 6, editableDilationRadius: 5 }
+            : undefined
+        );
         if (!maskDataUrl) {
-          throw new Error('请先用画笔涂抹需要局部重绘的区域');
+          throw new Error(isRemoverMode ? '请先用画笔涂抹需要删除的物体' : '请先用画笔涂抹需要局部重绘的区域');
         }
       }
 
@@ -817,7 +936,7 @@ const Canvas: React.FC<CanvasProps> = ({
         width: resultFrame.width,
         height: resultFrame.height,
         status: 'loading',
-        label: 'AI 重绘中...',
+        label: isRemoverMode ? 'AI 删除中...' : 'AI 重绘中...',
         zIndex: nextZIndex,
         parentId: editBaseItem.id,
         prompt: generationPrompt,
@@ -829,12 +948,13 @@ const Canvas: React.FC<CanvasProps> = ({
       setSelectedIds([newId]);
 
       let result: string;
+      const requestAspectRatio = isRemoverMode ? 'auto' : effectiveAspectRatio;
       if (canUseImageJobs()) {
         const job = await submitImageEditJob(
           generationPrompt,
           persistentTargetItem.content,
           maskDataUrl || undefined,
-          effectiveAspectRatio,
+          requestAspectRatio,
           referenceContents,
           editOptions
         );
@@ -845,7 +965,7 @@ const Canvas: React.FC<CanvasProps> = ({
           generationPrompt,
           persistentTargetItem.content,
           maskDataUrl || undefined,
-          effectiveAspectRatio,
+          requestAspectRatio,
           referenceContents,
           editOptions
         );
@@ -855,11 +975,18 @@ const Canvas: React.FC<CanvasProps> = ({
         content: result,
         status: 'completed',
         imageJobId: undefined,
-        label: prompt.substring(0, 16) + (prompt.length > 16 ? '...' : '')
+        label: isRemoverMode
+          ? '删除物体'
+          : rawPrompt.substring(0, 16) + (rawPrompt.length > 16 ? '...' : '')
       });
-      if (useLocalMask) {
-        setLocalRedrawItemId(newId);
-        setActiveTool('brush');
+      if (isRemoverMode) {
+        setLocalRedrawItemId(null);
+        setLocalRemoverItemId(null);
+        setActiveTool('select');
+      } else if (useLocalMask) {
+        setLocalRemoverItemId(null);
+        setLocalRedrawItemId(null);
+        setActiveTool('select');
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : '未知错误';
@@ -868,11 +995,17 @@ const Canvas: React.FC<CanvasProps> = ({
         onItemUpdate(resultItemId, {
           status: 'error',
           imageJobId: undefined,
-          label: 'AI 重绘失败'
+          label: isRemoverMode ? 'AI 删除失败' : 'AI 重绘失败'
         });
       }
-      if (useLocalMask) {
+      if (isRemoverMode) {
         setSelectedIds([targetItem.id]);
+        setLocalRedrawItemId(null);
+        setLocalRemoverItemId(targetItem.id);
+        setActiveTool('brush');
+      } else if (useLocalMask) {
+        setSelectedIds([targetItem.id]);
+        setLocalRemoverItemId(null);
         setLocalRedrawItemId(targetItem.id);
         setActiveTool('brush');
       }
@@ -928,7 +1061,7 @@ const Canvas: React.FC<CanvasProps> = ({
   const renderImageMaskLayer = (item: CanvasItem) => {
     if (item.type !== 'image') return null;
 
-    const isActiveMaskItem = selectedItemIsLocalRedraw && selectedItem?.id === item.id;
+    const isActiveMaskItem = selectedItemHasImageMaskTool && selectedItem?.id === item.id;
     if (!isActiveMaskItem && !item.maskData) return null;
 
     return isActiveMaskItem ? (
@@ -1110,12 +1243,12 @@ const Canvas: React.FC<CanvasProps> = ({
             }}
             onMouseDown={(event) => event.stopPropagation()}
           >
-            <div className="flex w-[520px] max-w-[80vw] items-center gap-2 rounded-2xl border border-gray-100 bg-white/95 p-1.5 shadow-[0_20px_60px_-24px_rgba(0,0,0,0.22)]">
-              <label className="flex shrink-0 items-center gap-1.5 rounded-xl bg-gray-50 px-2 py-1.5 text-[11px] font-black text-gray-500">
+            <div className="flex w-fit max-w-[80vw] items-center gap-2 rounded-2xl border border-gray-100 bg-white/95 p-1.5 shadow-[0_20px_60px_-24px_rgba(0,0,0,0.22)]">
+              <label className="flex shrink-0 items-center gap-1.5 rounded-xl bg-gray-50 px-2 py-1.5 text-[11px] font-black text-gray-500" title={selectedItemIsRemover ? 'Remover 会保留原图画幅' : '选择生成画幅'}>
                 画幅
                 <select
                   value={inlineEditAspectRatio}
-                  disabled={selectedItemIsInlineEditing || selectedItem.status === 'loading'}
+                  disabled={selectedItemIsRemover || selectedItemIsInlineEditing || selectedItem.status === 'loading'}
                   onChange={(event) => setInlineEditAspectRatio(event.target.value as ImageAspectRatio)}
                   className="bg-transparent text-[11px] font-black text-gray-700 outline-none disabled:opacity-40"
                 >
@@ -1131,6 +1264,7 @@ const Canvas: React.FC<CanvasProps> = ({
                 onClick={() => {
                   setLocalRedrawItemId(prev => {
                     const nextId = prev === selectedItem.id ? null : selectedItem.id;
+                    if (nextId) setLocalRemoverItemId(null);
                     setActiveTool(nextId ? 'brush' : 'select');
                     return nextId;
                   });
@@ -1142,38 +1276,61 @@ const Canvas: React.FC<CanvasProps> = ({
                     : 'bg-gray-50 text-gray-500 hover:bg-indigo-50 hover:text-indigo-600'
                 } disabled:opacity-40`}
               >
-                <Layers size={15} />局部
+                <Layers size={15} />局部重绘
               </button>
-              {selectedItemIsLocalRedraw && (
-                <>
-                  <button type="button" onClick={() => setActiveTool('select')} className={`rounded-xl p-2 transition-all ${activeTool === 'select' ? 'bg-black text-white' : 'text-gray-400 hover:bg-gray-100'}`} title="选择/移动">
-                    <MousePointer2 size={16} />
-                  </button>
-                  <button type="button" onClick={() => setActiveTool('brush')} className={`rounded-xl p-2 transition-all ${activeTool === 'brush' ? 'bg-black text-white' : 'text-gray-400 hover:bg-gray-100'}`} title="涂抹重绘区域">
-                    <Pencil size={16} />
-                  </button>
-                  <button type="button" onClick={() => setActiveTool('eraser')} className={`rounded-xl p-2 transition-all ${activeTool === 'eraser' ? 'bg-black text-white' : 'text-gray-400 hover:bg-gray-100'}`} title="擦除蒙版">
-                    <Eraser size={16} />
-                  </button>
-                  <input
-                    type="range"
-                    min={4}
-                    max={64}
-                    value={brushSize}
-                    onChange={(event) => setBrushSize(Number(event.target.value))}
-                    className="h-1 flex-1 accent-indigo-600"
-                    title="画笔大小"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => onItemUpdate(selectedItem.id, { maskData: undefined })}
-                    className="rounded-xl px-2.5 py-2 text-xs font-black text-gray-400 transition-all hover:bg-red-50 hover:text-red-500"
-                  >
-                    清除
-                  </button>
-                </>
-              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setLocalRemoverItemId(prev => {
+                    const nextId = prev === selectedItem.id ? null : selectedItem.id;
+                    if (nextId) setLocalRedrawItemId(null);
+                    setActiveTool(nextId ? 'brush' : 'select');
+                    return nextId;
+                  });
+                }}
+                disabled={selectedItemIsInlineEditing || selectedItem.status === 'loading'}
+                className={`flex shrink-0 items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-black transition-all ${
+                  selectedItemIsRemover
+                    ? 'bg-red-500 text-white shadow-lg shadow-red-500/20'
+                    : 'bg-gray-50 text-gray-500 hover:bg-red-50 hover:text-red-500'
+                } disabled:opacity-40`}
+                title="涂抹物体后一键删除并补全背景"
+              >
+                <Trash2 size={15} />删除物体
+              </button>
             </div>
+            {selectedItemHasImageMaskTool && (
+              <div className="flex w-[420px] max-w-[80vw] items-center gap-2 rounded-2xl border border-gray-100 bg-white/95 p-1.5 shadow-[0_16px_46px_-24px_rgba(0,0,0,0.2)]">
+                <span className={`shrink-0 rounded-xl px-2.5 py-2 text-[11px] font-black ${selectedItemIsRemover ? 'bg-red-50 text-red-500' : 'bg-indigo-50 text-indigo-600'}`}>
+                  {selectedItemIsRemover ? '删除范围' : '重绘范围'}
+                </span>
+                <button type="button" onClick={() => setActiveTool('select')} className={`rounded-xl p-2 transition-all ${activeTool === 'select' ? 'bg-black text-white' : 'text-gray-400 hover:bg-gray-100'}`} title="选择/移动">
+                  <MousePointer2 size={16} />
+                </button>
+                <button type="button" onClick={() => setActiveTool('brush')} className={`rounded-xl p-2 transition-all ${activeTool === 'brush' ? 'bg-black text-white' : 'text-gray-400 hover:bg-gray-100'}`} title="涂抹区域">
+                  <Pencil size={16} />
+                </button>
+                <button type="button" onClick={() => setActiveTool('eraser')} className={`rounded-xl p-2 transition-all ${activeTool === 'eraser' ? 'bg-black text-white' : 'text-gray-400 hover:bg-gray-100'}`} title="擦除蒙版">
+                  <Eraser size={16} />
+                </button>
+                <input
+                  type="range"
+                  min={4}
+                  max={64}
+                  value={brushSize}
+                  onChange={(event) => setBrushSize(Number(event.target.value))}
+                  className={`h-1 min-w-24 flex-1 ${selectedItemIsRemover ? 'accent-red-500' : 'accent-indigo-600'}`}
+                  title="画笔大小"
+                />
+                <button
+                  type="button"
+                  onClick={() => onItemUpdate(selectedItem.id, { maskData: undefined })}
+                  className="shrink-0 rounded-xl px-2.5 py-2 text-xs font-black text-gray-400 transition-all hover:bg-red-50 hover:text-red-500"
+                >
+                  清除
+                </button>
+              </div>
+            )}
             <div className="relative flex items-end w-[520px] max-w-[80vw] p-1.5 bg-white border border-gray-100 rounded-2xl shadow-[0_32px_80px_-16px_rgba(0,0,0,0.18)]">
               <ImageMentionEditor
                 value={inlineEditPrompt}
@@ -1181,12 +1338,12 @@ const Canvas: React.FC<CanvasProps> = ({
                 selectableImageItems={inlineReferenceImageItems}
                 onChange={(nextValue) => setInlineEditPromptForItem(selectedItem.id, nextValue)}
                 disabled={selectedItemIsInlineEditing || selectedItem.status === 'loading'}
-                placeholder={selectedItemIsLocalRedraw ? '先涂抹区域，再输入局部重绘指令，可输入 @ 引用图片' : '输入重绘指令，可输入 @ 选择参考图'}
+                placeholder={selectedItemIsRemover ? '涂抹要删除的物体，可留空直接删除，也可补充要求' : selectedItemIsLocalRedraw ? '先涂抹区域，再输入局部重绘指令，可输入 @ 引用图片' : '输入重绘指令，可输入 @ 选择参考图'}
                 dropdownTitle="选择参考图片"
                 emptyText="没有匹配的画布图片"
                 itemHint={() => '插入稳定 ID 引用作为参考图'}
                 onSubmitShortcut={() => {
-                  if (selectedItem.status !== 'loading' && !selectedItemIsInlineEditing && inlineEditPrompt.trim()) {
+                  if (selectedItem.status !== 'loading' && !selectedItemIsInlineEditing && (inlineEditPrompt.trim() || selectedItemIsRemover)) {
                     inlineRedrawFormRef.current?.requestSubmit();
                   }
                 }}
@@ -1194,11 +1351,11 @@ const Canvas: React.FC<CanvasProps> = ({
               />
               <button
                 type="submit"
-                disabled={!inlineEditPrompt.trim() || selectedItemIsInlineEditing || selectedItem.status === 'loading'}
-                className="absolute right-3 w-9 h-9 text-white rounded-lg flex items-center justify-center hover:scale-105 active:scale-95 transition-all shadow-lg bg-black disabled:opacity-30"
-                title={selectedItemIsLocalRedraw ? '局部重绘当前图片' : '重绘当前图片'}
+                disabled={(!inlineEditPrompt.trim() && !selectedItemIsRemover) || selectedItemIsInlineEditing || selectedItem.status === 'loading'}
+                className={`absolute right-3 w-9 h-9 text-white rounded-lg flex items-center justify-center hover:scale-105 active:scale-95 transition-all shadow-lg disabled:opacity-30 ${selectedItemIsRemover ? 'bg-red-500' : 'bg-black'}`}
+                title={selectedItemIsRemover ? '删除涂抹物体并补全背景' : selectedItemIsLocalRedraw ? '局部重绘当前图片' : '重绘当前图片'}
               >
-                {selectedItemIsInlineEditing || selectedItem.status === 'loading' ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
+                {selectedItemIsInlineEditing || selectedItem.status === 'loading' ? <Loader2 size={16} className="animate-spin" /> : selectedItemIsRemover ? <Trash2 size={16} /> : <Sparkles size={16} />}
               </button>
             </div>
             {selectedInlineEditError && (

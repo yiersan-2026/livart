@@ -472,6 +472,7 @@ public class AiProxyService {
             UUID imageAssetId = null;
             String prompt = "";
             String imageContext = "";
+            String promptOptimizationMode = label;
 
             for (Part part : request.getParts()) {
                 MultipartPartData partData = readMultipartPart(part);
@@ -483,6 +484,8 @@ public class AiProxyService {
                     uploadedImageParts.add(partData);
                 } else if (isPromptContextField(partData.name())) {
                     imageContext = firstNonBlank(imageContext, readUtf8(partData.body()));
+                } else if ("promptOptimizationMode".equals(partData.name())) {
+                    promptOptimizationMode = normalizePromptOptimizationMode(readUtf8(partData.body()), label);
                 } else {
                     if ("prompt".equals(partData.name())) {
                         prompt = firstNonBlank(prompt, readUtf8(partData.body()));
@@ -491,7 +494,7 @@ public class AiProxyService {
                 }
             }
 
-            String optimizedPrompt = optimizePromptInline(config, label, prompt, imageContext);
+            String optimizedPrompt = optimizePromptInline(config, promptOptimizationMode, prompt, imageContext);
             for (MultipartPartData part : passthroughParts) {
                 writeMultipartPart(output, boundary, "prompt".equals(part.name())
                         ? withUtf8Body(part, optimizedPrompt)
@@ -550,9 +553,13 @@ public class AiProxyService {
                 readTextField(rewrittenBody, "promptOptimizeContext"),
                 readTextField(rewrittenBody, "promptContext")
         );
-        rewrittenBody.remove(List.of("imageContext", "promptOptimizeContext", "promptContext"));
+        String promptOptimizationMode = normalizePromptOptimizationMode(
+                readTextField(rewrittenBody, "promptOptimizationMode"),
+                label
+        );
+        rewrittenBody.remove(List.of("imageContext", "promptOptimizeContext", "promptContext", "promptOptimizationMode"));
 
-        String optimizedPrompt = optimizePromptInline(config, label, prompt, imageContext);
+        String optimizedPrompt = optimizePromptInline(config, promptOptimizationMode, prompt, imageContext);
         if (!optimizedPrompt.isBlank()) {
             rewrittenBody.put("prompt", optimizedPrompt);
         }
@@ -584,6 +591,14 @@ public class AiProxyService {
         return "imageContext".equals(name)
                 || "promptOptimizeContext".equals(name)
                 || "promptContext".equals(name);
+    }
+
+    private String normalizePromptOptimizationMode(String value, String fallbackMode) {
+        String normalizedValue = value == null ? "" : value.trim();
+        if ("image-remover".equals(normalizedValue)) {
+            return normalizedValue;
+        }
+        return fallbackMode;
     }
 
     private MultipartPartData withUtf8Body(MultipartPartData part, String value) {
@@ -707,6 +722,10 @@ public class AiProxyService {
         String trimmedPrompt = prompt == null ? "" : prompt.trim();
         if (trimmedPrompt.isBlank()) {
             return prompt == null ? "" : prompt;
+        }
+
+        if ("image-remover".equals(mode)) {
+            return buildDeterministicRemoverPrompt(trimmedPrompt);
         }
 
         String trimmedImageContext = imageContext == null ? "" : imageContext.trim();
@@ -1159,9 +1178,27 @@ public class AiProxyService {
                     - 只强化用户要求修改的部分，不要把参考图重写成完全不同画面。""".formatted(sharedRules);
         }
 
+        if ("image-remover".equals(mode)) {
+            return """
+                    你是专业 AI 图片删除物体 / inpainting 提示词优化器。只输出优化后的提示词，不要解释，不要 Markdown，不要加标题。
+                    要求：
+                    - 当前任务是 Remover 删除物体，不是普通图生图、不是美化、不是复刻 logo。
+                    - 请求一定包含 mask；mask 的透明区域就是用户涂抹/圈选的唯一删除区域。
+                    - 必须明确要求删除 mask 区域内所有可见主体、文字、英文、中文、logo、品牌字样、图标、水印、污渍或瑕疵。
+                    - 删除后必须根据周围背景、纹理、材质、光影、噪点、透视和边缘连续性自然补全，不留下红圈、涂抹痕迹、残影或伪影。
+                    - 未被 mask 覆盖的区域必须尽量保持原图完全不变，包括画幅、构图、人物、背景、色彩、清晰度和边缘。
+                    - 不要加入用户没有要求的新主体、新文字、新 logo 或新装饰。
+                    - 使用中文输出一段可直接用于图片局部重绘接口的完整提示词。
+                    - 必须在提示词末尾加入完整负面约束：%s""".formatted(NEGATIVE_PROMPT_TEXT);
+        }
+
         return """
                 %s
                 - 当前任务是文生图，需要把短描述扩写成可直接用于高质量图像生成的完整视觉 brief。""".formatted(sharedRules);
+    }
+
+    private String buildDeterministicRemoverPrompt(String prompt) {
+        return "把圈起来的地方删除掉。";
     }
 
     private String sanitizeOptimizedPrompt(String text) {

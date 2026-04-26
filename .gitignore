@@ -10,6 +10,7 @@ lerna-debug.log*
 .env
 .env.*
 !.env.example
+!.env.reuse.example
 backend/.env
 backend/.env.*
 !backend/.env.example

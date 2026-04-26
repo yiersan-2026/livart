@@ -38,6 +38,7 @@ export interface ImageEditAssetOptions {
   imageAssetId?: string;
   referenceAssetIds?: string[];
   imageContext?: string;
+  promptOptimizationMode?: 'image-remover';
 }
 
 class ImageJobWebSocketUnavailableError extends Error {
@@ -225,6 +226,9 @@ const callImageEditApi = async (
   const formData = new FormData();
   formData.append('model', config.model);
   formData.append('prompt', finalPrompt);
+  if (assetOptions.promptOptimizationMode) {
+    formData.append('promptOptimizationMode', assetOptions.promptOptimizationMode);
+  }
   if (assetOptions.imageContext?.trim()) {
     formData.append('imageContext', assetOptions.imageContext.trim());
   }
@@ -374,6 +378,9 @@ export const submitImageEditJob = async (
   const formData = new FormData();
   formData.append('model', config.model);
   formData.append('prompt', finalPrompt);
+  if (assetOptions.promptOptimizationMode) {
+    formData.append('promptOptimizationMode', assetOptions.promptOptimizationMode);
+  }
   if (assetOptions.imageContext?.trim()) {
     formData.append('imageContext', assetOptions.imageContext.trim());
   }

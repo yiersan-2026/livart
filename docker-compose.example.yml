@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:16-alpine
+    pull_policy: missing
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-app}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
@@ -16,6 +17,7 @@ services:
 
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
+    pull_policy: missing
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-livart}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-livart_rabbit_change_me}
@@ -30,6 +32,7 @@ services:
 
   minio:
     image: minio/minio:latest
+    pull_policy: missing
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-livartminio}
