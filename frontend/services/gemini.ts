@@ -22,6 +22,8 @@ export interface ImagePromptMetadata {
 
 export interface ImageGenerationResult extends ImagePromptMetadata {
   image: string;
+  upstreamStatus?: number;
+  requestId?: string;
 }
 
 export interface ImageJobSubmission {
@@ -378,10 +380,22 @@ const extractImageResultFromResponse = (
   ...mergePromptMetadata(getPromptMetadataFromPayload(data), metadata)
 });
 
-const extractImageResultFromJob = (job: ImageJobStatus): ImageGenerationResult => ({
-  ...extractImageResultFromResponse(job.response, job),
-  ...mergePromptMetadata(getPromptMetadataFromPayload(job.response), job)
-});
+const assertSuccessfulImageJob = (job: ImageJobStatus) => {
+  const upstreamStatus = Number(job.upstreamStatus || 0);
+  if (job.status === 'error' || upstreamStatus >= 400) {
+    throw new Error(extractImageJobError(job.error, job));
+  }
+};
+
+const extractImageResultFromJob = (job: ImageJobStatus): ImageGenerationResult => {
+  assertSuccessfulImageJob(job);
+  return {
+    ...extractImageResultFromResponse(job.response, job),
+    ...mergePromptMetadata(getPromptMetadataFromPayload(job.response), job),
+    upstreamStatus: job.upstreamStatus,
+    requestId: job.requestId
+  };
+};
 
 const getErrorText = (payload: unknown): string => {
   if (!payload) return '图片任务失败';
