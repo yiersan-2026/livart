@@ -24,6 +24,8 @@ interface ImageExportItemRequest {
   filename: string;
 }
 
+export type CanvasExportScope = 'selected' | 'final' | 'derived' | 'delivery' | 'all';
+
 const unwrapApiResponse = async <T>(response: Response): Promise<T> => {
   const payload = await response.json().catch(() => null) as ApiResponse<T> | null;
   if (!response.ok || !payload?.success) {
@@ -66,26 +68,56 @@ const downloadBlob = (blob: Blob, filename: string) => {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
 
-const getDownloadImageCandidates = (items: CanvasItem[], selectedIds: string[]) => {
+const isDownloadableImage = (item: CanvasItem) => (
+  item.type === 'image' &&
+  item.status === 'completed' &&
+  !!item.content
+);
+
+const getDownloadImageCandidates = (
+  items: CanvasItem[],
+  selectedIds: string[],
+  scope: CanvasExportScope
+) => {
+  const completedImages = items.filter(isDownloadableImage);
   const selectedImages = selectedIds
     .map(id => items.find(item => item.id === id))
-    .filter((item): item is CanvasItem => (
-      !!item &&
-      item.type === 'image' &&
-      item.status === 'completed' &&
-      !!item.content
-    ));
+    .filter((item): item is CanvasItem => !!item && isDownloadableImage(item));
 
-  if (selectedIds.length > 0) {
+  if (scope === 'selected') {
     if (selectedImages.length > 0) return selectedImages;
-    throw new Error('选中的内容没有可下载的成品图片');
+    throw new Error('请先选择要下载的成品图片');
   }
 
-  return items.filter(item => (
-    item.type === 'image' &&
-    item.status === 'completed' &&
-    !!item.content
-  ));
+  if (scope === 'final') {
+    const parentIds = new Set(completedImages.map(item => item.parentId).filter(Boolean));
+    return completedImages.filter(item => !parentIds.has(item.id));
+  }
+
+  if (scope === 'derived') {
+    return completedImages.filter(item => !!item.parentId);
+  }
+
+  if (scope === 'all') {
+    return completedImages;
+  }
+
+  return completedImages;
+};
+
+const getExportScopeFilenamePart = (scope: CanvasExportScope) => {
+  switch (scope) {
+    case 'selected':
+      return 'selected';
+    case 'final':
+      return 'final';
+    case 'derived':
+      return 'derived';
+    case 'all':
+      return 'all';
+    default:
+      return 'delivery';
+  }
 };
 
 const createImageExport = async (images: ImageExportItemRequest[], filename: string) => {
@@ -120,12 +152,13 @@ const downloadExportZip = async (downloadUrl: string, filename: string) => {
 export const exportCanvasProjectImage = async (
   items: CanvasItem[],
   selectedIds: string[],
-  projectTitle: string
+  projectTitle: string,
+  scope: CanvasExportScope = 'delivery'
 ) => {
-  const candidates = getDownloadImageCandidates(items, selectedIds);
+  const candidates = getDownloadImageCandidates(items, selectedIds, scope);
 
   if (!candidates.length) {
-    throw new Error('当前没有可下载的成品图片');
+    throw new Error(scope === 'derived' ? '当前没有可下载的派生图片' : '当前没有可下载的成品图片');
   }
 
   const timestamp = createTimestamp();
@@ -146,7 +179,7 @@ export const exportCanvasProjectImage = async (
   }));
 
   const zipFilenamePrefix = sanitizeFilename(projectTitle || 'livart-images');
-  const zipFilename = `${zipFilenamePrefix}-${selectedIds.length > 0 ? 'selected' : 'all'}-${timestamp}.zip`;
+  const zipFilename = `${zipFilenamePrefix}-${getExportScopeFilenamePart(scope)}-${timestamp}.zip`;
   const imageExport = await createImageExport(exportImages, zipFilename);
   await downloadExportZip(imageExport.downloadUrl, imageExport.filename);
 };

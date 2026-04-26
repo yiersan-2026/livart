@@ -280,7 +280,7 @@ const ImageMentionEditor: React.FC<ImageMentionEditorProps> = ({
     if (value === lastEditorValueRef.current) return;
     lastEditorValueRef.current = value;
     syncEditorContent(value);
-    openMentionPicker(getTrailingImageMentionQuery(value));
+    closeMentionPicker();
   }, [value, imageItems]);
 
   useEffect(() => {
@@ -517,7 +517,6 @@ const ImageMentionEditor: React.FC<ImageMentionEditorProps> = ({
         suppressContentEditableWarning
         onInput={handleInput}
         onKeyDown={handleKeyDown}
-        onFocus={() => openMentionPicker(getTrailingImageMentionQuery(value))}
         onPaste={handlePaste}
         className={className}
       />

@@ -8,6 +8,9 @@ export interface CanvasPersistenceState {
     zoom: number;
     pan: { x: number; y: number };
   };
+  settings: {
+    backgroundColor: string;
+  };
   selectedIds: string[];
 }
 
@@ -235,8 +238,17 @@ const createEmptyState = (): CanvasPersistenceState => ({
       y: window.innerHeight / 4
     }
   },
+  settings: {
+    backgroundColor: '#fcfcfc'
+  },
   selectedIds: []
 });
+
+const normalizeCanvasBackgroundColor = (value: unknown) => (
+  typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value)
+    ? value
+    : '#fcfcfc'
+);
 
 const toCanvasProject = (canvas: CanvasResponse | CanvasProject): CanvasProject => ({
   id: canvas.id,
@@ -259,6 +271,9 @@ const normalizeLoadedState = (state: Partial<CanvasPersistenceState> | null): Ca
         x: typeof state.viewport?.pan?.x === 'number' ? state.viewport.pan.x : window.innerWidth / 4,
         y: typeof state.viewport?.pan?.y === 'number' ? state.viewport.pan.y : window.innerHeight / 4
       }
+    },
+    settings: {
+      backgroundColor: normalizeCanvasBackgroundColor(state.settings?.backgroundColor)
     },
     selectedIds: []
   };

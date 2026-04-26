@@ -1,17 +1,25 @@
 
 import React, { useRef } from 'react';
-import { MousePointer2, Hand, Image as ImageIcon, Type, ZoomIn, ZoomOut, Maximize, LayoutTemplate, Plus } from 'lucide-react';
+import { MousePointer2, Hand, Image as ImageIcon, Type, ZoomIn, ZoomOut, Maximize, Undo2, Redo2, Sparkles } from 'lucide-react';
+import type { CanvasTool } from '../types';
 
 interface ToolbarProps {
   zoom: number;
   onZoomChange: (newZoom: number) => void;
   onResetView: () => void;
-  onAddWorkflow: () => void;
   onAddImage: (file: File) => void;
   onAddText: () => void;
+  activeTool: CanvasTool;
+  onToolChange: (tool: CanvasTool) => void;
+  canUndo: boolean;
+  canRedo: boolean;
+  onUndo: () => void;
+  onRedo: () => void;
+  canQuickEdit: boolean;
+  onQuickEdit: () => void;
 }
 
-const Toolbar: React.FC<ToolbarProps> = ({ zoom, onZoomChange, onResetView, onAddWorkflow, onAddImage, onAddText }) => {
+const Toolbar: React.FC<ToolbarProps> = ({ zoom, onZoomChange, onResetView, onAddImage, onAddText, activeTool, onToolChange, canUndo, canRedo, onUndo, onRedo, canQuickEdit, onQuickEdit }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleImageClick = () => {
@@ -26,30 +34,72 @@ const Toolbar: React.FC<ToolbarProps> = ({ zoom, onZoomChange, onResetView, onAd
     }
   };
 
-  return (
-    <div className="fixed bottom-8 left-1/2 -translate-x-1/2 flex items-center gap-2 px-4 py-2 bg-white/90 backdrop-blur-xl rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.3)] border border-white/20 z-50">
-      <div className="flex items-center gap-1 border-r pr-2 border-gray-200">
-        <button className="p-2 hover:bg-gray-100 rounded-lg text-gray-700 transition-colors" title="移动画布"><Hand size={20} /></button>
-        <button className="p-2 bg-black text-white rounded-lg transition-colors" title="选择/拖拽"><MousePointer2 size={20} /></button>
-      </div>
-      
-      <div className="flex items-center gap-1 border-r pr-2 border-gray-100">
-        <button 
-          onClick={onAddWorkflow}
-          className="flex flex-col items-center gap-0.5 p-2 hover:bg-gray-100 rounded-lg text-gray-700 group transition-all"
-          title="创建灵感捕捉框架"
-        >
-          <LayoutTemplate size={20} className="group-hover:scale-110" />
-          <span className="text-[8px] font-black uppercase">框架</span>
-        </button>
+  const iconButtonClass = 'group relative flex h-9 w-9 items-center justify-center rounded-xl text-gray-700 transition-colors hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-30';
+  const activeIconButtonClass = 'bg-zinc-900 text-white hover:bg-zinc-900';
+  const renderTooltip = (label: string) => (
+    <span className="pointer-events-none absolute bottom-full left-1/2 mb-2 -translate-x-1/2 whitespace-nowrap rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1 text-[11px] font-bold text-white opacity-0 transition-opacity group-hover:opacity-100">
+      {label}
+    </span>
+  );
 
+  return (
+    <div className="fixed bottom-1.5 left-1/2 z-[3000000] flex -translate-x-1/2 items-center gap-1 rounded-2xl border border-gray-200 bg-white/95 p-1.5 backdrop-blur-xl">
+      <div className="flex items-center gap-1 border-r border-gray-100 pr-1.5">
+        <button
+          onClick={onQuickEdit}
+          disabled={!canQuickEdit}
+          className={`${iconButtonClass} ${canQuickEdit ? activeIconButtonClass : ''}`}
+          aria-label="快捷编辑选中图片"
+        >
+          <Sparkles size={18} />
+          {renderTooltip('快捷编辑')}
+        </button>
+        <div className="h-6 w-px bg-gray-100" />
+        <button
+          onClick={onUndo}
+          disabled={!canUndo}
+          className={iconButtonClass}
+          aria-label="撤回"
+        >
+          <Undo2 size={18} />
+          {renderTooltip('撤回')}
+        </button>
+        <button
+          onClick={onRedo}
+          disabled={!canRedo}
+          className={iconButtonClass}
+          aria-label="重做"
+        >
+          <Redo2 size={18} />
+          {renderTooltip('重做')}
+        </button>
+        <div className="h-6 w-px bg-gray-100" />
+        <button
+          onClick={() => onToolChange('pan')}
+          className={`${iconButtonClass} ${activeTool === 'pan' ? activeIconButtonClass : ''}`}
+          aria-label="移动画布"
+        >
+          <Hand size={18} />
+          {renderTooltip('移动画布')}
+        </button>
+        <button
+          onClick={() => onToolChange('select')}
+          className={`${iconButtonClass} ${activeTool === 'select' ? activeIconButtonClass : ''}`}
+          aria-label="选择/拖拽"
+        >
+          <MousePointer2 size={18} />
+          {renderTooltip('选择')}
+        </button>
+      </div>
+
+      <div className="flex items-center gap-1 border-r border-gray-100 pr-1.5">
         <button 
           onClick={handleImageClick}
-          className="flex flex-col items-center gap-0.5 p-2 hover:bg-gray-100 rounded-lg text-gray-700 group transition-all"
-          title="上传图片组件"
+          className={iconButtonClass}
+          aria-label="上传图片组件"
         >
-          <ImageIcon size={20} className="group-hover:scale-110" />
-          <span className="text-[8px] font-black uppercase">图片</span>
+          <ImageIcon size={18} />
+          {renderTooltip('上传图片')}
           <input 
             type="file" 
             ref={fileInputRef} 
@@ -61,19 +111,27 @@ const Toolbar: React.FC<ToolbarProps> = ({ zoom, onZoomChange, onResetView, onAd
 
         <button 
           onClick={onAddText}
-          className="flex flex-col items-center gap-0.5 p-2 hover:bg-gray-100 rounded-lg text-gray-700 group transition-all"
-          title="添加文本组件"
+          className={iconButtonClass}
+          aria-label="添加文本组件"
         >
-          <Type size={20} className="group-hover:scale-110" />
-          <span className="text-[8px] font-black uppercase">文本</span>
+          <Type size={18} />
+          {renderTooltip('添加文本')}
         </button>
       </div>
 
-      <div className="flex items-center gap-2 pl-2">
-        <button onClick={() => onZoomChange(Math.max(0.1, zoom - 0.1))} className="p-2 hover:bg-gray-100 rounded-lg text-gray-700"><ZoomOut size={20} /></button>
-        <span className="text-xs font-bold text-gray-500 min-w-[40px] text-center">{Math.round(zoom * 100)}%</span>
-        <button onClick={() => onZoomChange(Math.min(5, zoom + 0.1))} className="p-2 hover:bg-gray-100 rounded-lg text-gray-700"><ZoomIn size={20} /></button>
-        <button onClick={onResetView} className="p-2 hover:bg-gray-100 rounded-lg text-gray-700"><Maximize size={18} /></button>
+      <div className="flex items-center gap-1">
+        <button onClick={() => onZoomChange(Math.max(0.1, zoom - 0.1))} className={iconButtonClass} aria-label="缩小">
+          <ZoomOut size={18} />
+          {renderTooltip('缩小')}
+        </button>
+        <button onClick={() => onZoomChange(Math.min(5, zoom + 0.1))} className={iconButtonClass} aria-label="放大">
+          <ZoomIn size={18} />
+          {renderTooltip('放大')}
+        </button>
+        <button onClick={onResetView} className={iconButtonClass} aria-label="重置视图">
+          <Maximize size={18} />
+          {renderTooltip('重置视图')}
+        </button>
       </div>
     </div>
   );

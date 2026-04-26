@@ -16,13 +16,15 @@ interface SidebarProps {
   isThinking: boolean;
   onSendMessage: (text: string, aspectRatio: ImageAspectRatio) => void;
   contextImage: CanvasItem | null;
+  promptSeed?: { id: string; imageId: string; prompt?: string } | null;
+  inputResetKey?: number;
   imageItems: CanvasItem[];
   onSelectContextImage: (item: CanvasItem) => void;
   onClearContextImage: () => void;
   onNavigateToImage: (item: CanvasItem) => void;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, contextImage, imageItems, onClearContextImage, onNavigateToImage }) => {
+const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, contextImage, promptSeed, inputResetKey = 0, imageItems, onClearContextImage, onNavigateToImage }) => {
   const [inputValue, setInputValue] = React.useState('');
   const [selectedAspectRatio, setSelectedAspectRatio] = React.useState<ImageAspectRatio>('auto');
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -37,6 +39,11 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
     () => new Map(imageItems.map(item => [item.id, item])),
     [imageItems]
   );
+
+  useEffect(() => {
+    setInputValue('');
+    lastContextImageIdRef.current = null;
+  }, [inputResetKey]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -57,6 +64,17 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
       return insertImageMention(prevValue.trimEnd(), contextImage, completedImageItems);
     });
   }, [completedImageItems, contextImage]);
+
+  useEffect(() => {
+    if (!promptSeed) return;
+
+    const targetImage = completedImageItems.find(item => item.id === promptSeed.imageId);
+    if (!targetImage) return;
+
+    lastContextImageIdRef.current = targetImage.id;
+    const mention = insertImageMention('', targetImage, completedImageItems);
+    setInputValue(promptSeed.prompt ? `${mention}${promptSeed.prompt}` : mention);
+  }, [completedImageItems, promptSeed]);
 
   const handleInputChange = (nextValue: string) => {
     setInputValue(nextValue);
@@ -173,7 +191,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
   };
 
   return (
-    <div className="w-96 bg-white border-l border-gray-100 h-full flex flex-col shadow-2xl z-50 overflow-hidden">
+    <div className="w-96 bg-white border-l border-gray-200 h-full flex flex-col z-50 overflow-hidden">
       <div className="p-4 border-b border-gray-50 bg-gray-50/30 flex items-center gap-2">
         <div className="w-8 h-8 bg-black rounded-lg flex items-center justify-center">
           <Hammer className="text-white" size={16} />

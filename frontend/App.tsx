@@ -1,16 +1,18 @@
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Hammer, PanelRightClose, PanelRight, Settings, FolderPlus, LogOut, UserRound, Loader2, X, Download } from 'lucide-react';
-import type { CanvasItem, ChatMessage, ImageAspectRatio } from './types';
+import { PanelRightClose, PanelRight, Settings, FolderPlus, LogOut, Loader2, X, Download, ChevronDown } from 'lucide-react';
+import type { CanvasItem, CanvasTool, ChatMessage, ImageAspectRatio } from './types';
 import AuthPanel from './components/AuthPanel';
 import Canvas from './components/Canvas';
 import Sidebar from './components/Sidebar';
 import Toolbar from './components/Toolbar';
 import ConfigModal from './components/ConfigModal';
+import CanvasUtilityDock from './components/CanvasUtilityDock';
 import {
   canUseImageJobs,
   editImage,
   generateImage,
+  type ImageGenerationResult,
   submitImageEditJob,
   submitImageGenerationJob,
   waitForImageJob
@@ -41,17 +43,208 @@ import {
   logout
 } from './services/auth';
 import { loadApiConfig, resetApiConfigSession } from './services/config';
-import { exportCanvasProjectImage } from './services/canvasExport';
+import { type CanvasExportScope, exportCanvasProjectImage } from './services/canvasExport';
 import {
   buildImageReferenceRoleContext,
   buildReferencedImageEditPrompt,
+  normalizeOptimizedPromptImageReferences,
   resolveEditReferencesWithAi
 } from './services/imageReferences';
+import { createTransparentEditMask } from './services/imageMask';
 
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 5;
 const SIDEBAR_WIDTH = 384;
 const LAST_PROJECT_STORAGE_KEY = 'livart_last_project_id';
+const PLACEMENT_GAP = 96;
+const CANVAS_TOP_SAFE_GAP = 56;
+const CANVAS_BOTTOM_SAFE_GAP = 128;
+const CANVAS_SIDE_SAFE_GAP = 24;
+const REMOVER_PROMPT = '把圈起来的地方删除掉。';
+const DERIVED_IMAGE_GAP = 32;
+const MAX_HISTORY_ENTRIES = 80;
+const DEFAULT_CANVAS_BACKGROUND_COLOR = '#fcfcfc';
+
+type ImageEditMode = 'local-redraw' | 'remover';
+type SidebarPromptSeed = {
+  id: string;
+  imageId: string;
+  prompt?: string;
+};
+type CanvasHistorySnapshot = {
+  items: CanvasItem[];
+  pan: { x: number; y: number };
+  zoom: number;
+  selectedIds: string[];
+  canvasBackgroundColor: string;
+};
+
+const createChatMessage = (
+  text: string,
+  role: 'user' | 'assistant',
+  options: Pick<ChatMessage, 'imageIds'> = {}
+): ChatMessage => ({
+  id: Math.random().toString(36).substr(2, 9),
+  role,
+  text,
+  timestamp: Date.now(),
+  ...options
+});
+
+const appendImageCompletionMessage = (
+  messages: ChatMessage[],
+  imageId: string,
+  isEdit: boolean
+) => {
+  const alreadyExists = messages.some(message => (
+    message.role === 'assistant' &&
+    (message.imageIds?.includes(imageId) || message.text.includes(`@${imageId}`))
+  ));
+  if (alreadyExists) return messages;
+
+  return [
+    ...messages,
+    createChatMessage(
+      isEdit ? `已恢复并完成图片编辑：@${imageId}` : `已恢复并完成图片生成：@${imageId}`,
+      'assistant',
+      { imageIds: [imageId] }
+    )
+  ];
+};
+
+const rectsOverlap = (
+  left: Pick<CanvasItem, 'x' | 'y' | 'width' | 'height'>,
+  right: Pick<CanvasItem, 'x' | 'y' | 'width' | 'height'>,
+  padding = 36
+) => {
+  return left.x < right.x + right.width + padding &&
+    left.x + left.width + padding > right.x &&
+    left.y < right.y + right.height + padding &&
+    left.y + left.height + padding > right.y;
+};
+
+const findAvailableCanvasPosition = (
+  items: CanvasItem[],
+  desiredX: number,
+  desiredY: number,
+  width: number,
+  height: number,
+  visibleRect?: Pick<CanvasItem, 'x' | 'y' | 'width' | 'height'>
+) => {
+  const imageItems = items.filter(item => item.type === 'image' && (item.status !== 'error' || !!item.content));
+  const isFree = (x: number, y: number) => (
+    !imageItems.some(item => rectsOverlap({ x, y, width, height }, item))
+  );
+  const isVisible = (x: number, y: number) => {
+    if (!visibleRect) return true;
+    return x >= visibleRect.x &&
+      y >= visibleRect.y &&
+      x + width <= visibleRect.x + visibleRect.width &&
+      y + height <= visibleRect.y + visibleRect.height;
+  };
+
+  if (isFree(desiredX, desiredY) && isVisible(desiredX, desiredY)) {
+    return { x: desiredX, y: desiredY };
+  }
+
+  const stepX = width + PLACEMENT_GAP;
+  const stepY = height + PLACEMENT_GAP;
+  const candidates = Array.from({ length: 8 }, (_, radiusIndex) => {
+    const radius = radiusIndex + 1;
+    return [
+      { x: radius * stepX, y: 0 },
+      { x: 0, y: radius * stepY },
+      { x: radius * stepX, y: radius * stepY },
+      { x: -radius * stepX, y: 0 },
+      { x: -radius * stepX, y: radius * stepY },
+      { x: radius * stepX, y: -radius * stepY },
+      { x: 0, y: -radius * stepY },
+      { x: -radius * stepX, y: -radius * stepY }
+    ];
+  }).flat()
+    .map(offset => ({ x: desiredX + offset.x, y: desiredY + offset.y }));
+
+  const freeCandidate = candidates.find(candidate => isFree(candidate.x, candidate.y) && isVisible(candidate.x, candidate.y))
+    || (isFree(desiredX, desiredY) ? { x: desiredX, y: desiredY } : undefined)
+    || candidates.find(candidate => isFree(candidate.x, candidate.y));
+  if (freeCandidate) return freeCandidate;
+
+  const rightMost = imageItems.reduce(
+    (maxRight, item) => Math.max(maxRight, item.x + item.width),
+    desiredX
+  );
+  return { x: rightMost + PLACEMENT_GAP, y: desiredY };
+};
+
+const findRightSideCanvasPosition = (
+  items: CanvasItem[],
+  baseItem: Pick<CanvasItem, 'id' | 'x' | 'y' | 'width' | 'height'>,
+  width: number,
+  height: number
+) => {
+  let desiredX = baseItem.x + baseItem.width + DERIVED_IMAGE_GAP;
+  const desiredY = baseItem.y;
+  const relevantItems = items.filter(item => (
+    item.id !== baseItem.id &&
+    item.type === 'image' &&
+    (item.status !== 'error' || !!item.content)
+  ));
+
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const candidate = { x: desiredX, y: desiredY, width, height };
+    if (!relevantItems.some(item => rectsOverlap(candidate, item, DERIVED_IMAGE_GAP / 2))) {
+      return { x: desiredX, y: desiredY };
+    }
+
+    desiredX += width + DERIVED_IMAGE_GAP;
+  }
+
+  return { x: desiredX, y: desiredY };
+};
+
+const cloneCanvasItems = (items: CanvasItem[]) => items.map(item => ({
+  ...item,
+  layers: item.layers.map(layer => ({ ...layer }))
+}));
+
+const createCanvasHistorySnapshot = (
+  items: CanvasItem[],
+  pan: { x: number; y: number },
+  zoom: number,
+  selectedIds: string[],
+  canvasBackgroundColor: string
+): CanvasHistorySnapshot => ({
+  items: cloneCanvasItems(items),
+  pan: { ...pan },
+  zoom,
+  selectedIds: [...selectedIds],
+  canvasBackgroundColor
+});
+
+const getCanvasHistoryKey = (snapshot: CanvasHistorySnapshot) => JSON.stringify(snapshot);
+
+const isEditableShortcutTarget = (target: EventTarget | null) => {
+  if (!(target instanceof HTMLElement)) return false;
+  return (
+    ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) ||
+    !!target.closest('[contenteditable="true"]')
+  );
+};
+
+const getVisibleCanvasRect = (
+  pan: { x: number; y: number },
+  zoom: number,
+  showSidebar: boolean
+) => {
+  const viewportWidth = Math.max(320, window.innerWidth - (showSidebar ? SIDEBAR_WIDTH : 0));
+  const viewportHeight = window.innerHeight;
+  return {
+    x: (CANVAS_SIDE_SAFE_GAP - pan.x) / zoom,
+    y: (CANVAS_TOP_SAFE_GAP - pan.y) / zoom,
+    width: Math.max(1, viewportWidth - CANVAS_SIDE_SAFE_GAP * 2) / zoom,
+    height: Math.max(1, viewportHeight - CANVAS_TOP_SAFE_GAP - CANVAS_BOTTOM_SAFE_GAP) / zoom
+  };
+};
 
 const isDataImageUrl = (value: unknown) => {
   return typeof value === 'string' && value.startsWith('data:image/');
@@ -204,7 +397,12 @@ function App() {
   const [pan, setPan] = useState({ x: window.innerWidth / 4, y: window.innerHeight / 4 });
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [showSidebar, setShowSidebar] = useState(true);
+  const [canvasTool, setCanvasTool] = useState<CanvasTool>('select');
+  const [canvasBackgroundColor, setCanvasBackgroundColor] = useState(DEFAULT_CANVAS_BACKGROUND_COLOR);
   const [contextImage, setContextImage] = useState<CanvasItem | null>(null);
+  const [sidebarPromptSeed, setSidebarPromptSeed] = useState<SidebarPromptSeed | null>(null);
+  const [sidebarInputResetKey, setSidebarInputResetKey] = useState(0);
+  const [selectedImageEditMode, setSelectedImageEditMode] = useState<{ imageId: string; mode: ImageEditMode } | null>(null);
   const [apiConfigReady, setApiConfigReady] = useState(false);
   const [isApiConfigLoaded, setIsApiConfigLoaded] = useState(false);
   const [showConfigModal, setShowConfigModal] = useState(false);
@@ -220,22 +418,152 @@ function App() {
   const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [createProjectError, setCreateProjectError] = useState('');
   const [isExportingProjectImage, setIsExportingProjectImage] = useState(false);
+  const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
   const [exportProjectImageError, setExportProjectImageError] = useState('');
   const saveTimerRef = useRef<number | null>(null);
   const pendingSaveRef = useRef<PendingCanvasSave | null>(null);
   const isSavingCanvasRef = useRef(false);
   const saveRevisionRef = useRef(Date.now());
   const resumedImageJobIdsRef = useRef<Set<string>>(new Set());
+  const canvasHistoryPastRef = useRef<CanvasHistorySnapshot[]>([]);
+  const canvasHistoryFutureRef = useRef<CanvasHistorySnapshot[]>([]);
+  const canvasHistoryTimerRef = useRef<number | null>(null);
+  const isRestoringCanvasHistoryRef = useRef(false);
+  const [canvasHistoryState, setCanvasHistoryState] = useState({ canUndo: false, canRedo: false });
   const hasPendingImageJob = items.some(item => item.type === 'image' && item.status === 'loading' && !!item.imageJobId);
   const hasDownloadableImage = items.some(item => item.type === 'image' && item.status === 'completed' && !!item.content);
+  const hasSelectedDownloadableImage = selectedIds.some(id => {
+    const item = items.find(candidate => candidate.id === id);
+    return item?.type === 'image' && item.status === 'completed' && !!item.content;
+  });
+
+  const updateCanvasHistoryState = () => {
+    setCanvasHistoryState({
+      canUndo: canvasHistoryPastRef.current.length > 1,
+      canRedo: canvasHistoryFutureRef.current.length > 0
+    });
+  };
+
+  const getCurrentCanvasHistorySnapshot = () => createCanvasHistorySnapshot(items, pan, zoom, selectedIds, canvasBackgroundColor);
+
+  const resetCanvasHistory = (snapshot: CanvasHistorySnapshot) => {
+    if (canvasHistoryTimerRef.current) {
+      window.clearTimeout(canvasHistoryTimerRef.current);
+      canvasHistoryTimerRef.current = null;
+    }
+    canvasHistoryPastRef.current = [snapshot];
+    canvasHistoryFutureRef.current = [];
+    updateCanvasHistoryState();
+  };
+
+  const commitCanvasHistory = () => {
+    canvasHistoryTimerRef.current = null;
+    const snapshot = getCurrentCanvasHistorySnapshot();
+    const lastSnapshot = canvasHistoryPastRef.current.at(-1);
+
+    if (lastSnapshot && getCanvasHistoryKey(lastSnapshot) === getCanvasHistoryKey(snapshot)) {
+      updateCanvasHistoryState();
+      return;
+    }
+
+    canvasHistoryPastRef.current = [
+      ...canvasHistoryPastRef.current,
+      snapshot
+    ].slice(-MAX_HISTORY_ENTRIES);
+    canvasHistoryFutureRef.current = [];
+    updateCanvasHistoryState();
+  };
+
+  const flushCanvasHistory = () => {
+    if (canvasHistoryTimerRef.current) {
+      window.clearTimeout(canvasHistoryTimerRef.current);
+      canvasHistoryTimerRef.current = null;
+    }
+    commitCanvasHistory();
+  };
+
+  const restoreCanvasHistorySnapshot = (snapshot: CanvasHistorySnapshot) => {
+    isRestoringCanvasHistoryRef.current = true;
+    setItems(cloneCanvasItems(snapshot.items));
+    setPan({ ...snapshot.pan });
+    setZoom(snapshot.zoom);
+    setSelectedIds([...snapshot.selectedIds]);
+    setCanvasBackgroundColor(snapshot.canvasBackgroundColor || DEFAULT_CANVAS_BACKGROUND_COLOR);
+    setContextImage(null);
+    setSidebarPromptSeed(null);
+    setSelectedImageEditMode(null);
+    window.setTimeout(() => {
+      isRestoringCanvasHistoryRef.current = false;
+    }, 0);
+  };
+
+  const undoCanvas = () => {
+    if (canvasHistoryTimerRef.current) {
+      window.clearTimeout(canvasHistoryTimerRef.current);
+      canvasHistoryTimerRef.current = null;
+    }
+
+    const currentSnapshot = getCurrentCanvasHistorySnapshot();
+    const lastSnapshot = canvasHistoryPastRef.current.at(-1);
+    if (!lastSnapshot) return;
+
+    const currentKey = getCanvasHistoryKey(currentSnapshot);
+    const lastKey = getCanvasHistoryKey(lastSnapshot);
+    let targetSnapshot: CanvasHistorySnapshot | undefined;
+
+    if (currentKey !== lastKey) {
+      canvasHistoryFutureRef.current = [currentSnapshot, ...canvasHistoryFutureRef.current];
+      targetSnapshot = lastSnapshot;
+    } else if (canvasHistoryPastRef.current.length > 1) {
+      const currentCommittedSnapshot = canvasHistoryPastRef.current.pop();
+      if (currentCommittedSnapshot) {
+        canvasHistoryFutureRef.current = [currentCommittedSnapshot, ...canvasHistoryFutureRef.current];
+      }
+      targetSnapshot = canvasHistoryPastRef.current.at(-1);
+    }
+
+    if (!targetSnapshot) {
+      updateCanvasHistoryState();
+      return;
+    }
+
+    restoreCanvasHistorySnapshot(targetSnapshot);
+    updateCanvasHistoryState();
+  };
+
+  const redoCanvas = () => {
+    if (canvasHistoryTimerRef.current) {
+      window.clearTimeout(canvasHistoryTimerRef.current);
+      canvasHistoryTimerRef.current = null;
+    }
+
+    const nextSnapshot = canvasHistoryFutureRef.current[0];
+    if (!nextSnapshot) {
+      updateCanvasHistoryState();
+      return;
+    }
+
+    canvasHistoryFutureRef.current = canvasHistoryFutureRef.current.slice(1);
+    canvasHistoryPastRef.current = [
+      ...canvasHistoryPastRef.current,
+      nextSnapshot
+    ].slice(-MAX_HISTORY_ENTRIES);
+    restoreCanvasHistorySnapshot(nextSnapshot);
+    updateCanvasHistoryState();
+  };
 
   const resetWorkspace = () => {
     setItems([]);
     setMessages([createWelcomeMessage()]);
     setZoom(1);
     setPan({ x: window.innerWidth / 4, y: window.innerHeight / 4 });
+    setCanvasBackgroundColor(DEFAULT_CANVAS_BACKGROUND_COLOR);
     setSelectedIds([]);
     setContextImage(null);
+    setSidebarPromptSeed(null);
+    setSidebarInputResetKey(prev => prev + 1);
+    setSelectedImageEditMode(null);
+    resetCanvasHistory(createCanvasHistorySnapshot([], { x: window.innerWidth / 4, y: window.innerHeight / 4 }, 1, [], DEFAULT_CANVAS_BACKGROUND_COLOR));
     setProjects([]);
     setCurrentProjectId('');
     setCurrentProjectTitle('默认画布');
@@ -285,8 +613,13 @@ function App() {
     setMessages(state.messages.length > 0 ? state.messages : [createWelcomeMessage()]);
     setZoom(state.viewport.zoom);
     setPan(state.viewport.pan);
+    setCanvasBackgroundColor(state.settings.backgroundColor || DEFAULT_CANVAS_BACKGROUND_COLOR);
     setSelectedIds([]);
     setContextImage(null);
+    setSidebarPromptSeed(null);
+    setSidebarInputResetKey(prev => prev + 1);
+    setSelectedImageEditMode(null);
+    resetCanvasHistory(createCanvasHistorySnapshot(state.items, state.viewport.pan, state.viewport.zoom, [], state.settings.backgroundColor || DEFAULT_CANVAS_BACKGROUND_COLOR));
     resumedImageJobIdsRef.current = new Set();
   };
 
@@ -452,6 +785,7 @@ function App() {
         items,
         messages,
         viewport: { zoom, pan },
+        settings: { backgroundColor: canvasBackgroundColor },
         selectedIds: []
       }
     };
@@ -463,7 +797,54 @@ function App() {
         window.clearTimeout(saveTimerRef.current);
       }
     };
-  }, [items, messages, zoom, pan, hasLoadedCanvas, currentProjectId, currentProjectTitle, authSession]);
+  }, [items, messages, zoom, pan, canvasBackgroundColor, hasLoadedCanvas, currentProjectId, currentProjectTitle, authSession]);
+
+  useEffect(() => {
+    if (!authSession || !hasLoadedCanvas || !currentProjectId) return;
+    if (isRestoringCanvasHistoryRef.current) return;
+
+    if (canvasHistoryPastRef.current.length === 0) {
+      resetCanvasHistory(getCurrentCanvasHistorySnapshot());
+      return;
+    }
+
+    if (canvasHistoryTimerRef.current) {
+      window.clearTimeout(canvasHistoryTimerRef.current);
+    }
+
+    canvasHistoryTimerRef.current = window.setTimeout(commitCanvasHistory, 350);
+
+    return () => {
+      if (canvasHistoryTimerRef.current) {
+        window.clearTimeout(canvasHistoryTimerRef.current);
+        canvasHistoryTimerRef.current = null;
+      }
+    };
+  }, [items, pan, zoom, canvasBackgroundColor, hasLoadedCanvas, currentProjectId, authSession]);
+
+  useEffect(() => {
+    const handleHistoryShortcut = (event: KeyboardEvent) => {
+      if (isEditableShortcutTarget(event.target)) return;
+
+      const isModifierPressed = event.metaKey || event.ctrlKey;
+      if (!isModifierPressed) return;
+
+      const key = event.key.toLowerCase();
+      if (key === 'z' && event.shiftKey) {
+        event.preventDefault();
+        redoCanvas();
+      } else if (key === 'z') {
+        event.preventDefault();
+        undoCanvas();
+      } else if (key === 'y') {
+        event.preventDefault();
+        redoCanvas();
+      }
+    };
+
+    window.addEventListener('keydown', handleHistoryShortcut);
+    return () => window.removeEventListener('keydown', handleHistoryShortcut);
+  });
 
   useEffect(() => {
     if (!hasLoadedCanvas || !currentProjectId) return;
@@ -480,7 +861,8 @@ function App() {
       resumedImageJobIdsRef.current.add(jobId);
 
       waitForImageJob(jobId)
-        .then(async (resultImg) => {
+        .then(async (imageResult) => {
+          const resultImg = imageResult.image;
           const finalFrame = await getImageFrameFromSource(
             resultImg,
             item.width,
@@ -491,14 +873,24 @@ function App() {
           setItems(prev => prev.map(candidate => {
             if (candidate.id !== item.id) return candidate;
             const centeredFrame = centerFrameOnRect(candidate, finalFrame);
+            const parentImage = candidate.parentId
+              ? prev.find(prevItem => prevItem.id === candidate.parentId && prevItem.type === 'image') || null
+              : null;
+            const rawOptimizedPrompt = imageResult.optimizedPrompt || candidate.optimizedPrompt;
+            const optimizedPrompt = parentImage && rawOptimizedPrompt
+              ? normalizeOptimizedPromptImageReferences(rawOptimizedPrompt, parentImage, [], prev)
+              : rawOptimizedPrompt;
             return {
               ...candidate,
               ...centeredFrame,
               content: resultImg,
               status: 'completed',
-              imageJobId: undefined
+              imageJobId: undefined,
+              originalPrompt: candidate.originalPrompt || imageResult.originalPrompt,
+              optimizedPrompt
             };
           }));
+          setMessages(prev => appendImageCompletionMessage(prev, item.id, !!item.parentId));
         })
         .catch((error) => {
           const message = error instanceof Error ? error.message : '图片任务恢复失败';
@@ -507,6 +899,10 @@ function App() {
               ? { ...candidate, status: 'error', label: message, imageJobId: undefined }
               : candidate
           )));
+          setMessages(prev => [
+            ...prev,
+            createChatMessage(`恢复中的图片任务失败：${message}`, 'assistant')
+          ]);
         });
     });
   }, [hasLoadedCanvas, currentProjectId]);
@@ -569,6 +965,17 @@ function App() {
     return {
       x: availableWidth / 2,
       y: window.innerHeight / 2
+    };
+  };
+
+  const getPanForCanvasFrame = (frame: Pick<CanvasItem, 'x' | 'y' | 'width' | 'height'>) => {
+    const availableWidth = window.innerWidth - (showSidebar ? SIDEBAR_WIDTH : 0);
+    const targetCenterX = frame.x + frame.width / 2;
+    const targetCenterY = frame.y + frame.height / 2;
+
+    return {
+      x: availableWidth / 2 - targetCenterX * zoom,
+      y: window.innerHeight / 2 - targetCenterY * zoom
     };
   };
 
@@ -639,6 +1046,7 @@ function App() {
         };
         setItems(prev => [...prev, newItem]);
         setSelectedIds([newId]);
+        focusImageInSidebarInput(newItem);
       };
       img.src = content;
     };
@@ -667,13 +1075,7 @@ function App() {
   };
 
   const addMessage = (text: string, role: 'user' | 'assistant', options: Pick<ChatMessage, 'imageIds'> = {}) => {
-    setMessages(prev => [...prev, {
-      id: Math.random().toString(36).substr(2, 9),
-      role,
-      text,
-      timestamp: Date.now(),
-      ...options
-    }]);
+    setMessages(prev => [...prev, createChatMessage(text, role, options)]);
   };
 
   const handleUpdateItem = (id: string, updates: Partial<CanvasItem>) => {
@@ -686,6 +1088,59 @@ function App() {
     if (contextImage && ids.includes(contextImage.id)) {
       setContextImage(null);
     }
+    setSelectedImageEditMode(prev => prev && ids.includes(prev.imageId) ? null : prev);
+  };
+
+  const focusImageInSidebarInput = (item: CanvasItem, prompt?: string, mode?: ImageEditMode) => {
+    if (item.type !== 'image' || item.status !== 'completed' || !item.content) return;
+
+    setContextImage(item);
+    setShowSidebar(true);
+    setSidebarPromptSeed({
+      id: `${item.id}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      imageId: item.id,
+      prompt
+    });
+    setSelectedImageEditMode(mode ? { imageId: item.id, mode } : null);
+  };
+
+  const handleCanvasSelectionChange = (ids: string[]) => {
+    setSelectedIds(ids);
+
+    setSelectedImageEditMode(prev => (
+      prev && ids.length === 1 && ids[0] === prev.imageId ? prev : null
+    ));
+
+    if (ids.length !== 1) return;
+
+    const selectedImage = items.find(item => (
+      item.id === ids[0] &&
+      item.type === 'image' &&
+      item.status === 'completed' &&
+      !!item.content
+    ));
+    if (selectedImage) {
+      focusImageInSidebarInput(selectedImage);
+    }
+  };
+
+  const handleClearSidebarContextImage = () => {
+    setContextImage(null);
+    setSelectedImageEditMode(null);
+  };
+
+  const selectedQuickEditImage = selectedIds.length === 1
+    ? items.find(item => (
+      item.id === selectedIds[0] &&
+      item.type === 'image' &&
+      item.status === 'completed' &&
+      !!item.content
+    )) || null
+    : null;
+
+  const handleToolbarQuickEdit = () => {
+    if (!selectedQuickEditImage) return;
+    focusImageInSidebarInput(selectedQuickEditImage);
   };
 
   const handleSidebarSendMessage = async (text: string, aspectRatio: ImageAspectRatio = 'auto') => {
@@ -698,28 +1153,37 @@ function App() {
     const effectiveAspectRatio = editBaseImage && aspectRatio === 'auto'
       ? inferAspectRatioFromDimensions(editBaseImage.width, editBaseImage.height)
       : aspectRatio;
+    const activeImageEditMode = editBaseImage && selectedImageEditMode?.imageId === editBaseImage.id
+      ? selectedImageEditMode.mode
+      : null;
     
     const newId = Math.random().toString(36).substr(2, 9);
-    const siblingCount = editBaseImage ? items.filter(item => item.parentId === editBaseImage.id).length : 0;
     const fallbackWidth = editBaseImage ? editBaseImage.width : DEFAULT_GENERATED_IMAGE_LONG_SIDE;
     const fallbackHeight = editBaseImage ? editBaseImage.height : DEFAULT_GENERATED_IMAGE_LONG_SIDE;
     const maxLongSide = editBaseImage
       ? Math.max(editBaseImage.width, editBaseImage.height)
       : DEFAULT_GENERATED_IMAGE_LONG_SIDE;
     const initialFrame = getAspectRatioFrame(effectiveAspectRatio, fallbackWidth, fallbackHeight, maxLongSide);
-    const canvasCenterX = (-pan.x + window.innerWidth / 2) / zoom;
-    const canvasCenterY = (-pan.y + window.innerHeight / 2) / zoom;
+    const visibleCanvasRect = getVisibleCanvasRect(pan, zoom, showSidebar);
+    const canvasCenterX = visibleCanvasRect.x + visibleCanvasRect.width / 2;
+    const canvasCenterY = visibleCanvasRect.y + visibleCanvasRect.height / 2;
+    const generatedPosition = editBaseImage
+      ? findRightSideCanvasPosition(items, editBaseImage, initialFrame.width, initialFrame.height)
+      : findAvailableCanvasPosition(
+        items,
+        canvasCenterX - initialFrame.width / 2,
+        canvasCenterY - initialFrame.height / 2,
+        initialFrame.width,
+        initialFrame.height,
+        visibleCanvasRect
+      );
     
     const newItem: CanvasItem = {
       id: newId,
       type: 'image',
       content: '',
-      x: editBaseImage
-        ? editBaseImage.x + editBaseImage.width + 120 + siblingCount * 36
-        : canvasCenterX - initialFrame.width / 2,
-      y: editBaseImage
-        ? editBaseImage.y + siblingCount * 36
-        : canvasCenterY - initialFrame.height / 2,
+      x: generatedPosition.x,
+      y: generatedPosition.y,
       width: initialFrame.width,
       height: initialFrame.height,
       status: 'loading',
@@ -727,6 +1191,7 @@ function App() {
       zIndex: Math.max(60, ...items.map(item => item.zIndex || 0)) + 1,
       parentId: editBaseImage?.id,
       prompt: text,
+      originalPrompt: text,
       layers: []
     };
     
@@ -734,42 +1199,99 @@ function App() {
     setSelectedIds([newId]);
 
     try {
-      let resultImg: string;
+      let imageResult: ImageGenerationResult;
+      let requestPrompt = text;
+      let latestOptimizedPrompt = '';
+      let optimizedPromptBaseImage = editBaseImage;
+      let optimizedPromptReferenceImages = editReferenceImages;
       if (editBaseImage) {
         const persistedEditImages = await Promise.all(
           [editBaseImage, ...editReferenceImages].map(item => ensureCanvasImageAsset(item))
         );
         const persistedBaseImage = persistedEditImages[0];
         const persistedReferenceImages = persistedEditImages.slice(1);
+        optimizedPromptBaseImage = persistedBaseImage;
+        optimizedPromptReferenceImages = persistedReferenceImages;
         const persistedById = new Map(persistedEditImages.map(item => [item.id, item]));
         setItems(prev => prev.map(item => persistedById.get(item.id) || item));
 
-        const editPrompt = buildReferencedImageEditPrompt(text, persistedBaseImage, persistedReferenceImages, { allItems: items });
+        const localMaskData = activeImageEditMode ? editBaseImage.maskData : undefined;
+        if (activeImageEditMode && !localMaskData) {
+          throw new Error(activeImageEditMode === 'remover' ? '请先用画笔涂抹需要删除的物体' : '请先用画笔涂抹需要局部重绘的区域');
+        }
+
+        const promptToOptimize = activeImageEditMode
+          ? activeImageEditMode === 'remover'
+            ? `${text}。只删除或修复用户用蒙版涂抹的局部区域，未被蒙版覆盖的区域必须保持原图不变。`
+            : `${text}。只修改用户用蒙版涂抹的局部区域，未被蒙版覆盖的区域必须保持原图不变。`
+          : text;
+        const editPrompt = buildReferencedImageEditPrompt(promptToOptimize, persistedBaseImage, persistedReferenceImages, {
+          hasLocalMask: !!activeImageEditMode,
+          allItems: items
+        });
+        requestPrompt = editPrompt;
         const referenceContents = persistedReferenceImages.map(item => item.content);
-        const imageContext = buildImageReferenceRoleContext(text, persistedBaseImage, persistedReferenceImages, { allItems: items });
+        const imageContext = buildImageReferenceRoleContext(promptToOptimize, persistedBaseImage, persistedReferenceImages, {
+          hasLocalMask: !!activeImageEditMode,
+          allItems: items
+        });
+        const requestImageContext = activeImageEditMode === 'remover'
+          ? [
+            '任务类型：image-remover / object removal / inpainting。',
+            'mask 透明区域就是用户圈选/涂抹的删除区域，必须删除该区域内的内容并自然补全背景。',
+            '未被 mask 覆盖的区域必须尽量保持原图不变。',
+            imageContext
+          ].join('\n')
+          : imageContext;
+        const maskDataUrl = activeImageEditMode
+          ? await createTransparentEditMask(
+            localMaskData!,
+            persistedBaseImage.content,
+            editBaseImage.width,
+            editBaseImage.height,
+            activeImageEditMode === 'remover'
+              ? { outlineDilationRadius: 6, editableDilationRadius: 5 }
+              : undefined
+          )
+          : undefined;
+        if (activeImageEditMode && !maskDataUrl) {
+          throw new Error(activeImageEditMode === 'remover' ? '请先用画笔涂抹需要删除的物体' : '请先用画笔涂抹需要局部重绘的区域');
+        }
         const editOptions = {
           imageAssetId: getCanvasItemAssetId(persistedBaseImage),
           referenceAssetIds: persistedReferenceImages.map(getCanvasItemAssetId).filter(Boolean),
-          imageContext
+          imageContext: requestImageContext,
+          promptOptimizationMode: activeImageEditMode === 'remover' ? 'image-remover' as const : undefined
         };
+        const requestAspectRatio = activeImageEditMode === 'remover' ? 'auto' : effectiveAspectRatio;
         // 执行图像编辑
         if (canUseImageJobs()) {
           const job = await submitImageEditJob(
             editPrompt,
             persistedBaseImage.content,
-            undefined,
-            effectiveAspectRatio,
+            maskDataUrl || undefined,
+            requestAspectRatio,
             referenceContents,
             editOptions
           );
-          setItems(prev => prev.map(i => i.id === newId ? { ...i, imageJobId: job.jobId } : i));
-          resultImg = await waitForImageJob(job.jobId);
+          latestOptimizedPrompt = job.optimizedPrompt || '';
+          const storedOptimizedPrompt = job.optimizedPrompt
+            ? normalizeOptimizedPromptImageReferences(job.optimizedPrompt, persistedBaseImage, persistedReferenceImages, items)
+            : '';
+          setItems(prev => prev.map(i => i.id === newId ? {
+            ...i,
+            prompt: editPrompt,
+            imageJobId: job.jobId,
+            originalPrompt: text,
+            optimizedPrompt: storedOptimizedPrompt || i.optimizedPrompt
+          } : i));
+          imageResult = await waitForImageJob(job.jobId);
         } else {
-          resultImg = await editImage(
+          imageResult = await editImage(
             editPrompt,
             persistedBaseImage.content,
-            undefined,
-            effectiveAspectRatio,
+            maskDataUrl || undefined,
+            requestAspectRatio,
             referenceContents,
             editOptions
           );
@@ -778,13 +1300,20 @@ function App() {
         // 直接文本生成图片
         if (canUseImageJobs()) {
           const job = await submitImageGenerationJob(text, aspectRatio);
-          setItems(prev => prev.map(i => i.id === newId ? { ...i, imageJobId: job.jobId } : i));
-          resultImg = await waitForImageJob(job.jobId);
+          latestOptimizedPrompt = job.optimizedPrompt || '';
+          setItems(prev => prev.map(i => i.id === newId ? {
+            ...i,
+            imageJobId: job.jobId,
+            originalPrompt: text,
+            optimizedPrompt: job.optimizedPrompt || i.optimizedPrompt
+          } : i));
+          imageResult = await waitForImageJob(job.jobId);
         } else {
-          resultImg = await generateImage(text, 'none', aspectRatio);
+          imageResult = await generateImage(text, 'none', aspectRatio);
         }
       }
 
+      const resultImg = imageResult.image;
       const finalFrame = editBaseImage
         ? initialFrame
         : await getImageFrameFromSource(
@@ -793,19 +1322,40 @@ function App() {
           initialFrame.height,
           Math.max(initialFrame.width, initialFrame.height)
         );
+      const centeredFrame = centerFrameOnRect(newItem, finalFrame);
+      const positionedFrame = editBaseImage
+        ? centeredFrame
+        : {
+          ...centeredFrame,
+          ...findAvailableCanvasPosition(
+            items,
+            centeredFrame.x,
+            centeredFrame.y,
+            centeredFrame.width,
+            centeredFrame.height,
+            visibleCanvasRect
+          )
+        };
       
       setItems(prev => prev.map(i => {
         if (i.id !== newId) return i;
-        const centeredFrame = centerFrameOnRect(i, finalFrame);
+        const rawOptimizedPrompt = imageResult.optimizedPrompt || latestOptimizedPrompt || imageResult.originalPrompt || requestPrompt;
+        const optimizedPrompt = optimizedPromptBaseImage && rawOptimizedPrompt
+          ? normalizeOptimizedPromptImageReferences(rawOptimizedPrompt, optimizedPromptBaseImage, optimizedPromptReferenceImages, prev)
+          : rawOptimizedPrompt;
         return {
           ...i,
-          ...centeredFrame,
+          ...positionedFrame,
           content: resultImg,
           status: 'completed',
           imageJobId: undefined,
+          prompt: requestPrompt,
+          originalPrompt: text,
+          optimizedPrompt,
           label: text.substring(0, 10) + (text.length > 10 ? '...' : '')
         };
       }));
+      setPan(getPanForCanvasFrame(positionedFrame));
 
       const completionText = editBaseImage
         ? `${editReferenceImages.length > 0 ? '已根据多张引用图完成编辑' : '已根据参考图完成编辑'}：@${newId}`
@@ -813,6 +1363,8 @@ function App() {
       addMessage(completionText, 'assistant', { imageIds: [newId] });
       
       setContextImage(null);
+      setSelectedImageEditMode(null);
+      setSidebarPromptSeed(null);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : '未知错误';
       setItems(prev => prev.map(i => i.id === newId ? { ...i, status: 'error', imageJobId: undefined } : i));
@@ -823,22 +1375,20 @@ function App() {
   };
 
   const handleAddToChat = (item: CanvasItem) => {
-    setContextImage(item);
-    setShowSidebar(true);
+    focusImageInSidebarInput(item);
     addMessage('已锁定参考图，请输入编辑指令。', 'assistant');
   };
 
   const handleNavigateToImage = (item: CanvasItem) => {
     const latestItem = items.find(candidate => candidate.id === item.id) || item;
-    const availableWidth = window.innerWidth - (showSidebar ? SIDEBAR_WIDTH : 0);
-    const targetCenterX = latestItem.x + latestItem.width / 2;
-    const targetCenterY = latestItem.y + latestItem.height / 2;
 
-    setSelectedIds([latestItem.id]);
-    setPan({
-      x: availableWidth / 2 - targetCenterX * zoom,
-      y: window.innerHeight / 2 - targetCenterY * zoom
-    });
+    handleCanvasSelectionChange([latestItem.id]);
+    setPan(getPanForCanvasFrame(latestItem));
+  };
+
+  const handleCanvasBackgroundChange = (color: string) => {
+    flushCanvasHistory();
+    setCanvasBackgroundColor(color);
   };
 
   const handleAuthenticated = (session: AuthSession) => {
@@ -865,14 +1415,15 @@ function App() {
     setShowConfigModal(false);
   };
 
-  const handleExportProjectImage = async () => {
+  const handleExportProjectImage = async (scope: CanvasExportScope = hasSelectedDownloadableImage ? 'selected' : 'delivery') => {
     if (isExportingProjectImage) return;
 
+    setIsExportMenuOpen(false);
     setExportProjectImageError('');
     setIsExportingProjectImage(true);
 
     try {
-      await exportCanvasProjectImage(items, selectedIds, currentProjectTitle);
+      await exportCanvasProjectImage(items, selectedIds, currentProjectTitle, scope);
     } catch (error) {
       console.error('导出图片失败', error);
       const message = error instanceof Error ? error.message : '导出图片失败，请稍后再试';
@@ -882,6 +1433,30 @@ function App() {
       setIsExportingProjectImage(false);
     }
   };
+
+  const exportOptions: { scope: CanvasExportScope; label: string; description: string; disabled?: boolean }[] = [
+    {
+      scope: 'selected',
+      label: '选中图',
+      description: hasSelectedDownloadableImage ? '只打包当前选中的成品图' : '请先在画布上选择成品图',
+      disabled: !hasSelectedDownloadableImage
+    },
+    {
+      scope: 'final',
+      label: '最终图',
+      description: '下载没有子派生版本的叶子图片'
+    },
+    {
+      scope: 'derived',
+      label: '全部派生图',
+      description: '下载所有带 parentId 的重绘、裁剪版本'
+    },
+    {
+      scope: 'delivery',
+      label: '项目交付包',
+      description: '打包当前项目所有成品图片'
+    }
+  ];
 
   if (!isAuthReady) {
     return (
@@ -898,88 +1473,102 @@ function App() {
   return (
     <div className="flex h-screen bg-[#fcfcfc] overflow-hidden font-sans text-gray-900">
       <div className="flex-1 relative flex flex-col">
-        <header className="absolute top-0 left-0 right-0 h-16 bg-white/80 backdrop-blur-3xl border-b border-gray-100 px-6 flex items-center justify-between z-30">
-          <div className="flex items-center gap-4">
+        <div className="absolute left-4 top-4 z-30 flex items-center gap-2">
+          <div className="flex items-center gap-1.5 rounded-2xl border border-gray-100 bg-white/90 p-1 shadow-[0_18px_48px_-28px_rgba(0,0,0,0.35)] backdrop-blur-2xl">
             <button
               onClick={() => setShowConfigModal(true)}
-              className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-xl transition-all"
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-gray-400 transition-all hover:bg-gray-100 hover:text-gray-700 active:scale-95"
               title="API 配置"
             >
               <Settings size={18} />
             </button>
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-black rounded-xl flex items-center justify-center shadow-lg">
-                <Hammer className="text-white" size={18} />
-              </div>
-              <div className="flex flex-col -gap-1 text-left">
-                <span className="font-black text-lg tracking-tighter text-gray-900 leading-none">livart</span>
-                <span className="text-[7px] font-black uppercase tracking-widest text-gray-400">AI Canvas</span>
-              </div>
-              <span className={`rounded-full px-2.5 py-1 text-[10px] font-black ${
-                canvasSyncStatus === 'error' ? 'bg-red-50 text-red-500' : 'bg-emerald-50 text-emerald-600'
-              }`}>
-                {canvasSyncText}
-              </span>
-            </div>
-            <div className="flex items-center gap-2 rounded-2xl border border-gray-100 bg-white/70 px-2 py-1.5 shadow-sm">
-              <select
-                value={currentProjectId}
-                onChange={(event) => handleProjectChange(event.target.value)}
-                disabled={!hasLoadedCanvas || projects.length === 0}
-                className="max-w-56 bg-transparent text-xs font-black text-gray-700 outline-none disabled:opacity-50"
-                title="切换项目画布"
-              >
-                {projects.map(project => (
-                  <option key={project.id} value={project.id}>
-                    {project.title || '未命名项目'}
-                  </option>
-                ))}
-              </select>
-              <button
-                onClick={openCreateProjectModal}
-                disabled={!hasLoadedCanvas}
-                className="p-1.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all disabled:opacity-40"
-                title="新建项目"
-              >
-                <FolderPlus size={16} />
-              </button>
-            </div>
-          </div>
-          <div className="flex items-center gap-3">
-            <div className="hidden items-center gap-2 rounded-2xl border border-gray-100 bg-white/70 px-3 py-2 text-xs font-black text-gray-500 shadow-sm md:flex">
-              <UserRound size={15} className="text-indigo-500" />
-              <span className="max-w-28 truncate">{authSession.user.displayName || authSession.user.username}</span>
-            </div>
-            <button
-              onClick={handleLogout}
-              className="p-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all"
-              title="退出登录"
+            <select
+              value={currentProjectId}
+              onChange={(event) => handleProjectChange(event.target.value)}
+              disabled={!hasLoadedCanvas || projects.length === 0}
+              className="h-9 max-w-48 rounded-xl bg-gray-50 px-3 text-xs font-black text-gray-700 outline-none transition-all hover:bg-gray-100 disabled:opacity-50"
+              title="切换项目画布"
             >
-              <LogOut size={18} />
+              {projects.map(project => (
+                <option key={project.id} value={project.id}>
+                  {project.title || '未命名项目'}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={openCreateProjectModal}
+              disabled={!hasLoadedCanvas}
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-gray-400 transition-all hover:bg-indigo-50 hover:text-indigo-600 active:scale-95 disabled:opacity-40"
+              title="新建项目"
+            >
+              <FolderPlus size={17} />
             </button>
-            <div className="h-4 w-[1px] bg-gray-100 mx-1" />
+            <span
+              className={`h-2.5 w-2.5 rounded-full ${
+                canvasSyncStatus === 'error' ? 'bg-red-500' : canvasSyncStatus === 'saving' ? 'bg-amber-400' : 'bg-emerald-500'
+              }`}
+              title={canvasSyncText}
+            />
+          </div>
+        </div>
+
+        <div className="absolute right-4 top-4 z-30 flex items-center gap-2">
+          <div className="flex items-center gap-1.5 rounded-2xl border border-gray-100 bg-white/90 p-1 shadow-[0_18px_48px_-28px_rgba(0,0,0,0.35)] backdrop-blur-2xl">
             <button 
               onClick={() => setShowSidebar(!showSidebar)} 
-              className={`p-2 rounded-xl transition-all ${showSidebar ? 'text-indigo-600 bg-indigo-50' : 'text-gray-400 hover:bg-gray-100'}`}
+              className={`flex h-9 w-9 items-center justify-center rounded-xl transition-all active:scale-95 ${showSidebar ? 'text-indigo-600 bg-indigo-50' : 'text-gray-400 hover:bg-gray-100'}`}
               title={showSidebar ? "隐藏侧边栏" : "显示侧边栏"}
             >
               {showSidebar ? <PanelRightClose size={18} /> : <PanelRight size={18} />}
             </button>
-            <div className="h-4 w-[1px] bg-gray-100 mx-1" />
+            <div className="relative flex items-center">
+              <button
+                onClick={() => handleExportProjectImage()}
+                disabled={isExportingProjectImage || !hasDownloadableImage}
+                className="flex h-9 items-center gap-2 rounded-l-xl bg-zinc-900 px-4 text-xs font-black uppercase tracking-widest text-white transition-all hover:bg-zinc-800 active:scale-95 disabled:opacity-30"
+                title="有选中图片时下载选中图；未选中时下载项目交付包"
+              >
+                {isExportingProjectImage ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                {isExportingProjectImage ? '打包中' : '下载'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsExportMenuOpen(prev => !prev)}
+                disabled={isExportingProjectImage || !hasDownloadableImage}
+                className="flex h-9 items-center justify-center rounded-r-xl border-l border-white/15 bg-zinc-900 px-2 text-white transition-all hover:bg-zinc-800 disabled:opacity-30"
+                title="选择下载范围"
+              >
+                <ChevronDown size={14} className={`transition-transform ${isExportMenuOpen ? 'rotate-180' : ''}`} />
+              </button>
+              {isExportMenuOpen && (
+                <div className="absolute right-0 top-11 z-[5000000] w-64 overflow-hidden rounded-2xl border border-gray-100 bg-white/95 p-1.5 shadow-2xl backdrop-blur-3xl">
+                  {exportOptions.map(option => (
+                    <button
+                      key={option.scope}
+                      type="button"
+                      onClick={() => handleExportProjectImage(option.scope)}
+                      disabled={option.disabled}
+                      className="flex w-full flex-col rounded-xl px-3 py-2.5 text-left transition-all hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      <span className="text-xs font-black text-gray-800">{option.label}</span>
+                      <span className="mt-0.5 text-[10px] font-bold text-gray-400">{option.description}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <button
-              onClick={handleExportProjectImage}
-              disabled={isExportingProjectImage || !hasDownloadableImage}
-              className="flex items-center gap-2 px-5 py-2 text-xs font-black bg-black text-white rounded-xl shadow-lg hover:opacity-90 active:scale-95 transition-all uppercase tracking-widest disabled:opacity-30"
-              title="打包下载选中的成品图；未选中时打包下载全部成品图"
+              onClick={handleLogout}
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-gray-300 transition-all hover:bg-red-50 hover:text-red-500 active:scale-95"
+              title={`退出登录：${authSession.user.displayName || authSession.user.username}`}
             >
-              {isExportingProjectImage ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
-              {isExportingProjectImage ? '打包中' : '下载'}
+              <LogOut size={18} />
             </button>
           </div>
-        </header>
+        </div>
 
         {exportProjectImageError && (
-          <div className="absolute right-6 top-20 z-[5000000] max-w-sm rounded-2xl border border-red-100 bg-white px-4 py-3 text-sm font-bold text-red-500 shadow-2xl">
+          <div className="absolute right-4 top-16 z-[5000000] max-w-sm rounded-2xl border border-red-100 bg-white px-4 py-3 text-sm font-bold text-red-500 shadow-2xl">
             {exportProjectImageError}
           </div>
         )}
@@ -990,24 +1579,52 @@ function App() {
           onZoomChange={handleZoomChange}
           pan={pan} 
           onPanChange={setPan} 
+          backgroundColor={canvasBackgroundColor}
           onItemUpdate={handleUpdateItem}
           onItemDelete={(id) => handleDeleteItems([id])}
           onItemDeleteMultiple={handleDeleteItems}
-          onItemAdd={(item) => { setItems(prev => [...prev, item]); setSelectedIds([item.id]); }}
+          onItemAdd={(item) => {
+            setItems(prev => [...prev, item]);
+            setSelectedIds([item.id]);
+            focusImageInSidebarInput(item);
+          }}
           onAddTextAt={addTextItem}
           onAddImageAt={addImageItem}
           onAddToChat={handleAddToChat}
+          canvasTool={canvasTool}
+          onCanvasToolChange={setCanvasTool}
+          onBeforeCanvasMutation={flushCanvasHistory}
           selectedIds={selectedIds} 
-          setSelectedIds={setSelectedIds}
+          setSelectedIds={handleCanvasSelectionChange}
+          onImagePromptRequest={focusImageInSidebarInput}
+        />
+
+        <CanvasUtilityDock
+          items={items}
+          selectedIds={selectedIds}
+          pan={pan}
+          zoom={zoom}
+          showSidebar={showSidebar}
+          backgroundColor={canvasBackgroundColor}
+          onBackgroundColorChange={handleCanvasBackgroundChange}
+          onNavigateToItem={handleNavigateToImage}
+          onPanChange={setPan}
         />
         
         <Toolbar 
           zoom={zoom} 
           onZoomChange={handleZoomChange}
           onResetView={() => { setZoom(1); setPan({ x: window.innerWidth / 4, y: window.innerHeight / 4 }); }}
-          onAddWorkflow={addWorkflow}
           onAddImage={addImageItem}
           onAddText={() => addTextItem()}
+          activeTool={canvasTool}
+          onToolChange={setCanvasTool}
+          canUndo={canvasHistoryState.canUndo}
+          canRedo={canvasHistoryState.canRedo}
+          onUndo={undoCanvas}
+          onRedo={redoCanvas}
+          canQuickEdit={!!selectedQuickEditImage}
+          onQuickEdit={handleToolbarQuickEdit}
         />
       </div>
 
@@ -1017,9 +1634,11 @@ function App() {
           isThinking={isThinking}
           onSendMessage={handleSidebarSendMessage}
           contextImage={contextImage}
+          promptSeed={sidebarPromptSeed}
+          inputResetKey={sidebarInputResetKey}
           imageItems={items.filter(item => item.type === 'image' && !!item.content)}
           onSelectContextImage={setContextImage}
-          onClearContextImage={() => setContextImage(null)}
+          onClearContextImage={handleClearSidebarContextImage}
           onNavigateToImage={handleNavigateToImage}
         />
       </div>

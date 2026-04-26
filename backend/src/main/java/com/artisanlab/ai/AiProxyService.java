@@ -29,6 +29,7 @@ import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -50,6 +51,8 @@ public class AiProxyService {
     private static final Duration IMAGE_REFERENCE_ANALYZER_TIMEOUT = Duration.ofSeconds(45);
     private static final int IMAGE_PROXY_MAX_ATTEMPTS = 1;
     private static final byte[] CRLF = "\r\n".getBytes(StandardCharsets.UTF_8);
+    private static final String ORIGINAL_PROMPT_HEADER = "X-Livart-Original-Prompt-B64";
+    private static final String OPTIMIZED_PROMPT_HEADER = "X-Livart-Optimized-Prompt-B64";
     private static final List<String> NEGATIVE_PROMPT_TERMS = List.of(
             "画布 UI",
             "工具栏",
@@ -157,6 +160,7 @@ public class AiProxyService {
         headers.add(HttpHeaders.CONTENT_TYPE, result.contentType());
         headers.add(HttpHeaders.CACHE_CONTROL, "no-store");
         headers.add("X-Proxy-Attempts", String.valueOf(result.attempts()));
+        addPromptMetadataHeaders(headers, requestBody.originalPrompt(), requestBody.optimizedPrompt());
         if (!result.requestId().isBlank()) {
             headers.add("X-Upstream-Request-Id", result.requestId());
         }
@@ -179,6 +183,7 @@ public class AiProxyService {
 
         String accept = request.getHeader(HttpHeaders.ACCEPT);
         ImageProxyRequestBody requestBody = readImageProxyRequestBody(userId, request, config, label);
+        job.setPromptMetadata(requestBody.originalPrompt(), requestBody.optimizedPrompt());
         String contentType = requestBody.contentType();
         byte[] body = requestBody.body();
         String targetUrl = joinUrl(config.baseUrl(), path);
@@ -518,7 +523,7 @@ public class AiProxyService {
 
             writeAscii(output, "--" + boundary + "--");
             output.write(CRLF);
-            return new ImageProxyRequestBody("multipart/form-data; boundary=" + boundary, output.toByteArray());
+            return new ImageProxyRequestBody("multipart/form-data; boundary=" + boundary, output.toByteArray(), prompt, optimizedPrompt);
         } catch (ServletException exception) {
             throw new IOException("Failed to read multipart image request", exception);
         }
@@ -531,7 +536,7 @@ public class AiProxyService {
             byte[] body
     ) throws IOException {
         if (!isJsonContentType(contentType) || body == null || body.length == 0) {
-            return new ImageProxyRequestBody(contentType, body == null ? new byte[0] : body);
+            return new ImageProxyRequestBody(contentType, body == null ? new byte[0] : body, "", "");
         }
 
         JsonNode data;
@@ -539,11 +544,11 @@ public class AiProxyService {
             data = objectMapper.readTree(body);
         } catch (IOException exception) {
             log.warn("[prompt-optimizer] skip invalid json body mode={} error={}", label, safeMessage(exception));
-            return new ImageProxyRequestBody(contentType, body);
+            return new ImageProxyRequestBody(contentType, body, "", "");
         }
 
         if (!(data instanceof ObjectNode objectNode)) {
-            return new ImageProxyRequestBody(contentType, body);
+            return new ImageProxyRequestBody(contentType, body, "", "");
         }
 
         ObjectNode rewrittenBody = objectNode.deepCopy();
@@ -564,7 +569,7 @@ public class AiProxyService {
             rewrittenBody.put("prompt", optimizedPrompt);
         }
 
-        return new ImageProxyRequestBody(contentType, objectMapper.writeValueAsBytes(rewrittenBody));
+        return new ImageProxyRequestBody(contentType, objectMapper.writeValueAsBytes(rewrittenBody), prompt, optimizedPrompt);
     }
 
     private MultipartPartData readMultipartPart(Part part) throws IOException {
@@ -1008,6 +1013,12 @@ public class AiProxyService {
         response.put("createdAt", job.createdAt());
         response.put("updatedAt", job.updatedAt());
         response.put("attempts", job.attempts());
+        if (job.originalPrompt() != null && !job.originalPrompt().isBlank()) {
+            response.put("originalPrompt", job.originalPrompt());
+        }
+        if (job.optimizedPrompt() != null && !job.optimizedPrompt().isBlank()) {
+            response.put("optimizedPrompt", job.optimizedPrompt());
+        }
 
         if (job.requestId() != null && !job.requestId().isBlank()) {
             response.put("requestId", job.requestId());
@@ -1292,6 +1303,19 @@ public class AiProxyService {
         return message == null || message.isBlank() ? exception.getClass().getSimpleName() : message;
     }
 
+    private void addPromptMetadataHeaders(HttpHeaders headers, String originalPrompt, String optimizedPrompt) {
+        if (originalPrompt != null && !originalPrompt.isBlank()) {
+            headers.add(ORIGINAL_PROMPT_HEADER, encodePromptHeader(originalPrompt));
+        }
+        if (optimizedPrompt != null && !optimizedPrompt.isBlank()) {
+            headers.add(OPTIMIZED_PROMPT_HEADER, encodePromptHeader(optimizedPrompt));
+        }
+    }
+
+    private String encodePromptHeader(String value) {
+        return Base64.getEncoder().encodeToString(value.getBytes(StandardCharsets.UTF_8));
+    }
+
     private record ImageProxyResult(
             int statusCode,
             byte[] body,
@@ -1303,7 +1327,9 @@ public class AiProxyService {
 
     private record ImageProxyRequestBody(
             String contentType,
-            byte[] body
+            byte[] body,
+            String originalPrompt,
+            String optimizedPrompt
     ) {
     }
 
@@ -1327,6 +1353,8 @@ public class AiProxyService {
         private volatile String contentType = "application/json; charset=utf-8";
         private volatile int attempts = 0;
         private volatile String requestId = "";
+        private volatile String originalPrompt = "";
+        private volatile String optimizedPrompt = "";
 
         private ImageJobState(UUID id, UUID userId, String label) {
             this.id = id;
@@ -1378,6 +1406,20 @@ public class AiProxyService {
 
         private String requestId() {
             return requestId;
+        }
+
+        private String originalPrompt() {
+            return originalPrompt;
+        }
+
+        private String optimizedPrompt() {
+            return optimizedPrompt;
+        }
+
+        private void setPromptMetadata(String originalPrompt, String optimizedPrompt) {
+            this.originalPrompt = originalPrompt == null ? "" : originalPrompt;
+            this.optimizedPrompt = optimizedPrompt == null ? "" : optimizedPrompt;
+            updatedAt = System.currentTimeMillis();
         }
 
         private void markRunning() {

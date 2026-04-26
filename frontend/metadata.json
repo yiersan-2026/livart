@@ -1,5 +1,5 @@
 {
   "name": "livart",
-  "description": "livart - 无限画布 AI 图像创作工作台，支持文生图、图生图、局部重绘、永久画布和多项目管理。",
+  "description": "livart - 一键部署的无限画布 AI 图像创作工作台，支持文生图、图生图、局部重绘、删除物体、前端裁剪、版本对比、图片引用、永久画布、多项目管理和交付包下载。",
   "requestFramePermissions": []
 }

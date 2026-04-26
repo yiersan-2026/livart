@@ -206,15 +206,16 @@ export const buildImageReferenceRoleContext = (
 ) => {
   const readableUserPrompt = replaceImageReferenceMentionsWithRoleNames(userPrompt, baseImage, referenceImages, options.allItems);
   const referenceLines = referenceImages.map((item, index) =>
-    `- 参考图 ${index + 1}：${getImageReferenceMentionValue(item)}（${getImageReferenceLabel(item)}），第 ${index + 2} 张 image 文件，只作为素材/物体/风格参考。`
+    `- 参考图 ${index + 1}：“${getImageReferenceLabel(item)}”，第 ${index + 2} 张 image 文件，只作为素材/物体/风格参考。`
   );
 
   return [
     '图片角色分析（系统根据用户语义推断，优化提示词时必须遵守，但不要原样输出本段）：',
     `- 用户原始指令中图片引用的语义化结果：${readableUserPrompt}`,
-    `- 原图/编辑目标：${getImageReferenceMentionValue(baseImage)}（${getImageReferenceLabel(baseImage)}），第 1 张 image 文件，最终要被编辑的是这张图。`,
+    `- 原图/编辑目标：“${getImageReferenceLabel(baseImage)}”，第 1 张 image 文件，最终要被编辑的是这张图。`,
     ...referenceLines,
     '- 判断规则：如果用户说“把 @A 的物体 放在 @B 的某处”，@B 是原图/编辑目标，@A 是素材参考；如果用户说“把原图里的 A 换成 @B”，原图是编辑目标，@B 是素材参考。',
+    '- 优化后的提示词不要输出 @图片ID、内部 ID 或画布短 ID；如需指代图片，请使用“原图”“参考图 1”等角色名称。',
     options.hasLocalMask
       ? '- 局部蒙版：用户涂抹/画圈区域是唯一允许修改的位置；优化时必须保留“只修改该区域，其余不变”。'
       : '- 没有局部蒙版时，也要保留用户指定的位置关系，不要把“放置”误改成“替换”。'
@@ -222,9 +223,9 @@ export const buildImageReferenceRoleContext = (
 };
 
 const getImageRoleName = (item: CanvasItem, baseImage: CanvasItem, referenceImages: CanvasItem[]) => {
-  if (item.id === baseImage.id) return '原图';
+  if (item.id === baseImage.id) return `原图“${getImageReferenceLabel(item)}”`;
   const referenceIndex = referenceImages.findIndex(referenceImage => referenceImage.id === item.id);
-  return referenceIndex >= 0 ? `参考图 ${referenceIndex + 1}` : '这张图片';
+  return referenceIndex >= 0 ? `参考图 ${referenceIndex + 1}“${getImageReferenceLabel(item)}”` : `图片“${getImageReferenceLabel(item)}”`;
 };
 
 export const replaceImageReferenceMentionsWithRoleNames = (
@@ -250,6 +251,15 @@ export const replaceImageReferenceMentionsWithRoleNames = (
   }
 
   return rewrittenText + text.slice(cursor);
+};
+
+export const normalizeOptimizedPromptImageReferences = (
+  optimizedPrompt: string,
+  baseImage: CanvasItem,
+  referenceImages: CanvasItem[],
+  allItems: CanvasItem[] = [baseImage, ...referenceImages]
+) => {
+  return replaceImageReferenceMentionsWithRoleNames(optimizedPrompt, baseImage, referenceImages, allItems);
 };
 
 const getImageReferenceIndex = (item: CanvasItem, items: CanvasItem[]) => {

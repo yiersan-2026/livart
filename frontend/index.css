@@ -1,0 +1,131 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  margin: 0;
+  overflow: hidden;
+  background-color: #fcfcfc;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+}
+
+#root {
+  height: 100vh;
+}
+
+.checkered-bg {
+  background-image:
+    linear-gradient(45deg, #eee 25%, transparent 25%),
+    linear-gradient(-45deg, #eee 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #eee 75%),
+    linear-gradient(-45deg, transparent 75%, #eee 75%);
+  background-size: 20px 20px;
+  background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+}
+
+.scan-line {
+  height: 2px;
+  background: linear-gradient(90deg, transparent, #6366f1, transparent);
+  box-shadow: 0 0 15px #6366f1;
+  position: absolute;
+  width: 100%;
+  z-index: 10;
+  animation: scan 2s linear infinite;
+}
+
+@keyframes scan {
+  0% { top: 0; }
+  100% { top: 100%; }
+}
+
+.mask-overlay-blue {
+  background: rgba(99, 102, 241, 0.4);
+  mix-blend-mode: multiply;
+}
+
+.tfjs-hidden {
+  display: none;
+}
+
+.scrollbar-hide {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+.prompt-editor:empty::before {
+  content: attr(data-placeholder);
+  color: #9ca3af;
+  pointer-events: none;
+}
+
+.image-generation-skeleton {
+  isolation: isolate;
+}
+
+.image-generation-skeleton::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background:
+    linear-gradient(
+      110deg,
+      transparent 0%,
+      transparent 34%,
+      rgba(255, 255, 255, 0.78) 46%,
+      transparent 58%,
+      transparent 100%
+    );
+  transform: translateX(-100%);
+  animation: imageSkeletonSweep 1.45s ease-in-out infinite;
+}
+
+.image-generation-skeleton > * {
+  position: relative;
+  z-index: 2;
+}
+
+@keyframes imageSkeletonSweep {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.prompt-optimizing-button {
+  position: relative;
+  isolation: isolate;
+  overflow: visible;
+  background: linear-gradient(135deg, #7c3aed, #06b6d4, #f97316, #ec4899);
+  background-size: 300% 300%;
+  animation: promptGlowShift 1.6s ease-in-out infinite;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.8) inset,
+    0 0 22px rgba(99, 102, 241, 0.55),
+    0 0 42px rgba(236, 72, 153, 0.32);
+}
+
+.prompt-optimizing-button::before {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  z-index: -1;
+  border-radius: inherit;
+  background: conic-gradient(from 0deg, #7c3aed, #06b6d4, #22c55e, #f97316, #ec4899, #7c3aed);
+  filter: blur(12px);
+  opacity: 0.9;
+  animation: promptGlowSpin 1.8s linear infinite;
+}
+
+@keyframes promptGlowShift {
+  0%, 100% { background-position: 0% 50%; transform: scale(1); }
+  50% { background-position: 100% 50%; transform: scale(1.04); }
+}
+
+@keyframes promptGlowSpin {
+  to { transform: rotate(360deg); }
+}

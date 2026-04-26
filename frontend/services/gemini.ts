@@ -11,12 +11,25 @@ const TEXT_TO_IMAGE_JOB_URL = '/api/image-jobs/generations';
 const IMAGE_TO_IMAGE_JOB_URL = '/api/image-jobs/edits';
 const IMAGE_JOB_STATUS_URL = '/api/image-jobs';
 const IMAGE_JOB_WS_PATH = '/ws/image-jobs';
+const ORIGINAL_PROMPT_HEADER = 'X-Livart-Original-Prompt-B64';
+const OPTIMIZED_PROMPT_HEADER = 'X-Livart-Optimized-Prompt-B64';
 
 const isGeminiModel = (model: string) => model.startsWith('gemini-');
+
+export interface ImagePromptMetadata {
+  originalPrompt?: string;
+  optimizedPrompt?: string;
+}
+
+export interface ImageGenerationResult extends ImagePromptMetadata {
+  image: string;
+}
 
 export interface ImageJobSubmission {
   jobId: string;
   status: 'queued' | 'running' | 'completed' | 'error';
+  originalPrompt?: string;
+  optimizedPrompt?: string;
 }
 
 interface ImageJobStatus extends ImageJobSubmission {
@@ -145,6 +158,39 @@ const appendAspectRatioToPrompt = (prompt: string, aspectRatio: ImageAspectRatio
   return `${trimmedPrompt}${separator}${instruction}`;
 };
 
+const decodePromptHeader = (value: string | null) => {
+  if (!value) return '';
+  try {
+    const binary = window.atob(value);
+    const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
+    return new TextDecoder().decode(bytes);
+  } catch {
+    return '';
+  }
+};
+
+const getPromptMetadataFromHeaders = (response: Response): ImagePromptMetadata => ({
+  originalPrompt: decodePromptHeader(response.headers.get(ORIGINAL_PROMPT_HEADER)) || undefined,
+  optimizedPrompt: decodePromptHeader(response.headers.get(OPTIMIZED_PROMPT_HEADER)) || undefined
+});
+
+const getPromptMetadataFromPayload = (payload: unknown): ImagePromptMetadata => {
+  if (!payload || typeof payload !== 'object') return {};
+  const data = payload as Record<string, unknown>;
+  const nested = data.livartPromptMetadata && typeof data.livartPromptMetadata === 'object'
+    ? data.livartPromptMetadata as Record<string, unknown>
+    : data;
+  return {
+    originalPrompt: typeof nested.originalPrompt === 'string' ? nested.originalPrompt : undefined,
+    optimizedPrompt: typeof nested.optimizedPrompt === 'string' ? nested.optimizedPrompt : undefined
+  };
+};
+
+const mergePromptMetadata = (...metadatas: ImagePromptMetadata[]) => metadatas.reduce<ImagePromptMetadata>((merged, metadata) => ({
+  originalPrompt: metadata.originalPrompt || merged.originalPrompt,
+  optimizedPrompt: metadata.optimizedPrompt || merged.optimizedPrompt
+}), {});
+
 const callGeminiApi = async (contents: any, imageConfig?: any) => {
   if (!hasApiConfig()) {
     throw new Error('请先配置 API 地址和密钥');
@@ -179,7 +225,8 @@ const callGeminiApi = async (contents: any, imageConfig?: any) => {
     throw new Error(`API 请求失败: ${error}`);
   }
 
-  return response.json();
+  const data = await response.json();
+  return extractImageResultFromResponse(data, getPromptMetadataFromHeaders(response));
 };
 
 const callImageGenerationApi = async (prompt: string, aspectRatio: ImageAspectRatio = 'auto') => {
@@ -206,7 +253,8 @@ const callImageGenerationApi = async (prompt: string, aspectRatio: ImageAspectRa
     throw new Error(`API 请求失败: ${error}`);
   }
 
-  return response.json();
+  const data = await response.json();
+  return extractImageResultFromResponse(data, getPromptMetadataFromHeaders(response));
 };
 
 const callImageEditApi = async (
@@ -248,7 +296,8 @@ const callImageEditApi = async (
     throw new Error(`API 请求失败: ${error}`);
   }
 
-  return response.json();
+  const data = await response.json();
+  return extractImageResultFromResponse(data, getPromptMetadataFromHeaders(response));
 };
 
 const extractImageFromResponse = (data: any): string => {
@@ -269,6 +318,19 @@ const extractImageFromResponse = (data: any): string => {
   }
   throw new Error('未能从响应中获取图像数据');
 };
+
+const extractImageResultFromResponse = (
+  data: unknown,
+  metadata: ImagePromptMetadata = {}
+): ImageGenerationResult => ({
+  image: extractImageFromResponse(data),
+  ...mergePromptMetadata(getPromptMetadataFromPayload(data), metadata)
+});
+
+const extractImageResultFromJob = (job: ImageJobStatus): ImageGenerationResult => ({
+  ...extractImageResultFromResponse(job.response, job),
+  ...mergePromptMetadata(getPromptMetadataFromPayload(job.response), job)
+});
 
 const getErrorText = (payload: unknown): string => {
   if (!payload) return '图片任务失败';
@@ -356,7 +418,7 @@ export const submitImageGenerationJob = async (
 
   const data = await response.json().catch(() => null);
   if (!response.ok || !data?.jobId) {
-    throw new Error(data?.error || `图片任务提交失败：${response.status}`);
+    throw new Error(extractApiErrorMessage(data) || `图片任务提交失败：${response.status}`);
   }
   return data;
 };
@@ -400,7 +462,7 @@ export const submitImageEditJob = async (
 
   const data = await response.json().catch(() => null);
   if (!response.ok || !data?.jobId) {
-    throw new Error(data?.error || `图片任务提交失败：${response.status}`);
+    throw new Error(extractApiErrorMessage(data) || `图片任务提交失败：${response.status}`);
   }
   return data;
 };
@@ -443,7 +505,7 @@ const waitForImageJobByPolling = async (jobId: string) => {
   while (Date.now() < deadlineAt) {
     const job = await getImageJob(jobId);
     if (job.status === 'completed') {
-      return extractImageFromResponse(job.response);
+      return extractImageResultFromJob(job);
     }
     if (job.status === 'error') {
       throw new Error(extractImageJobError(job.error, job));
@@ -461,7 +523,7 @@ const waitForImageJobByWebSocket = async (jobId: string) => {
     throw new ImageJobWebSocketUnavailableError('图片任务 WebSocket 不可用');
   }
 
-  return new Promise<string>((resolve, reject) => {
+  return new Promise<ImageGenerationResult>((resolve, reject) => {
     let settled = false;
     const socket = new WebSocket(socketUrl);
     const timeoutId = window.setTimeout(() => {
@@ -485,7 +547,7 @@ const waitForImageJobByWebSocket = async (jobId: string) => {
       }
     };
 
-    const finishResolve = (value: string) => {
+    const finishResolve = (value: ImageGenerationResult) => {
       if (settled) return;
       settled = true;
       cleanup();
@@ -536,7 +598,7 @@ const waitForImageJobByWebSocket = async (jobId: string) => {
 
       if (message.job.status === 'completed') {
         try {
-          finishResolve(extractImageFromResponse(message.job.response));
+          finishResolve(extractImageResultFromJob(message.job));
         } catch (error) {
           finishReject(error instanceof Error ? error : new Error('未能从响应中获取图像数据'));
         }
@@ -634,7 +696,11 @@ export const generateWorkflowImage = async (
   ];
 
   const data = await callGeminiApi(parts, getGeminiImageConfig(aspectRatio));
-  return extractImageFromResponse(data);
+  return {
+    image: data.image,
+    originalPrompt: prompt,
+    optimizedPrompt: instruction || data.optimizedPrompt
+  };
 };
 
 export const editImage = async (
@@ -674,7 +740,11 @@ export const generateImage = async (
 
   const parts = [{ text: prompt }];
   const data = await callGeminiApi(parts, getGeminiImageConfig(aspectRatio));
-  return extractImageFromResponse(data);
+  return {
+    image: data.image,
+    originalPrompt: prompt,
+    optimizedPrompt: data.optimizedPrompt || prompt
+  };
 };
 
 export const generateBrainstorm = async (topic: string, description: string) => {

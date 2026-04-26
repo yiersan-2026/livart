@@ -60,7 +60,7 @@ const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose, onSaved, req
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+    <div className="fixed inset-0 z-[5000000] flex items-center justify-center bg-black/50">
       <div className="bg-white rounded-2xl shadow-2xl w-[500px] max-h-[88vh] overflow-hidden">
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
           <div>
@@ -134,7 +134,7 @@ const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose, onSaved, req
                 <option key={model} value={model}>{model}</option>
               ))}
             </select>
-            <p className="text-xs text-gray-400 mt-1">用于右侧对话和图片下方输入框的提示词自动优化。</p>
+            <p className="text-xs text-gray-400 mt-1">用于右侧对话和图片编辑请求的提示词自动优化。</p>
           </div>
 
           <div className="rounded-2xl border border-gray-100 bg-gray-50 p-4 text-xs text-gray-500 space-y-2">
