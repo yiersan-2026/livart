@@ -67,18 +67,18 @@ const Toolbar: React.FC<ToolbarProps> = ({ zoom, onZoomChange, onResetView, onAd
         <button
           onClick={() => onToolChange('pan')}
           className={`${iconButtonClass} ${activeTool === 'pan' ? activeIconButtonClass : ''}`}
-          aria-label="移动画布"
+          aria-label="移动画布，快捷键 H"
         >
           <Hand size={18} />
-          {renderTooltip('移动画布')}
+          {renderTooltip('移动画布 H')}
         </button>
         <button
           onClick={() => onToolChange('select')}
           className={`${iconButtonClass} ${activeTool === 'select' ? activeIconButtonClass : ''}`}
-          aria-label="选择/拖拽"
+          aria-label="选择/拖拽，快捷键 V"
         >
           <MousePointer2 size={18} />
-          {renderTooltip('选择')}
+          {renderTooltip('选择 V')}
         </button>
       </div>
 

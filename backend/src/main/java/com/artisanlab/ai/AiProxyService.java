@@ -13,6 +13,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.Part;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -113,6 +114,8 @@ public class AiProxyService {
     private final ObjectMapper objectMapper;
     private final ImageJobEventBroadcaster imageJobEventBroadcaster;
     private final HttpClient httpClient;
+    private final boolean defaultImageSizeEnabled;
+    private final int defaultImageLongSide;
     private final Map<UUID, ImageJobState> imageJobs = new ConcurrentHashMap<>();
     private final ExecutorService imageJobExecutor = Executors.newFixedThreadPool(
             Math.max(2, Runtime.getRuntime().availableProcessors())
@@ -122,12 +125,16 @@ public class AiProxyService {
             UserApiConfigService userApiConfigService,
             AssetService assetService,
             ObjectMapper objectMapper,
-            ImageJobEventBroadcaster imageJobEventBroadcaster
+            ImageJobEventBroadcaster imageJobEventBroadcaster,
+            @Value("${artisan.ai.default-image-size-enabled:true}") boolean defaultImageSizeEnabled,
+            @Value("${artisan.ai.default-image-long-side:2048}") int defaultImageLongSide
     ) {
         this.userApiConfigService = userApiConfigService;
         this.assetService = assetService;
         this.objectMapper = objectMapper;
         this.imageJobEventBroadcaster = imageJobEventBroadcaster;
+        this.defaultImageSizeEnabled = defaultImageSizeEnabled;
+        this.defaultImageLongSide = defaultImageLongSide;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(30))
                 .followRedirects(HttpClient.Redirect.NORMAL)
@@ -568,8 +575,77 @@ public class AiProxyService {
         if (!optimizedPrompt.isBlank()) {
             rewrittenBody.put("prompt", optimizedPrompt);
         }
+        applyDefaultTextToImageSize(label, rewrittenBody, prompt);
 
         return new ImageProxyRequestBody(contentType, objectMapper.writeValueAsBytes(rewrittenBody), prompt, optimizedPrompt);
+    }
+
+    private void applyDefaultTextToImageSize(String label, ObjectNode body, String prompt) {
+        if (!"text-to-image".equals(label) || !defaultImageSizeEnabled || hasUsableField(body, "size")) {
+            return;
+        }
+
+        String model = readTextField(body, "model");
+        if (!supportsDefaultImageSize(model)) {
+            return;
+        }
+
+        String defaultSize = resolveDefaultTextToImageSize(prompt, defaultImageLongSide);
+        if (!defaultSize.isBlank()) {
+            body.put("size", defaultSize);
+        }
+    }
+
+    private boolean hasUsableField(ObjectNode data, String fieldName) {
+        JsonNode value = data.get(fieldName);
+        return value != null && !value.isNull() && (!value.isTextual() || !value.asText().isBlank());
+    }
+
+    private boolean supportsDefaultImageSize(String model) {
+        return "gpt-image-2".equalsIgnoreCase(model == null ? "" : model.trim());
+    }
+
+    static String resolveDefaultTextToImageSize(String prompt, int longSide) {
+        if (longSide <= 0) {
+            return "";
+        }
+
+        ImageAspect aspect = detectPromptAspectRatio(prompt).orElse(new ImageAspect(1, 1));
+        if (aspect.width() >= aspect.height()) {
+            return "%dx%d".formatted(longSide, scaleAspectDimension(longSide, aspect.height(), aspect.width()));
+        }
+        return "%dx%d".formatted(scaleAspectDimension(longSide, aspect.width(), aspect.height()), longSide);
+    }
+
+    private static Optional<ImageAspect> detectPromptAspectRatio(String prompt) {
+        String text = prompt == null ? "" : prompt.replace('：', ':').replaceAll("\\s+", "");
+        if (containsAspectRatio(text, 16, 9)) {
+            return Optional.of(new ImageAspect(16, 9));
+        }
+        if (containsAspectRatio(text, 9, 16)) {
+            return Optional.of(new ImageAspect(9, 16));
+        }
+        if (containsAspectRatio(text, 4, 3)) {
+            return Optional.of(new ImageAspect(4, 3));
+        }
+        if (containsAspectRatio(text, 3, 4)) {
+            return Optional.of(new ImageAspect(3, 4));
+        }
+        if (containsAspectRatio(text, 1, 1)) {
+            return Optional.of(new ImageAspect(1, 1));
+        }
+        return Optional.empty();
+    }
+
+    private static boolean containsAspectRatio(String text, int width, int height) {
+        return text.contains(width + ":" + height)
+                || text.contains(width + "/" + height)
+                || text.contains(width + "x" + height)
+                || text.contains(width + "×" + height);
+    }
+
+    private static int scaleAspectDimension(int longSide, int dimension, int longDimension) {
+        return Math.max(1, Math.round((float) longSide * dimension / longDimension));
     }
 
     private MultipartPartData readMultipartPart(Part part) throws IOException {
@@ -1388,6 +1464,12 @@ public class AiProxyService {
             String filename,
             String contentType,
             byte[] body
+    ) {
+    }
+
+    private record ImageAspect(
+            int width,
+            int height
     ) {
     }
 

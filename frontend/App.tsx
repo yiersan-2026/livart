@@ -925,10 +925,24 @@ function App() {
     const handleHistoryShortcut = (event: KeyboardEvent) => {
       if (isEditableShortcutTarget(event.target)) return;
 
+      const key = event.key.toLowerCase();
       const isModifierPressed = event.metaKey || event.ctrlKey;
+      const hasShortcutModifier = isModifierPressed || event.altKey;
+
+      if (!hasShortcutModifier && key === 'h') {
+        event.preventDefault();
+        setCanvasTool('pan');
+        return;
+      }
+
+      if (!hasShortcutModifier && key === 'v') {
+        event.preventDefault();
+        setCanvasTool('select');
+        return;
+      }
+
       if (!isModifierPressed) return;
 
-      const key = event.key.toLowerCase();
       if (key === 'z' && event.shiftKey) {
         event.preventDefault();
         redoCanvas();

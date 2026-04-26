@@ -2,7 +2,7 @@
 
 Spring Boot + Spring Security JWT + MyBatis Plus 后端，用 RabbitMQ 串行化画布保存请求，用 PostgreSQL 保存项目画布状态，用 MinIO 保存画布图片资源，并代理文生图、图生图、局部重绘、删除物体和去背景请求，同时提供图片交付包打包下载。
 
-本后端是 livart 在原开源前端画布项目基础上新增的永久画布服务层，负责账号登录、JWT 鉴权、用户中转站配置、项目管理、画布状态保存、图片资源上传、异步保存队列、WebSocket 生图状态推送和 AI 生图代理。提示词优化不再暴露单独接口，而是在后端调用上游文生图/图生图接口前自动执行；删除物体会使用专门的 `image-remover` 模式，避免普通重绘提示词影响局部删除；去背景会使用 `background-removal` 模式，先识别图片主要主体，再只保留主体并把主体以外区域替换为纯白色背景。异步生图任务会在 job 响应和 WebSocket 推送中返回 `originalPrompt` 与 `optimizedPrompt`，前端会随图片节点一起保存。
+本后端是 livart 在原开源前端画布项目基础上新增的永久画布服务层，负责账号登录、JWT 鉴权、用户中转站配置、项目管理、画布状态保存、图片资源上传、异步保存队列、WebSocket 生图状态推送和 AI 生图代理。提示词优化不再暴露单独接口，而是在后端调用上游文生图/图生图接口前自动执行；`gpt-image-2` 文生图会按画幅默认注入 2K `size`；删除物体会使用专门的 `image-remover` 模式，避免普通重绘提示词影响局部删除；去背景会使用 `background-removal` 模式，先识别图片主要主体，再只保留主体并把主体以外区域替换为纯白色背景。异步生图任务会在 job 响应和 WebSocket 推送中返回 `originalPrompt` 与 `optimizedPrompt`，前端会随图片节点一起保存。
 
 ## 接口
 
@@ -46,3 +46,12 @@ mvn spring-boot:run
 ```
 
 前端开发环境会把 `/api/auth`、`/api/user`、`/api/canvases`、`/api/canvas`、`/api/assets`、`/api/images`、`/api/image-jobs`、`/api/health` 和 `/ws/image-jobs` 代理到 `http://localhost:8080`。
+
+## 生图分辨率
+
+文生图默认对 `gpt-image-2` 注入真实 2K `size`，并按提示词里的画幅要求映射为：`1:1=2048x2048`、`16:9=2048x1152`、`9:16=1152x2048`、`4:3=2048x1536`、`3:4=1536x2048`。当前中转站实测单纯在提示词写“4K、超高清、高分辨率”仍只返回 1024，`4096x4096` 会返回 502，因此默认不开真 4K。
+
+可用环境变量调整：
+
+- `LIVART_DEFAULT_IMAGE_SIZE_ENABLED=false`：关闭默认 `size` 注入。
+- `LIVART_DEFAULT_IMAGE_LONG_SIDE=1024/2048`：调整默认长边，默认 `2048`。

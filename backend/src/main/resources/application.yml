@@ -44,6 +44,8 @@ artisan:
     default-api-key: ${LIVART_DEFAULT_API_KEY:}
     default-image-model: ${LIVART_DEFAULT_IMAGE_MODEL:gpt-image-2}
     default-chat-model: ${LIVART_DEFAULT_CHAT_MODEL:gpt-5.5}
+    default-image-size-enabled: ${LIVART_DEFAULT_IMAGE_SIZE_ENABLED:true}
+    default-image-long-side: ${LIVART_DEFAULT_IMAGE_LONG_SIDE:2048}
 
 logging:
   level:
