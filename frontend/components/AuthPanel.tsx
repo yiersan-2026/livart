@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Hammer, Loader2, LogIn, UserPlus } from 'lucide-react';
 import { AuthSession, login, register } from '../services/auth';
+import ProjectLinks from './ProjectLinks';
 
 interface AuthPanelProps {
   onAuthenticated: (session: AuthSession) => void;
@@ -36,14 +37,17 @@ const AuthPanel: React.FC<AuthPanelProps> = ({ onAuthenticated }) => {
   return (
     <div className="flex h-screen items-center justify-center bg-[#fcfcfc] px-6 font-sans text-gray-900">
       <div className="w-full max-w-md rounded-[32px] border border-gray-100 bg-white p-8 shadow-[0_40px_100px_-32px_rgba(0,0,0,0.22)]">
-        <div className="mb-8 flex items-center gap-3">
-          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-black shadow-lg">
-            <Hammer className="text-white" size={20} />
+        <div className="mb-8 flex items-center justify-between gap-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-black shadow-lg">
+              <Hammer className="text-white" size={20} />
+            </div>
+            <div className="min-w-0">
+              <h1 className="text-2xl font-black tracking-tighter">livart</h1>
+              <p className="truncate text-xs font-bold text-gray-400">登录后永久保存你的画布历史</p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-2xl font-black tracking-tighter">livart</h1>
-            <p className="text-xs font-bold text-gray-400">登录后永久保存你的画布历史</p>
-          </div>
+          <ProjectLinks />
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">

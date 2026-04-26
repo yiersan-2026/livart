@@ -8,6 +8,7 @@ import Sidebar from './components/Sidebar';
 import Toolbar from './components/Toolbar';
 import ConfigModal from './components/ConfigModal';
 import CanvasUtilityDock from './components/CanvasUtilityDock';
+import ProjectLinks from './components/ProjectLinks';
 import {
   canUseImageJobs,
   editImage,
@@ -1014,11 +1015,9 @@ function App() {
         })
         .catch((error) => {
           const message = error instanceof Error ? error.message : '图片任务恢复失败';
-          setItems(prev => prev.map(candidate => (
-            candidate.id === item.id
-              ? { ...candidate, status: 'error', label: message, imageJobId: undefined }
-              : candidate
-          )));
+          setItems(prev => prev.filter(candidate => candidate.id !== item.id));
+          setSelectedIds(prev => prev.filter(id => id !== item.id));
+          setContextImage(prev => prev?.id === item.id ? null : prev);
           setMessages(prev => [
             ...prev,
             createChatMessage(`恢复中的图片任务失败：${message}`, 'assistant')
@@ -1231,6 +1230,10 @@ function App() {
   };
 
   const handleUpdateItem = (id: string, updates: Partial<CanvasItem>) => {
+    const syncContextImage = (nextUpdates: Partial<CanvasItem>) => {
+      setContextImage(prev => prev?.id === id ? { ...prev, ...nextUpdates } : prev);
+    };
+
     if (isDataImageUrl(updates.content)) {
       let uploadCandidate: CanvasItem | null = null;
       setItems(prev => prev.map(item => {
@@ -1258,21 +1261,26 @@ function App() {
               status: 'completed' as const
             };
             setItems(prev => prev.map(item => item.id === id ? completedItem : item));
+            syncContextImage(completedItem);
           })
           .catch((error) => {
             const message = error instanceof Error ? error.message : '图片上传失败';
+            const errorUpdates = { status: 'error' as const, label: message };
             setItems(prev => prev.map(item => (
               item.id === id
-                ? { ...item, status: 'error', label: message }
+                ? { ...item, ...errorUpdates }
                 : item
             )));
+            syncContextImage(errorUpdates);
           });
         return;
       }
+      syncContextImage(updates);
       return;
     }
 
     setItems(prev => prev.map(item => item.id === id ? { ...item, ...updates } : item));
+    syncContextImage(updates);
   };
 
   const handleDeleteItems = (ids: string[]) => {
@@ -1333,7 +1341,11 @@ function App() {
     addMessage(text, 'user');
     setIsThinking(true);
 
-    const editReferences = await resolveEditReferencesWithAi(text, contextImage, items);
+    const freshContextImage = contextImage
+      ? items.find(item => item.id === contextImage.id && item.type === 'image') || contextImage
+      : null;
+    const editReferences = (await resolveEditReferencesWithAi(text, freshContextImage, items))
+      .map(reference => items.find(item => item.id === reference.id && item.type === 'image') || reference);
     const editBaseImage = editReferences[0] || null;
     const editReferenceImages = editReferences.slice(1);
     const effectiveAspectRatio = editBaseImage && aspectRatio === 'auto'
@@ -1536,12 +1548,9 @@ function App() {
       setSidebarPromptSeed(null);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : '未知错误';
-      setItems(prev => prev.map(i => i.id === newId ? {
-        ...i,
-        status: 'error',
-        label: errorMessage,
-        imageJobId: undefined
-      } : i));
+      setItems(prev => prev.filter(item => item.id !== newId));
+      setSelectedIds(editBaseImage ? [editBaseImage.id] : []);
+      setContextImage(prev => prev?.id === newId ? null : prev);
       addMessage(`出错了，没能完成生成：${errorMessage}`, 'assistant');
     } finally {
       setIsThinking(false);
@@ -1739,6 +1748,7 @@ function App() {
               <LogOut size={18} />
             </button>
           </div>
+          <ProjectLinks />
         </div>
 
         {exportProjectImageError && (

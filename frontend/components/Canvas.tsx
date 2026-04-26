@@ -290,11 +290,22 @@ const getPolygonArea = (points: MaskPoint[]) => {
   return Math.abs(area) / 2;
 };
 
-const fillRemoverLassoSelection = (canvas: HTMLCanvasElement | null, points: MaskPoint[], brushSize: number) => {
+const fillImageMaskLassoSelection = (
+  canvas: HTMLCanvasElement | null,
+  points: MaskPoint[],
+  brushSize: number,
+  strokeColor: string,
+  fillColor: string
+) => {
   if (!canvas || points.length < 3) return;
 
   const area = getPolygonArea(points);
   if (area < Math.max(64, brushSize * brushSize * 1.5)) return;
+
+  const firstPoint = points[0];
+  const lastPoint = points[points.length - 1];
+  const closingDistance = Math.hypot(lastPoint.x - firstPoint.x, lastPoint.y - firstPoint.y);
+  if (closingDistance > Math.max(36, brushSize * 4)) return;
 
   const context = canvas.getContext('2d');
   if (!context) return;
@@ -304,8 +315,8 @@ const fillRemoverLassoSelection = (canvas: HTMLCanvasElement | null, points: Mas
   context.lineCap = 'round';
   context.lineJoin = 'round';
   context.lineWidth = brushSize;
-  context.strokeStyle = 'rgba(239, 68, 68, 0.7)';
-  context.fillStyle = 'rgba(239, 68, 68, 0.28)';
+  context.strokeStyle = strokeColor;
+  context.fillStyle = fillColor;
   context.beginPath();
   context.moveTo(points[0].x, points[0].y);
   for (const point of points.slice(1)) {
@@ -1207,7 +1218,7 @@ const Canvas: React.FC<CanvasProps> = ({
         if (ctx) {
           const x = (e.clientX - rect.left) / zoom;
           const y = (e.clientY - rect.top) / zoom;
-          maskStrokePointsRef.current = selectedItemIsRemover && activeTool === 'brush' ? [{ x, y }] : [];
+          maskStrokePointsRef.current = activeTool === 'brush' ? [{ x, y }] : [];
           ctx.beginPath();
           ctx.lineCap = 'round';
           ctx.lineJoin = 'round';
@@ -1274,7 +1285,7 @@ const Canvas: React.FC<CanvasProps> = ({
         if (ctx) {
           const x = (e.clientX - rect.left) / zoom;
           const y = (e.clientY - rect.top) / zoom;
-          if (selectedItemIsRemover && activeTool === 'brush') {
+          if (activeTool === 'brush') {
             maskStrokePointsRef.current = [...maskStrokePointsRef.current, { x, y }];
           }
           ctx.strokeStyle = activeImageMaskStrokeColor;
@@ -1346,8 +1357,14 @@ const Canvas: React.FC<CanvasProps> = ({
   const handleMouseUp = () => {
     if (isDrawing && selectedItemHasImageMaskTool) {
       setIsDrawing(false);
-      if (selectedItemIsRemover && activeTool === 'brush') {
-        fillRemoverLassoSelection(maskCanvasRef.current, maskStrokePointsRef.current, brushSize);
+      if (activeTool === 'brush') {
+        fillImageMaskLassoSelection(
+          maskCanvasRef.current,
+          maskStrokePointsRef.current,
+          brushSize,
+          activeImageMaskStrokeColor,
+          selectedItemIsRemover ? 'rgba(239, 68, 68, 0.28)' : 'rgba(99, 102, 241, 0.24)'
+        );
       }
       maskStrokePointsRef.current = [];
       const data = maskCanvasRef.current?.toDataURL('image/png');
@@ -1721,11 +1738,7 @@ const Canvas: React.FC<CanvasProps> = ({
       const message = error instanceof Error ? error.message : '未知错误';
       console.error(error);
       if (resultItemId) {
-        onItemUpdate(resultItemId, {
-          status: 'error',
-          imageJobId: undefined,
-          label: isRemoverMode ? 'AI 删除失败' : 'AI 重绘失败'
-        });
+        onItemDelete(resultItemId);
       }
       if (isRemoverMode) {
         setSelectedIds([targetItem.id]);
