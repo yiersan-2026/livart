@@ -151,7 +151,7 @@ docker compose up -d --build
 - livart：`http://localhost:8080`
 - MinIO 控制台：`http://localhost:9001`，默认只绑定本机 `127.0.0.1`
 
-进入 livart 后先注册一个账号；第一次生图时，在页面配置 AI 中转站 Base URL、API Key、生图模型和对话模型即可。后续项目、图片和配置都会自动保存。
+进入 livart 后先注册一个账号；第一次生图时，在页面配置 AI 中转站 Base URL、API Key、生图模型和对话模型即可。后续项目、图片和配置都会自动保存。如果你在 `.env` 中预先填写了 `LIVART_DEFAULT_API_BASE_URL` 和 `LIVART_DEFAULT_API_KEY`，新用户会直接使用服务器默认 AI 配置，不会强制弹出初始配置框；真实 Key 只保存在服务端，不会下发到浏览器。
 
 如果 Docker 里已经有可用的 PostgreSQL、RabbitMQ、MinIO，不想再下载/启动一套新的第三方服务，可以用复用模式：
 
@@ -173,7 +173,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-不要把包含数据库密码、MinIO 密钥、RabbitMQ 密码或 AI API Key 的 `.env` 文件提交到仓库。AI 中转站 Base URL、API Key、生图模型和对话模型仍然在用户首次登录后通过页面填写，并按用户保存到数据库。
+不要把包含数据库密码、MinIO 密钥、RabbitMQ 密码或 AI API Key 的 `.env` 文件提交到仓库。Docker 默认启用 `SPRING_PROFILES_ACTIVE=prod`，生产配置会从环境变量读取数据库、RabbitMQ、MinIO 和 JWT 等参数；如果没有设置服务器默认 AI 配置，用户仍然可以登录后在页面里填写自己的中转站配置，并按用户保存到数据库。
 
 应用日志默认写入容器内 `/tmp/livart-logs/livart-backend.log`，按天滚动并默认只保留最近 1 天；Docker stdout 日志也限制为单个 10MB 文件，避免长期运行撑满磁盘。如需调整，可在 `.env` 中设置 `LOG_PATH`、`LOG_MAX_HISTORY`、`LOG_TOTAL_SIZE_CAP`。
 
@@ -187,6 +187,18 @@ set -a
 source .env
 set +a
 mvn spring-boot:run
+```
+
+后端配置分为三层：
+
+- `backend/src/main/resources/application.yml`：公共配置，默认启用 `dev` profile。
+- `backend/src/main/resources/application-dev.yml`：开发环境默认值，适合本地调试，可通过环境变量覆盖。
+- `backend/src/main/resources/application-prod.yml`：生产环境配置，数据库、RabbitMQ、MinIO、JWT 等敏感项必须来自环境变量。
+
+本地调试默认就是 `dev`；如果要模拟生产配置，可执行：
+
+```bash
+SPRING_PROFILES_ACTIVE=prod mvn spring-boot:run
 ```
 
 ### 启动前端
@@ -203,7 +215,7 @@ npm run dev
 
 ### API 配置
 
-首次登录后会自动弹出中转站配置，之后也可以点击界面左上角的设置图标修改。配置会保存到后端数据库，并按登录用户隔离，不同用户可以使用不同的中转站和模型。只需要填入：
+如果服务端没有配置默认 AI 网关，首次登录后会自动弹出中转站配置；如果服务端已经配置 `LIVART_DEFAULT_API_BASE_URL` 和 `LIVART_DEFAULT_API_KEY`，新用户会直接使用服务器默认配置。之后也可以点击界面左上角的设置图标修改。个人配置会保存到后端数据库，并按登录用户隔离，不同用户可以使用不同的中转站和模型。只需要填入：
 
 - 中转站 Base URL，例如 `https://example.com/v1/`
 - API Key

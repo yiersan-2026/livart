@@ -19,6 +19,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 ENV SERVER_PORT=8080
+ENV SPRING_PROFILES_ACTIVE=prod
 COPY --from=backend-build /workspace/backend/target/livart-backend-0.0.1-SNAPSHOT.jar /app/livart.jar
 COPY docker/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
