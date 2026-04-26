@@ -67,8 +67,11 @@ const getCanvasDimension = (value: number) => Math.max(1, Math.round(value));
 
 const MIN_CROP_SIZE = 48;
 const INLINE_IMAGE_EDITOR_GAP = 16;
+const INLINE_IMAGE_TOOLBAR_HEIGHT = 44;
+const QUICK_EDIT_INPUT_HEIGHT = 52;
+const QUICK_EDIT_STACK_GAP = 8;
 const CANVAS_OVERLAY_MARGIN = 16;
-const DEFAULT_INLINE_IMAGE_EDITOR_SIZE = { width: 760, height: 52 };
+const DEFAULT_INLINE_IMAGE_EDITOR_SIZE = { width: 760, height: INLINE_IMAGE_TOOLBAR_HEIGHT };
 const DERIVED_IMAGE_GAP = 32;
 
 const clampValue = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
@@ -636,7 +639,13 @@ const Canvas: React.FC<CanvasProps> = ({
     const imageWidth = selectedItem.width * safeZoom;
     const imageHeight = selectedItem.height * safeZoom;
     const editorWidth = inlineEditorSize.width || DEFAULT_INLINE_IMAGE_EDITOR_SIZE.width;
-    const editorHeight = inlineEditorSize.height || DEFAULT_INLINE_IMAGE_EDITOR_SIZE.height;
+    const expectedEditorHeight = selectedItemIsQuickEditing
+      ? INLINE_IMAGE_TOOLBAR_HEIGHT + QUICK_EDIT_STACK_GAP + QUICK_EDIT_INPUT_HEIGHT
+      : INLINE_IMAGE_TOOLBAR_HEIGHT;
+    const editorHeight = Math.max(
+      inlineEditorSize.height || DEFAULT_INLINE_IMAGE_EDITOR_SIZE.height,
+      expectedEditorHeight
+    );
     let screenLeft = imageLeft + imageWidth / 2 - editorWidth / 2;
 
     if (viewportWidth > 0) {
@@ -663,7 +672,7 @@ const Canvas: React.FC<CanvasProps> = ({
       transform: `scale(${1 / safeZoom})`,
       transformOrigin: 'top left'
     };
-  }, [canvasViewportSize, inlineEditorSize, pan, selectedItem, zoom]);
+  }, [canvasViewportSize, inlineEditorSize, pan, selectedItem, selectedItemIsQuickEditing, zoom]);
 
   // 全局右键菜单状态
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, id: string } | null>(null);
