@@ -1129,20 +1129,6 @@ function App() {
     setSelectedImageEditMode(null);
   };
 
-  const selectedQuickEditImage = selectedIds.length === 1
-    ? items.find(item => (
-      item.id === selectedIds[0] &&
-      item.type === 'image' &&
-      item.status === 'completed' &&
-      !!item.content
-    )) || null
-    : null;
-
-  const handleToolbarQuickEdit = () => {
-    if (!selectedQuickEditImage) return;
-    focusImageInSidebarInput(selectedQuickEditImage);
-  };
-
   const handleSidebarSendMessage = async (text: string, aspectRatio: ImageAspectRatio = 'auto') => {
     addMessage(text, 'user');
     setIsThinking(true);
@@ -1623,8 +1609,6 @@ function App() {
           canRedo={canvasHistoryState.canRedo}
           onUndo={undoCanvas}
           onRedo={redoCanvas}
-          canQuickEdit={!!selectedQuickEditImage}
-          onQuickEdit={handleToolbarQuickEdit}
         />
       </div>
 

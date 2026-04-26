@@ -1,6 +1,6 @@
 
 import React, { useRef } from 'react';
-import { MousePointer2, Hand, Image as ImageIcon, Type, ZoomIn, ZoomOut, Maximize, Undo2, Redo2, Sparkles } from 'lucide-react';
+import { MousePointer2, Hand, Image as ImageIcon, Type, ZoomIn, ZoomOut, Maximize, Undo2, Redo2 } from 'lucide-react';
 import type { CanvasTool } from '../types';
 
 interface ToolbarProps {
@@ -15,11 +15,9 @@ interface ToolbarProps {
   canRedo: boolean;
   onUndo: () => void;
   onRedo: () => void;
-  canQuickEdit: boolean;
-  onQuickEdit: () => void;
 }
 
-const Toolbar: React.FC<ToolbarProps> = ({ zoom, onZoomChange, onResetView, onAddImage, onAddText, activeTool, onToolChange, canUndo, canRedo, onUndo, onRedo, canQuickEdit, onQuickEdit }) => {
+const Toolbar: React.FC<ToolbarProps> = ({ zoom, onZoomChange, onResetView, onAddImage, onAddText, activeTool, onToolChange, canUndo, canRedo, onUndo, onRedo }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleImageClick = () => {
@@ -45,16 +43,6 @@ const Toolbar: React.FC<ToolbarProps> = ({ zoom, onZoomChange, onResetView, onAd
   return (
     <div className="fixed bottom-1.5 left-1/2 z-[3000000] flex -translate-x-1/2 items-center gap-1 rounded-2xl border border-gray-200 bg-white/95 p-1.5 backdrop-blur-xl">
       <div className="flex items-center gap-1 border-r border-gray-100 pr-1.5">
-        <button
-          onClick={onQuickEdit}
-          disabled={!canQuickEdit}
-          className={`${iconButtonClass} ${canQuickEdit ? activeIconButtonClass : ''}`}
-          aria-label="快捷编辑选中图片"
-        >
-          <Sparkles size={18} />
-          {renderTooltip('快捷编辑')}
-        </button>
-        <div className="h-6 w-px bg-gray-100" />
         <button
           onClick={onUndo}
           disabled={!canUndo}

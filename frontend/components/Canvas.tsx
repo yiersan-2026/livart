@@ -8,7 +8,7 @@ import {
   MessageSquarePlus, Pencil,
   Copy, Layers, Scissors, Check, X,
   ImagePlus, Palette, Maximize2, Wand2,
-  Download
+  Download, Send
 } from 'lucide-react';
 import { canUseImageJobs, editImage, generateWorkflowImage, type ImageGenerationResult, submitImageEditJob, waitForImageJob } from '../services/gemini';
 import {
@@ -569,12 +569,14 @@ const Canvas: React.FC<CanvasProps> = ({
   const [inlineEditAspectRatio, setInlineEditAspectRatio] = useState<ImageAspectRatio>('auto');
   const [localRedrawItemId, setLocalRedrawItemId] = useState<string | null>(null);
   const [localRemoverItemId, setLocalRemoverItemId] = useState<string | null>(null);
+  const [quickEditItemId, setQuickEditItemId] = useState<string | null>(null);
   const [cropItemId, setCropItemId] = useState<string | null>(null);
   const [cropRect, setCropRect] = useState<CropRect | null>(null);
   const [cropDragState, setCropDragState] = useState<CropDragState | null>(null);
   const [downloadingImageId, setDownloadingImageId] = useState<string | null>(null);
   const inlineEditingIdsRef = useRef<Set<string>>(new Set());
   const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const quickEditInputRef = useRef<HTMLInputElement | null>(null);
   const maskStrokePointsRef = useRef<MaskPoint[]>([]);
   const imageToolbarRef = useRef<HTMLDivElement | null>(null);
   const [canvasViewportSize, setCanvasViewportSize] = useState({ width: 0, height: 0 });
@@ -586,6 +588,8 @@ const Canvas: React.FC<CanvasProps> = ({
   const selectedItemIsInlineEditing = selectedItem ? inlineEditingIds.has(selectedItem.id) : false;
   const selectedItemIsLocalRedraw = selectedItem?.type === 'image' && selectedItem.id === localRedrawItemId;
   const selectedItemIsRemover = selectedItem?.type === 'image' && selectedItem.id === localRemoverItemId;
+  const selectedItemCanQuickEdit = selectedItem?.type === 'image' && selectedItem.status === 'completed' && !!selectedItem.content;
+  const selectedItemIsQuickEditing = !!selectedItemCanQuickEdit && selectedItem?.id === quickEditItemId;
   const selectedItemIsCrop = selectedItem?.type === 'image' && selectedItem.id === cropItemId;
   const selectedItemHasImageMaskTool = selectedItemIsLocalRedraw || selectedItemIsRemover;
   const activeImageMaskStrokeColor = selectedItemIsRemover ? 'rgba(239, 68, 68, 0.55)' : 'rgba(99, 102, 241, 0.55)';
@@ -731,8 +735,10 @@ const Canvas: React.FC<CanvasProps> = ({
   }, [
     selectedItem?.id,
     selectedItem?.type,
+    selectedItemIsQuickEditing,
     selectedItemHasImageMaskTool,
     selectedItemIsCrop,
+    inlineEditPrompt,
     selectedInlineEditError,
     selectedItem?.originalPrompt,
     selectedItem?.optimizedPrompt,
@@ -757,6 +763,19 @@ const Canvas: React.FC<CanvasProps> = ({
     setCropRect(null);
     setCropDragState(null);
   }, [cropItemId, selectedIds]);
+
+  useEffect(() => {
+    if (!quickEditItemId || selectedIds.includes(quickEditItemId)) return;
+    setQuickEditItemId(null);
+  }, [quickEditItemId, selectedIds]);
+
+  useEffect(() => {
+    if (!selectedItemIsQuickEditing) return;
+    window.requestAnimationFrame(() => {
+      quickEditInputRef.current?.focus();
+      quickEditInputRef.current?.select();
+    });
+  }, [selectedItemIsQuickEditing, selectedItem?.id]);
 
   useEffect(() => {
     if (!cropDragState) return;
@@ -908,7 +927,16 @@ const Canvas: React.FC<CanvasProps> = ({
     setActiveTool('select');
   };
 
+  const toggleQuickEditMode = (item: CanvasItem) => {
+    if (item.type !== 'image' || item.status !== 'completed' || !item.content) return;
+
+    resetImageToolModes();
+    clearInlineEditError(item.id);
+    setQuickEditItemId(currentId => currentId === item.id ? null : item.id);
+  };
+
   const toggleCropMode = (item: CanvasItem) => {
+    setQuickEditItemId(null);
     if (cropItemId === item.id) {
       resetImageToolModes();
       return;
@@ -924,6 +952,7 @@ const Canvas: React.FC<CanvasProps> = ({
   };
 
   const toggleLocalRedrawMode = (item: CanvasItem) => {
+    setQuickEditItemId(null);
     onCanvasToolChange('select');
     setCropItemId(null);
     setCropRect(null);
@@ -936,6 +965,7 @@ const Canvas: React.FC<CanvasProps> = ({
   };
 
   const toggleRemoverMode = (item: CanvasItem) => {
+    setQuickEditItemId(null);
     onCanvasToolChange('select');
     setCropItemId(null);
     setCropRect(null);
@@ -949,6 +979,7 @@ const Canvas: React.FC<CanvasProps> = ({
 
   const applyQuickEditPrompt = (item: CanvasItem, prompt: string) => {
     resetImageToolModes();
+    setQuickEditItemId(null);
     onImagePromptRequest(item, prompt);
   };
 
@@ -1024,6 +1055,12 @@ const Canvas: React.FC<CanvasProps> = ({
     const handleKeyDown = (e: KeyboardEvent) => {
       if (isEditableTarget(e.target)) return;
 
+      if (e.key === 'Tab' && selectedItemCanQuickEdit && selectedItem) {
+        e.preventDefault();
+        toggleQuickEditMode(selectedItem);
+        return;
+      }
+
       if (e.code === 'Space') {
         setIsSpacePressed(true);
         if (e.target === document.body) e.preventDefault();
@@ -1046,7 +1083,7 @@ const Canvas: React.FC<CanvasProps> = ({
       window.removeEventListener('keyup', handleKeyUp);
       window.removeEventListener('click', handleClickOutside);
     };
-  }, [onBeforeCanvasMutation, onItemDeleteMultiple, selectedIds]);
+  }, [onBeforeCanvasMutation, onItemDeleteMultiple, selectedIds, selectedItem, selectedItemCanQuickEdit]);
 
   useEffect(() => {
     const handleWheel = (event: WheelEvent) => {
@@ -1577,6 +1614,8 @@ const Canvas: React.FC<CanvasProps> = ({
           ? '删除物体'
           : rawPrompt.substring(0, 16) + (rawPrompt.length > 16 ? '...' : '')
       });
+      setInlineEditPromptForItem(targetItem.id, '');
+      setQuickEditItemId(null);
       if (isRemoverMode) {
         setLocalRedrawItemId(null);
         setLocalRemoverItemId(null);
@@ -1870,10 +1909,20 @@ const Canvas: React.FC<CanvasProps> = ({
             >
             <div className="relative h-11 w-max overflow-hidden rounded-[14px] border border-zinc-200 bg-white pr-11 shadow-[0_14px_40px_-26px_rgba(0,0,0,0.5)]">
               <div className="flex h-full items-center pr-2">
-                <span className="flex h-11 shrink-0 items-center gap-2 border-r border-zinc-100 px-3 text-xs font-bold text-zinc-700">
-                  <Sparkles size={15} className="text-zinc-500" />
+                <button
+                  type="button"
+                  onClick={() => toggleQuickEditMode(selectedItem)}
+                  disabled={!selectedItemCanQuickEdit || selectedItemIsInlineEditing}
+                  className={`flex h-11 shrink-0 items-center gap-2 border-r border-zinc-100 px-3 text-xs font-bold transition-colors ${
+                    selectedItemIsQuickEditing
+                      ? 'bg-zinc-900 text-white'
+                      : 'text-zinc-700 hover:bg-zinc-50 hover:text-zinc-950'
+                  } disabled:cursor-not-allowed disabled:opacity-35`}
+                  title="快捷编辑当前图片（Tab）"
+                >
+                  <Sparkles size={15} className={selectedItemIsQuickEditing ? 'text-white' : 'text-zinc-500'} />
                   快捷编辑 <span className="text-[10px] font-bold text-zinc-300">Tab</span>
-                </span>
+                </button>
                 <button
                   type="button"
                   onClick={() => toggleCropMode(selectedItem)}
@@ -2008,6 +2057,39 @@ const Canvas: React.FC<CanvasProps> = ({
                 {downloadingImageId === selectedItem.id ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
               </button>
             </div>
+            {selectedItemIsQuickEditing && (
+              <form
+                onSubmit={handleInlineImageRedraw}
+                className="flex w-[560px] max-w-[calc(100vw-32px)] items-center gap-2 rounded-[18px] border border-zinc-200 bg-white p-1.5 shadow-[0_16px_44px_-30px_rgba(0,0,0,0.45)]"
+              >
+                <div className="flex h-10 min-w-0 flex-1 items-center gap-2 rounded-[14px] bg-zinc-50 px-3">
+                  <Sparkles size={15} className="shrink-0 text-zinc-400" />
+                  <input
+                    ref={quickEditInputRef}
+                    value={inlineEditPrompt}
+                    onChange={(event) => setInlineEditPromptForItem(selectedItem.id, event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Escape') {
+                        event.preventDefault();
+                        setQuickEditItemId(null);
+                      }
+                    }}
+                    disabled={selectedItemIsInlineEditing}
+                    placeholder="输入一句话快捷编辑这张图..."
+                    className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-zinc-800 outline-none placeholder:text-zinc-400"
+                  />
+                  <span className="hidden shrink-0 text-[10px] font-black uppercase tracking-widest text-zinc-300 sm:block">Esc 关闭</span>
+                </div>
+                <button
+                  type="submit"
+                  disabled={!inlineEditPrompt.trim() || selectedItemIsInlineEditing}
+                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[14px] bg-zinc-900 text-white transition-all hover:bg-zinc-800 active:scale-95 disabled:cursor-not-allowed disabled:opacity-30"
+                  title="提交快捷编辑"
+                >
+                  {selectedItemIsInlineEditing ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
+                </button>
+              </form>
+            )}
             {selectedInlineEditError && (
               <div className="max-w-[520px] rounded-xl bg-red-50 border border-red-100 px-3 py-2 text-[11px] font-bold text-red-500 shadow-lg">
                 {selectedInlineEditError}
