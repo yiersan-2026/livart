@@ -3,7 +3,7 @@ import { Github } from 'lucide-react';
 
 const PROJECT_LINKS = {
   gitee: 'https://gitee.com/sunowen/livart',
-  github: 'https://github.com/sunbowen920617/livart'
+  github: 'https://github.com/yiersan-2026/livart'
 };
 
 const GiteeLogo: React.FC<{ size?: number }> = ({ size = 18 }) => (
