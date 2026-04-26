@@ -19,9 +19,7 @@ import {
 } from './services/gemini';
 import {
   DEFAULT_GENERATED_IMAGE_LONG_SIDE,
-  centerFrameOnRect,
   getAspectRatioFrame,
-  getImageFrameFromSource,
   inferAspectRatioFromDimensions
 } from './services/imageSizing';
 import {
@@ -61,7 +59,8 @@ const CANVAS_TOP_SAFE_GAP = 56;
 const CANVAS_BOTTOM_SAFE_GAP = 128;
 const CANVAS_SIDE_SAFE_GAP = 24;
 const REMOVER_PROMPT = '把圈起来的地方删除掉。';
-const DERIVED_IMAGE_GAP = 32;
+const DERIVED_IMAGE_GAP = 20;
+const AUTO_ARRANGE_IMAGE_GAP = 24;
 const MAX_HISTORY_ENTRIES = 80;
 const DEFAULT_CANVAS_BACKGROUND_COLOR = '#fcfcfc';
 
@@ -129,11 +128,12 @@ const findAvailableCanvasPosition = (
   desiredY: number,
   width: number,
   height: number,
-  visibleRect?: Pick<CanvasItem, 'x' | 'y' | 'width' | 'height'>
+  visibleRect?: Pick<CanvasItem, 'x' | 'y' | 'width' | 'height'>,
+  collisionPadding = 36
 ) => {
   const imageItems = items.filter(item => item.type === 'image' && (item.status !== 'error' || !!item.content));
   const isFree = (x: number, y: number) => (
-    !imageItems.some(item => rectsOverlap({ x, y, width, height }, item))
+    !imageItems.some(item => rectsOverlap({ x, y, width, height }, item, collisionPadding))
   );
   const isVisible = (x: number, y: number) => {
     if (!visibleRect) return true;
@@ -176,6 +176,39 @@ const findAvailableCanvasPosition = (
   return { x: rightMost + PLACEMENT_GAP, y: desiredY };
 };
 
+const findNextRootImageRowPosition = (
+  items: CanvasItem[],
+  desiredX: number,
+  desiredY: number,
+  width: number,
+  height: number
+) => {
+  const imageItems = items.filter(item => (
+    item.type === 'image' &&
+    (item.status !== 'error' || !!item.content)
+  ));
+  if (imageItems.length === 0) {
+    return { x: desiredX, y: desiredY };
+  }
+
+  const imageById = new Map(imageItems.map(item => [item.id, item]));
+  const rootItems = imageItems.filter(item => !item.parentId || !imageById.has(item.parentId));
+  const columnX = rootItems.length > 0
+    ? Math.min(...rootItems.map(item => item.x))
+    : Math.min(...imageItems.map(item => item.x));
+  const nextY = Math.max(...imageItems.map(item => item.y + item.height)) + AUTO_ARRANGE_IMAGE_GAP;
+
+  return findAvailableCanvasPosition(
+    items,
+    columnX,
+    nextY,
+    width,
+    height,
+    undefined,
+    AUTO_ARRANGE_IMAGE_GAP
+  );
+};
+
 const findRightSideCanvasPosition = (
   items: CanvasItem[],
   baseItem: Pick<CanvasItem, 'id' | 'x' | 'y' | 'width' | 'height'>,
@@ -200,6 +233,105 @@ const findRightSideCanvasPosition = (
   }
 
   return { x: desiredX, y: desiredY };
+};
+
+const isArrangeableImageItem = (item: CanvasItem) => (
+  item.type === 'image' &&
+  (item.status !== 'error' || !!item.content)
+);
+
+const sortCanvasItemsTopLeft = (orderById: Map<string, number>) => (left: CanvasItem, right: CanvasItem) => {
+  if (left.y !== right.y) return left.y - right.y;
+  if (left.x !== right.x) return left.x - right.x;
+  return (orderById.get(left.id) || 0) - (orderById.get(right.id) || 0);
+};
+
+const arrangeCanvasImageItems = (items: CanvasItem[]) => {
+  const imageItems = items.filter(isArrangeableImageItem);
+  if (imageItems.length <= 1) return items;
+
+  const orderById = new Map(items.map((item, index) => [item.id, index]));
+  const imageById = new Map(imageItems.map(item => [item.id, item]));
+  const childrenByParentId = new Map<string, CanvasItem[]>();
+
+  imageItems.forEach((item) => {
+    if (!item.parentId || !imageById.has(item.parentId)) return;
+    childrenByParentId.set(item.parentId, [
+      ...(childrenByParentId.get(item.parentId) || []),
+      item
+    ]);
+  });
+
+  childrenByParentId.forEach((children, parentId) => {
+    childrenByParentId.set(parentId, [...children].sort(sortCanvasItemsTopLeft(orderById)));
+  });
+
+  const roots = imageItems
+    .filter(item => !item.parentId || !imageById.has(item.parentId))
+    .sort(sortCanvasItemsTopLeft(orderById));
+  const originX = Math.min(...imageItems.map(item => item.x));
+  const originY = Math.min(...imageItems.map(item => item.y));
+  const positionsById = new Map<string, Pick<CanvasItem, 'x' | 'y'>>();
+  let nextFamilyY = originY;
+
+  const arrangeFamily = (root: CanvasItem) => {
+    if (positionsById.has(root.id)) return;
+
+    const assignedItems = new Map<string, { lane: number; x: number }>();
+    const laneHeights: number[] = [];
+    let nextLane = 1;
+
+    const assignItem = (item: CanvasItem, lane: number, x: number, lineage: Set<string>) => {
+      if (assignedItems.has(item.id) || lineage.has(item.id)) return;
+
+      assignedItems.set(item.id, { lane, x });
+      laneHeights[lane] = Math.max(laneHeights[lane] || 0, item.height);
+
+      const nextLineage = new Set(lineage);
+      nextLineage.add(item.id);
+      const children = childrenByParentId.get(item.id) || [];
+      children.forEach((child, index) => {
+        const childLane = index === 0 ? lane : nextLane++;
+        assignItem(
+          child,
+          childLane,
+          x + item.width + AUTO_ARRANGE_IMAGE_GAP,
+          nextLineage
+        );
+      });
+    };
+
+    assignItem(root, 0, originX, new Set<string>());
+
+    const laneY: number[] = [];
+    let currentY = nextFamilyY;
+    laneHeights.forEach((height, lane) => {
+      laneY[lane] = currentY;
+      currentY += height + AUTO_ARRANGE_IMAGE_GAP;
+    });
+
+    assignedItems.forEach(({ lane, x }, itemId) => {
+      const item = imageById.get(itemId);
+      if (!item) return;
+
+      positionsById.set(itemId, {
+        x: Math.round(x),
+        y: Math.round((laneY[lane] || nextFamilyY) + ((laneHeights[lane] || item.height) - item.height) / 2)
+      });
+    });
+
+    nextFamilyY = currentY;
+  };
+
+  roots.forEach(arrangeFamily);
+  imageItems
+    .sort(sortCanvasItemsTopLeft(orderById))
+    .forEach(arrangeFamily);
+
+  return items.map(item => {
+    const position = positionsById.get(item.id);
+    return position ? { ...item, ...position } : item;
+  });
 };
 
 const cloneCanvasItems = (items: CanvasItem[]) => items.map(item => ({
@@ -710,18 +842,6 @@ function App() {
   }, [isAuthReady, authSession?.token]);
 
   useEffect(() => {
-    if (!isThinking && !hasPendingImageJob) return;
-
-    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = '';
-    };
-
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [isThinking, hasPendingImageJob]);
-
-  useEffect(() => {
     if (!isAuthReady) return;
 
     let isMounted = true;
@@ -863,16 +983,14 @@ function App() {
       waitForImageJob(jobId)
         .then(async (imageResult) => {
           const resultImg = imageResult.image;
-          const finalFrame = await getImageFrameFromSource(
-            resultImg,
-            item.width,
-            item.height,
-            Math.max(item.width, item.height)
-          );
+          const persistedImageItem = await ensureCanvasImageAsset({
+            ...item,
+            content: resultImg,
+            status: 'completed'
+          });
 
           setItems(prev => prev.map(candidate => {
             if (candidate.id !== item.id) return candidate;
-            const centeredFrame = centerFrameOnRect(candidate, finalFrame);
             const parentImage = candidate.parentId
               ? prev.find(prevItem => prevItem.id === candidate.parentId && prevItem.type === 'image') || null
               : null;
@@ -882,8 +1000,10 @@ function App() {
               : rawOptimizedPrompt;
             return {
               ...candidate,
-              ...centeredFrame,
-              content: resultImg,
+              content: persistedImageItem.content,
+              assetId: persistedImageItem.assetId,
+              previewContent: persistedImageItem.previewContent,
+              thumbnailContent: persistedImageItem.thumbnailContent,
               status: 'completed',
               imageJobId: undefined,
               originalPrompt: candidate.originalPrompt || imageResult.originalPrompt,
@@ -1034,19 +1154,42 @@ function App() {
         const newItem: CanvasItem = {
           id: newId,
           type: 'image',
-          content: content,
+          content: '',
           x: (dropX !== undefined ? dropX : (-pan.x + window.innerWidth/2) / zoom) - width / 2,
           y: (dropY !== undefined ? dropY : (-pan.y + window.innerHeight/2) / zoom) - height / 2,
           width: width,
           height: height,
-          status: 'completed',
-          label: file.name,
+          status: 'loading',
+          label: `${file.name} 上传中...`,
           zIndex: 50,
           layers: []
         };
         setItems(prev => [...prev, newItem]);
         setSelectedIds([newId]);
-        focusImageInSidebarInput(newItem);
+        ensureCanvasImageAsset({
+          ...newItem,
+          content,
+          status: 'completed',
+          label: file.name
+        })
+          .then((persistedItem) => {
+            const completedItem = {
+              ...newItem,
+              ...persistedItem,
+              status: 'completed' as const,
+              label: file.name
+            };
+            setItems(prev => prev.map(item => item.id === newId ? completedItem : item));
+            focusImageInSidebarInput(completedItem);
+          })
+          .catch((error) => {
+            const message = error instanceof Error ? error.message : '图片上传失败';
+            setItems(prev => prev.map(item => (
+              item.id === newId
+                ? { ...item, status: 'error', label: message }
+                : item
+            )));
+          });
       };
       img.src = content;
     };
@@ -1078,7 +1221,57 @@ function App() {
     setMessages(prev => [...prev, createChatMessage(text, role, options)]);
   };
 
+  const handleCanvasChatMessage = (
+    text: string,
+    role: 'user' | 'assistant',
+    options: Pick<ChatMessage, 'imageIds'> = {}
+  ) => {
+    setShowSidebar(true);
+    addMessage(text, role, options);
+  };
+
   const handleUpdateItem = (id: string, updates: Partial<CanvasItem>) => {
+    if (isDataImageUrl(updates.content)) {
+      let uploadCandidate: CanvasItem | null = null;
+      setItems(prev => prev.map(item => {
+        if (item.id !== id) return item;
+        const nextItem = { ...item, ...updates };
+        if (nextItem.type === 'image' && nextItem.status === 'completed') {
+          uploadCandidate = nextItem;
+          return {
+            ...nextItem,
+            content: '',
+            status: 'loading',
+            label: `${nextItem.label || '图片'} 上传中...`
+          };
+        }
+        return nextItem;
+      }));
+
+      if (uploadCandidate) {
+        const imageToUpload = uploadCandidate;
+        ensureCanvasImageAsset(imageToUpload)
+          .then((persistedItem) => {
+            const completedItem = {
+              ...imageToUpload,
+              ...persistedItem,
+              status: 'completed' as const
+            };
+            setItems(prev => prev.map(item => item.id === id ? completedItem : item));
+          })
+          .catch((error) => {
+            const message = error instanceof Error ? error.message : '图片上传失败';
+            setItems(prev => prev.map(item => (
+              item.id === id
+                ? { ...item, status: 'error', label: message }
+                : item
+            )));
+          });
+        return;
+      }
+      return;
+    }
+
     setItems(prev => prev.map(item => item.id === id ? { ...item, ...updates } : item));
   };
 
@@ -1129,6 +1322,13 @@ function App() {
     setSelectedImageEditMode(null);
   };
 
+  const handleAutoArrangeImages = () => {
+    if (items.filter(isArrangeableImageItem).length <= 1) return;
+
+    flushCanvasHistory();
+    setItems(prev => arrangeCanvasImageItems(prev));
+  };
+
   const handleSidebarSendMessage = async (text: string, aspectRatio: ImageAspectRatio = 'auto') => {
     addMessage(text, 'user');
     setIsThinking(true);
@@ -1155,13 +1355,12 @@ function App() {
     const canvasCenterY = visibleCanvasRect.y + visibleCanvasRect.height / 2;
     const generatedPosition = editBaseImage
       ? findRightSideCanvasPosition(items, editBaseImage, initialFrame.width, initialFrame.height)
-      : findAvailableCanvasPosition(
+      : findNextRootImageRowPosition(
         items,
         canvasCenterX - initialFrame.width / 2,
         canvasCenterY - initialFrame.height / 2,
         initialFrame.width,
-        initialFrame.height,
-        visibleCanvasRect
+        initialFrame.height
       );
     
     const newItem: CanvasItem = {
@@ -1300,28 +1499,11 @@ function App() {
       }
 
       const resultImg = imageResult.image;
-      const finalFrame = editBaseImage
-        ? initialFrame
-        : await getImageFrameFromSource(
-          resultImg,
-          initialFrame.width,
-          initialFrame.height,
-          Math.max(initialFrame.width, initialFrame.height)
-        );
-      const centeredFrame = centerFrameOnRect(newItem, finalFrame);
-      const positionedFrame = editBaseImage
-        ? centeredFrame
-        : {
-          ...centeredFrame,
-          ...findAvailableCanvasPosition(
-            items,
-            centeredFrame.x,
-            centeredFrame.y,
-            centeredFrame.width,
-            centeredFrame.height,
-            visibleCanvasRect
-          )
-        };
+      const persistedImageItem = await ensureCanvasImageAsset({
+        ...newItem,
+        content: resultImg,
+        status: 'completed'
+      });
       
       setItems(prev => prev.map(i => {
         if (i.id !== newId) return i;
@@ -1331,8 +1513,10 @@ function App() {
           : rawOptimizedPrompt;
         return {
           ...i,
-          ...positionedFrame,
-          content: resultImg,
+          content: persistedImageItem.content,
+          assetId: persistedImageItem.assetId,
+          previewContent: persistedImageItem.previewContent,
+          thumbnailContent: persistedImageItem.thumbnailContent,
           status: 'completed',
           imageJobId: undefined,
           prompt: requestPrompt,
@@ -1341,7 +1525,6 @@ function App() {
           label: text.substring(0, 10) + (text.length > 10 ? '...' : '')
         };
       }));
-      setPan(getPanForCanvasFrame(positionedFrame));
 
       const completionText = editBaseImage
         ? `${editReferenceImages.length > 0 ? '已根据多张引用图完成编辑' : '已根据参考图完成编辑'}：@${newId}`
@@ -1353,7 +1536,12 @@ function App() {
       setSidebarPromptSeed(null);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : '未知错误';
-      setItems(prev => prev.map(i => i.id === newId ? { ...i, status: 'error', imageJobId: undefined } : i));
+      setItems(prev => prev.map(i => i.id === newId ? {
+        ...i,
+        status: 'error',
+        label: errorMessage,
+        imageJobId: undefined
+      } : i));
       addMessage(`出错了，没能完成生成：${errorMessage}`, 'assistant');
     } finally {
       setIsThinking(false);
@@ -1570,6 +1758,36 @@ function App() {
           onItemDelete={(id) => handleDeleteItems([id])}
           onItemDeleteMultiple={handleDeleteItems}
           onItemAdd={(item) => {
+            if (item.type === 'image' && item.status === 'completed' && isDataImageUrl(item.content)) {
+              const uploadingItem: CanvasItem = {
+                ...item,
+                content: '',
+                status: 'loading',
+                label: `${item.label || '图片'} 上传中...`
+              };
+              setItems(prev => [...prev, uploadingItem]);
+              setSelectedIds([item.id]);
+              ensureCanvasImageAsset(item)
+                .then((persistedItem) => {
+                  const completedItem = {
+                    ...item,
+                    ...persistedItem,
+                    status: 'completed' as const
+                  };
+                  setItems(prev => prev.map(candidate => candidate.id === item.id ? completedItem : candidate));
+                  focusImageInSidebarInput(completedItem);
+                })
+                .catch((error) => {
+                  const message = error instanceof Error ? error.message : '图片上传失败';
+                  setItems(prev => prev.map(candidate => (
+                    candidate.id === item.id
+                      ? { ...candidate, status: 'error', label: message }
+                      : candidate
+                  )));
+                });
+              return;
+            }
+
             setItems(prev => [...prev, item]);
             setSelectedIds([item.id]);
             focusImageInSidebarInput(item);
@@ -1577,6 +1795,7 @@ function App() {
           onAddTextAt={addTextItem}
           onAddImageAt={addImageItem}
           onAddToChat={handleAddToChat}
+          onChatMessage={handleCanvasChatMessage}
           canvasTool={canvasTool}
           onCanvasToolChange={setCanvasTool}
           onBeforeCanvasMutation={flushCanvasHistory}
@@ -1609,6 +1828,8 @@ function App() {
           canRedo={canvasHistoryState.canRedo}
           onUndo={undoCanvas}
           onRedo={redoCanvas}
+          canAutoArrangeImages={items.filter(isArrangeableImageItem).length > 1}
+          onAutoArrangeImages={handleAutoArrangeImages}
         />
       </div>
 

@@ -62,7 +62,7 @@ const isDataImageUrl = (value: unknown): value is string => {
 
 export const getAssetIdFromImageUrl = (value: unknown) => {
   if (typeof value !== 'string') return '';
-  const match = value.match(/\/api\/assets\/([^/]+)\/(?:content|preview|thumbnail)(?:[?#].*)?$/);
+  const match = value.match(/\/api\/assets\/([^/]+)\/(?:content|preview|thumbnail|view\/\d+)(?:[?#].*)?$/);
   if (!match) return '';
   try {
     return decodeURIComponent(match[1]);
@@ -73,6 +73,10 @@ export const getAssetIdFromImageUrl = (value: unknown) => {
 
 export const getCanvasItemAssetId = (item: CanvasItem) => {
   return item.assetId || getAssetIdFromImageUrl(item.content) || getAssetIdFromImageUrl(item.previewContent);
+};
+
+const getAssetVariantUrl = (assetId: string | undefined, variant: 'content' | 'preview' | 'thumbnail') => {
+  return assetId ? `/api/assets/${encodeURIComponent(assetId)}/${variant}` : undefined;
 };
 
 const unwrapApiResponse = async <T>(response: Response): Promise<T> => {
@@ -138,11 +142,12 @@ const persistRawImageValue = async (value: string | undefined, filenameSeed: str
 
 const persistCanvasImageValue = async (item: CanvasItem) => {
   if (!isDataImageUrl(item.content)) {
+    const assetId = getCanvasItemAssetId(item) || undefined;
     return {
       content: item.content,
-      assetId: getCanvasItemAssetId(item) || undefined,
-      previewContent: item.previewContent,
-      thumbnailContent: item.thumbnailContent
+      assetId,
+      previewContent: item.previewContent || getAssetVariantUrl(assetId, 'preview'),
+      thumbnailContent: item.thumbnailContent || getAssetVariantUrl(assetId, 'thumbnail')
     };
   }
 

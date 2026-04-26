@@ -30,6 +30,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
   const scrollRef = useRef<HTMLDivElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
   const lastContextImageIdRef = useRef<string | null>(null);
+  const appliedPromptSeedIdRef = useRef<string | null>(null);
 
   const completedImageItems = useMemo(
     () => imageItems.filter(item => item.type === 'image' && item.status === 'completed' && !!item.content),
@@ -43,6 +44,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
   useEffect(() => {
     setInputValue('');
     lastContextImageIdRef.current = null;
+    appliedPromptSeedIdRef.current = null;
   }, [inputResetKey]);
 
   useEffect(() => {
@@ -67,10 +69,12 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
 
   useEffect(() => {
     if (!promptSeed) return;
+    if (appliedPromptSeedIdRef.current === promptSeed.id) return;
 
     const targetImage = completedImageItems.find(item => item.id === promptSeed.imageId);
     if (!targetImage) return;
 
+    appliedPromptSeedIdRef.current = promptSeed.id;
     lastContextImageIdRef.current = targetImage.id;
     const mention = insertImageMention('', targetImage, completedImageItems);
     setInputValue(promptSeed.prompt ? `${mention}${promptSeed.prompt}` : mention);
@@ -174,15 +178,14 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
               type="button"
               onClick={() => onNavigateToImage(item)}
               title={`定位到 @${item.id}`}
-              className="group overflow-hidden rounded-2xl bg-white p-2 text-left shadow-sm ring-1 ring-black/5 transition-all hover:-translate-y-0.5 hover:shadow-md hover:ring-indigo-200 active:scale-[0.99]"
+              className="group relative overflow-hidden rounded-2xl bg-white p-2 text-left shadow-sm ring-1 ring-black/5 transition-all hover:-translate-y-0.5 hover:shadow-md hover:ring-indigo-200 active:scale-[0.99]"
             >
               <div className="overflow-hidden rounded-xl bg-gray-100" style={previewStyle}>
                 <img src={getThumbnailImageSrc(item)} className="h-full w-full object-cover transition-transform group-hover:scale-[1.02]" />
               </div>
-              <div className="mt-2 flex items-center justify-between gap-2 text-[11px] font-black text-indigo-700">
-                <span className="truncate">@{item.id}</span>
-                <span className="shrink-0 rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] text-indigo-500">查看</span>
-              </div>
+              <span className="absolute right-4 top-4 rounded-full bg-white/90 px-2 py-0.5 text-[10px] font-black text-indigo-600 opacity-0 shadow-sm ring-1 ring-black/5 transition-opacity group-hover:opacity-100">
+                查看
+              </span>
             </button>
           );
         })}

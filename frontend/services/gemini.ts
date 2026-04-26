@@ -4,7 +4,6 @@ import type { ImageAspectRatio } from '../types';
 import { aspectRatioToGeminiAspectRatio } from './imageSizing';
 
 const REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
-const JOB_POLL_INTERVAL_MS = 2 * 1000;
 const TEXT_TO_IMAGE_PROXY_URL = '/api/images/generations';
 const IMAGE_TO_IMAGE_PROXY_URL = '/api/images/edits';
 const TEXT_TO_IMAGE_JOB_URL = '/api/image-jobs/generations';
@@ -63,9 +62,62 @@ class ImageJobWebSocketUnavailableError extends Error {
 
 const extractBase64 = (data: string) => data.includes(',') ? data.split(',')[1] : data;
 
+const normalizeImageMimeType = (value: unknown, fallback = 'image/png') => {
+  if (typeof value !== 'string') return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'image/jpg') return 'image/jpeg';
+  return ['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(normalized)
+    ? normalized
+    : fallback;
+};
+
+const inferImageMimeTypeFromBase64 = (base64: string) => {
+  try {
+    const binary = atob(extractBase64(base64).slice(0, 96));
+    const byteAt = (index: number) => binary.charCodeAt(index);
+    if (byteAt(0) === 0x89 && binary.slice(1, 4) === 'PNG') return 'image/png';
+    if (byteAt(0) === 0xff && byteAt(1) === 0xd8 && byteAt(2) === 0xff) return 'image/jpeg';
+    if (binary.slice(0, 4) === 'RIFF' && binary.slice(8, 12) === 'WEBP') return 'image/webp';
+    if (binary.slice(0, 3) === 'GIF') return 'image/gif';
+  } catch {
+    return '';
+  }
+  return '';
+};
+
+const getImageMimeTypeFromPayload = (payload: Record<string, unknown> | undefined, base64: string) => {
+  return normalizeImageMimeType(
+    payload?.mime_type || payload?.mimeType || payload?.content_type || payload?.contentType || payload?.type,
+    inferImageMimeTypeFromBase64(base64) || 'image/png'
+  );
+};
+
+const imageBase64ToDataUrl = (base64: string, payload?: Record<string, unknown>) => {
+  if (base64.startsWith('data:image/')) return base64;
+  return `data:${getImageMimeTypeFromPayload(payload, base64)};base64,${extractBase64(base64)}`;
+};
+
+const getImageExtensionFromMime = (mimeType: string) => {
+  switch (normalizeImageMimeType(mimeType)) {
+    case 'image/jpeg':
+      return '.jpg';
+    case 'image/webp':
+      return '.webp';
+    case 'image/gif':
+      return '.gif';
+    default:
+      return '.png';
+  }
+};
+
 const dataUrlToBlob = async (dataUrl: string) => {
   const response = await fetch(dataUrl);
   return response.blob();
+};
+
+const appendImageBlob = async (formData: FormData, dataUrl: string, filenameSeed: string) => {
+  const blob = await dataUrlToBlob(dataUrl);
+  formData.append('image', blob, `${filenameSeed}${getImageExtensionFromMime(blob.type || 'image/png')}`);
 };
 
 const appendImageEditImages = async (
@@ -77,7 +129,7 @@ const appendImageEditImages = async (
   if (assetOptions.imageAssetId) {
     formData.append('imageAssetId', assetOptions.imageAssetId);
   } else {
-    formData.append('image', await dataUrlToBlob(imageDataUrl), 'canvas.png');
+    await appendImageBlob(formData, imageDataUrl, 'canvas');
   }
 
   const referenceAssetIds = assetOptions.referenceAssetIds || [];
@@ -86,7 +138,7 @@ const appendImageEditImages = async (
     if (referenceAssetId) {
       formData.append('referenceAssetId', referenceAssetId);
     } else {
-      formData.append('image', await dataUrlToBlob(referenceImageDataUrl), `reference-${index + 1}.png`);
+      await appendImageBlob(formData, referenceImageDataUrl, `reference-${index + 1}`);
     }
   }
 };
@@ -123,8 +175,6 @@ const imageEditProxyHeaders = (config: ReturnType<typeof getApiConfig>) => ({
   'X-Livart-Api-Key': config.apiKey,
   'X-Livart-Upstream-Url': config.imageToImageUrl
 });
-
-const wait = (delayMs: number) => new Promise(resolve => setTimeout(resolve, delayMs));
 
 const getImageJobWebSocketUrl = () => {
   if (typeof window === 'undefined') return '';
@@ -303,7 +353,7 @@ const callImageEditApi = async (
 const extractImageFromResponse = (data: any): string => {
   const imageData = data.data?.[0] || data.images?.[0];
   if (imageData?.b64_json) {
-    return `data:image/png;base64,${imageData.b64_json}`;
+    return imageBase64ToDataUrl(imageData.b64_json, imageData);
   }
   if (imageData?.url) {
     return imageData.url;
@@ -311,8 +361,9 @@ const extractImageFromResponse = (data: any): string => {
 
   if (data.candidates?.[0]?.content?.parts) {
     for (const part of data.candidates[0].content.parts) {
-      if (part.inlineData) {
-        return `data:image/png;base64,${part.inlineData.data}`;
+      const inlineData = part.inlineData || part.inline_data;
+      if (inlineData?.data) {
+        return imageBase64ToDataUrl(inlineData.data, inlineData);
       }
     }
   }
@@ -499,23 +550,6 @@ export const getImageJob = async (jobId: string): Promise<ImageJobStatus> => {
   return data;
 };
 
-const waitForImageJobByPolling = async (jobId: string) => {
-  const deadlineAt = Date.now() + REQUEST_TIMEOUT_MS;
-
-  while (Date.now() < deadlineAt) {
-    const job = await getImageJob(jobId);
-    if (job.status === 'completed') {
-      return extractImageResultFromJob(job);
-    }
-    if (job.status === 'error') {
-      throw new Error(extractImageJobError(job.error, job));
-    }
-    await wait(JOB_POLL_INTERVAL_MS);
-  }
-
-  throw new Error('图片任务超过 10 分钟仍未完成，请稍后刷新页面查看');
-};
-
 const waitForImageJobByWebSocket = async (jobId: string) => {
   const session = getStoredAuthSession();
   const socketUrl = getImageJobWebSocketUrl();
@@ -621,14 +655,7 @@ const waitForImageJobByWebSocket = async (jobId: string) => {
 };
 
 export const waitForImageJob = async (jobId: string) => {
-  try {
-    return await waitForImageJobByWebSocket(jobId);
-  } catch (error) {
-    if (error instanceof ImageJobWebSocketUnavailableError) {
-      return waitForImageJobByPolling(jobId);
-    }
-    throw error;
-  }
+  return waitForImageJobByWebSocket(jobId);
 };
 
 /**

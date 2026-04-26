@@ -13,6 +13,7 @@ import {
 import { canUseImageJobs, editImage, generateWorkflowImage, type ImageGenerationResult, submitImageEditJob, waitForImageJob } from '../services/gemini';
 import {
   centerFrameOnRect,
+  fitDimensionsToLongSide,
   getAspectRatioFrame,
   getImageFrameFromSource,
   inferAspectRatioFromDimensions
@@ -41,6 +42,7 @@ interface CanvasProps {
   onAddTextAt: (x: number, y: number) => void;
   onAddImageAt: (file: File, x: number, y: number) => void;
   onAddToChat: (item: CanvasItem) => void;
+  onChatMessage: (text: string, role: 'user' | 'assistant', options?: { imageIds?: string[] }) => void;
   onImagePromptRequest: (item: CanvasItem, prompt?: string, mode?: 'local-redraw' | 'remover') => void;
   onBeforeCanvasMutation: () => void;
   canvasTool: CanvasTool;
@@ -70,9 +72,11 @@ const INLINE_IMAGE_EDITOR_GAP = 16;
 const INLINE_IMAGE_TOOLBAR_HEIGHT = 44;
 const QUICK_EDIT_INPUT_HEIGHT = 52;
 const QUICK_EDIT_STACK_GAP = 8;
+const QUICK_EDIT_FOCUS_MIN_ZOOM = 0.25;
+const QUICK_EDIT_FOCUS_MAX_ZOOM = 1.45;
 const CANVAS_OVERLAY_MARGIN = 16;
 const DEFAULT_INLINE_IMAGE_EDITOR_SIZE = { width: 760, height: INLINE_IMAGE_TOOLBAR_HEIGHT };
-const DERIVED_IMAGE_GAP = 32;
+const DERIVED_IMAGE_GAP = 20;
 
 const clampValue = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
@@ -179,7 +183,7 @@ const loadImageElement = (src: string) => new Promise<HTMLImageElement>((resolve
 });
 
 const createCroppedImageDataUrl = async (item: CanvasItem, cropRect: CropRect) => {
-  const source = getOriginalImageSrc(item) || getCanvasImageSrc(item);
+  const source = getCanvasImageSrc(item);
   if (!source) throw new Error('图片缺少可裁剪内容');
 
   const image = await loadImageElement(source);
@@ -545,7 +549,7 @@ const ImageGenerationSkeleton: React.FC<{ hasPreview: boolean }> = ({ hasPreview
 );
 
 const Canvas: React.FC<CanvasProps> = ({ 
-  items, zoom, onZoomChange, pan, onPanChange, backgroundColor, onItemUpdate, onItemDelete, onItemDeleteMultiple, onItemAdd, onAddTextAt, onAddImageAt, onAddToChat, onImagePromptRequest, onBeforeCanvasMutation, canvasTool, onCanvasToolChange, selectedIds, setSelectedIds
+  items, zoom, onZoomChange, pan, onPanChange, backgroundColor, onItemUpdate, onItemDelete, onItemDeleteMultiple, onItemAdd, onAddTextAt, onAddImageAt, onAddToChat, onChatMessage, onImagePromptRequest, onBeforeCanvasMutation, canvasTool, onCanvasToolChange, selectedIds, setSelectedIds
 }) => {
   const [dragState, setDragState] = useState<{ id: string, startX: number, startY: number } | null>(null);
   const [resizeState, setResizeState] = useState<{ 
@@ -598,7 +602,6 @@ const Canvas: React.FC<CanvasProps> = ({
   const activeImageMaskStrokeColor = selectedItemIsRemover ? 'rgba(239, 68, 68, 0.55)' : 'rgba(99, 102, 241, 0.55)';
   const selectedInlineEditError = selectedItem ? inlineEditErrors[selectedItem.id] : '';
   const inlineEditPrompt = selectedItem?.type === 'image' ? inlineEditPrompts[selectedItem.id] || '' : '';
-  const hasActiveCanvasGeneration = isGenerating || inlineEditingIds.size > 0;
   const completedImageItems = useMemo(
     () => items.filter(item => item.type === 'image' && item.status === 'completed' && !!item.content),
     [items]
@@ -620,6 +623,26 @@ const Canvas: React.FC<CanvasProps> = ({
     const referenceImages = completedImageItems.filter(item => item.id !== parentImage.id);
     return normalizeOptimizedPromptImageReferences(selectedItem.optimizedPrompt, parentImage, referenceImages, completedImageItems);
   }, [completedImageItems, imageItemById, selectedItem]);
+  const handleCanvasImageLoad = (
+    event: React.SyntheticEvent<HTMLImageElement>,
+    item: CanvasItem
+  ) => {
+    if (item.type !== 'image' || item.status !== 'completed') return;
+
+    const image = event.currentTarget;
+    if (!image.naturalWidth || !image.naturalHeight) return;
+
+    const nextFrame = fitDimensionsToLongSide(
+      image.naturalWidth,
+      image.naturalHeight,
+      Math.max(item.width, item.height)
+    );
+    const currentRatio = item.width / item.height;
+    const nextRatio = nextFrame.width / nextFrame.height;
+    if (Math.abs(Math.log(currentRatio / nextRatio)) < 0.015) return;
+
+    onItemUpdate(item.id, centerFrameOnRect(item, nextFrame));
+  };
   const selectedImageToolbarPosition = useMemo(() => {
     const viewportWidth = canvasViewportSize.width;
     const viewportHeight = canvasViewportSize.height;
@@ -637,14 +660,10 @@ const Canvas: React.FC<CanvasProps> = ({
     const imageLeft = pan.x + selectedItem.x * safeZoom;
     const imageTop = pan.y + selectedItem.y * safeZoom;
     const imageWidth = selectedItem.width * safeZoom;
-    const imageHeight = selectedItem.height * safeZoom;
     const editorWidth = inlineEditorSize.width || DEFAULT_INLINE_IMAGE_EDITOR_SIZE.width;
-    const expectedEditorHeight = selectedItemIsQuickEditing
-      ? INLINE_IMAGE_TOOLBAR_HEIGHT + QUICK_EDIT_STACK_GAP + QUICK_EDIT_INPUT_HEIGHT
-      : INLINE_IMAGE_TOOLBAR_HEIGHT;
     const editorHeight = Math.max(
       inlineEditorSize.height || DEFAULT_INLINE_IMAGE_EDITOR_SIZE.height,
-      expectedEditorHeight
+      INLINE_IMAGE_TOOLBAR_HEIGHT
     );
     let screenLeft = imageLeft + imageWidth / 2 - editorWidth / 2;
 
@@ -672,7 +691,46 @@ const Canvas: React.FC<CanvasProps> = ({
       transform: `scale(${1 / safeZoom})`,
       transformOrigin: 'top left'
     };
-  }, [canvasViewportSize, inlineEditorSize, pan, selectedItem, selectedItemIsQuickEditing, zoom]);
+  }, [canvasViewportSize, inlineEditorSize, pan, selectedItem, zoom]);
+
+  const selectedQuickEditInputPosition = useMemo(() => {
+    const viewportWidth = canvasViewportSize.width;
+
+    if (!selectedItem || selectedItem.type !== 'image') {
+      return {
+        left: 0,
+        top: 0,
+        transform: 'scale(1)',
+        transformOrigin: 'top left'
+      };
+    }
+
+    const safeZoom = zoom || 1;
+    const imageLeft = pan.x + selectedItem.x * safeZoom;
+    const imageTop = pan.y + selectedItem.y * safeZoom;
+    const imageWidth = selectedItem.width * safeZoom;
+    const imageHeight = selectedItem.height * safeZoom;
+    const inputWidth = Math.min(560, Math.max(280, (viewportWidth || 560) - CANVAS_OVERLAY_MARGIN * 2));
+    let screenLeft = imageLeft + imageWidth / 2 - inputWidth / 2;
+
+    if (viewportWidth > 0) {
+      screenLeft = clampValue(
+        screenLeft,
+        CANVAS_OVERLAY_MARGIN,
+        Math.max(CANVAS_OVERLAY_MARGIN, viewportWidth - CANVAS_OVERLAY_MARGIN - inputWidth)
+      );
+    }
+
+    const screenTop = imageTop + imageHeight + INLINE_IMAGE_EDITOR_GAP;
+
+    return {
+      left: (screenLeft - pan.x) / safeZoom,
+      top: (screenTop - pan.y) / safeZoom,
+      width: inputWidth,
+      transform: `scale(${1 / safeZoom})`,
+      transformOrigin: 'top left'
+    };
+  }, [canvasViewportSize.width, pan, selectedItem, zoom]);
 
   // 全局右键菜单状态
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, id: string } | null>(null);
@@ -750,18 +808,6 @@ const Canvas: React.FC<CanvasProps> = ({
     selectedItem?.optimizedPrompt,
     selectedItem?.prompt
   ]);
-
-  useEffect(() => {
-    if (!hasActiveCanvasGeneration) return;
-
-    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = '';
-    };
-
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [hasActiveCanvasGeneration]);
 
   useEffect(() => {
     if (!cropItemId || selectedIds.includes(cropItemId)) return;
@@ -933,12 +979,38 @@ const Canvas: React.FC<CanvasProps> = ({
     setActiveTool('select');
   };
 
+  const focusImageForQuickEdit = (item: CanvasItem) => {
+    const viewportWidth = canvasViewportSize.width || containerRef.current?.clientWidth || window.innerWidth;
+    const viewportHeight = canvasViewportSize.height || containerRef.current?.clientHeight || window.innerHeight;
+    if (viewportWidth <= 0 || viewportHeight <= 0 || item.width <= 0 || item.height <= 0) return;
+
+    const sideMargin = Math.max(72, Math.min(180, viewportWidth * 0.16));
+    const topReserve = Math.max(88, Math.min(132, viewportHeight * 0.18));
+    const bottomReserve = Math.max(132, Math.min(180, viewportHeight * 0.24));
+    const availableWidth = Math.max(240, viewportWidth - sideMargin * 2);
+    const availableHeight = Math.max(240, viewportHeight - topReserve - bottomReserve);
+    const fitZoom = Math.min(availableWidth / item.width, availableHeight / item.height);
+    const nextZoom = clampValue(fitZoom, QUICK_EDIT_FOCUS_MIN_ZOOM, QUICK_EDIT_FOCUS_MAX_ZOOM);
+    const imageScreenWidth = item.width * nextZoom;
+    const imageScreenHeight = item.height * nextZoom;
+    const imageScreenLeft = (viewportWidth - imageScreenWidth) / 2;
+    const imageScreenTop = topReserve + Math.max(0, (availableHeight - imageScreenHeight) / 2);
+
+    onZoomChange(nextZoom, { x: viewportWidth / 2, y: viewportHeight / 2 });
+    onPanChange({
+      x: imageScreenLeft - item.x * nextZoom,
+      y: imageScreenTop - item.y * nextZoom
+    });
+  };
+
   const toggleQuickEditMode = (item: CanvasItem) => {
     if (item.type !== 'image' || item.status !== 'completed' || !item.content) return;
 
     resetImageToolModes();
     clearInlineEditError(item.id);
-    setQuickEditItemId(currentId => currentId === item.id ? null : item.id);
+    const isOpening = quickEditItemId !== item.id;
+    setQuickEditItemId(isOpening ? item.id : null);
+    if (isOpening) focusImageForQuickEdit(item);
   };
 
   const toggleCropMode = (item: CanvasItem) => {
@@ -1452,10 +1524,16 @@ const Canvas: React.FC<CanvasProps> = ({
         ? `${REMOVER_PROMPT} 用户补充要求：${rawPrompt}`
         : REMOVER_PROMPT
       : rawPrompt;
+    const userMessage = isRemoverMode
+      ? rawPrompt
+        ? `删除 @${targetItem.id} 圈选区域：${rawPrompt}`
+        : `删除 @${targetItem.id} 圈选区域`
+      : `编辑 @${targetItem.id}：${rawPrompt}`;
     const useLocalMask = localRedrawItemId === targetItem.id || localRemoverItemId === targetItem.id;
     let resultItemId: string | null = null;
     setInlineEditingForItem(targetItem.id, true);
     clearInlineEditError(targetItem.id);
+    onChatMessage(userMessage, 'user', { imageIds: [targetItem.id] });
 
     try {
       const currentMaskData = useLocalMask
@@ -1610,7 +1688,6 @@ const Canvas: React.FC<CanvasProps> = ({
         items
       );
       onItemUpdate(newId, {
-        ...centerFrameOnRect(resultItem, resultFrame),
         content: result,
         status: 'completed',
         imageJobId: undefined,
@@ -1620,6 +1697,15 @@ const Canvas: React.FC<CanvasProps> = ({
           ? '删除物体'
           : rawPrompt.substring(0, 16) + (rawPrompt.length > 16 ? '...' : '')
       });
+      onChatMessage(
+        isRemoverMode
+          ? `已完成删除物体：@${newId}`
+          : useLocalMask
+            ? `已完成局部重绘：@${newId}`
+            : `已完成单图编辑：@${newId}`,
+        'assistant',
+        { imageIds: [newId] }
+      );
       setInlineEditPromptForItem(targetItem.id, '');
       setQuickEditItemId(null);
       if (isRemoverMode) {
@@ -1653,6 +1739,7 @@ const Canvas: React.FC<CanvasProps> = ({
         setActiveTool('brush');
       }
       setInlineEditErrors(prev => ({ ...prev, [targetItem.id]: message }));
+      onChatMessage(`出错了，没能完成单图编辑：${message}`, 'assistant');
     } finally {
       setInlineEditingForItem(targetItem.id, false);
     }
@@ -1832,9 +1919,23 @@ const Canvas: React.FC<CanvasProps> = ({
               ) : item.type === 'workflow' ? (
                 <div className="w-full h-full bg-white/30" />
               ) : (() => {
-                const imageSrc = getCanvasImageSrc(item);
+                const imageSrc = getCanvasImageSrc(item, zoom);
+                if (item.status === 'error') {
+                  return (
+                    <div className="flex h-full w-full flex-col items-center justify-center gap-2 border border-red-200 bg-red-50 px-4 text-center">
+                      <div className="text-sm font-bold text-red-600">生成失败</div>
+                      <div className="max-w-full break-words text-[11px] leading-relaxed text-red-500">
+                        {item.label || '图片生成失败，请重新尝试'}
+                      </div>
+                    </div>
+                  );
+                }
                 return imageSrc ? (
-                  <img src={imageSrc} className="w-full h-full object-contain pointer-events-none" />
+                  <img
+                    src={imageSrc}
+                    onLoad={(event) => handleCanvasImageLoad(event, item)}
+                    className="block w-full h-full object-contain pointer-events-none"
+                  />
                 ) : item.status === 'loading' ? (
                   <div className="h-full w-full bg-zinc-50" />
                 ) : (
@@ -1844,7 +1945,7 @@ const Canvas: React.FC<CanvasProps> = ({
                 );
               })()}
               {item.type === 'image' && item.status === 'loading' && (
-                <ImageGenerationSkeleton hasPreview={!!getCanvasImageSrc(item)} />
+                <ImageGenerationSkeleton hasPreview={!!getCanvasImageSrc(item, zoom)} />
               )}
               {renderWorkflowDrawingLayer(item)}
               {renderImageMaskLayer(item)}
@@ -1905,7 +2006,6 @@ const Canvas: React.FC<CanvasProps> = ({
             }}
           >
             <div
-              ref={imageToolbarRef}
               className="flex flex-col items-center gap-2 animate-in fade-in zoom-in-95"
               style={{
                 transform: selectedImageToolbarPosition.transform,
@@ -1913,7 +2013,7 @@ const Canvas: React.FC<CanvasProps> = ({
               }}
               onMouseDown={(event) => event.stopPropagation()}
             >
-            <div className="relative h-11 w-max overflow-hidden rounded-[14px] border border-zinc-200 bg-white pr-11 shadow-[0_14px_40px_-26px_rgba(0,0,0,0.5)]">
+            <div ref={imageToolbarRef} className="relative h-11 w-max overflow-hidden rounded-[14px] border border-zinc-200 bg-white pr-11 shadow-[0_14px_40px_-26px_rgba(0,0,0,0.5)]">
               <div className="flex h-full items-center pr-2">
                 <button
                   type="button"
@@ -2063,45 +2163,60 @@ const Canvas: React.FC<CanvasProps> = ({
                 {downloadingImageId === selectedItem.id ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
               </button>
             </div>
-            {selectedItemIsQuickEditing && (
-              <form
-                onSubmit={handleInlineImageRedraw}
-                className="flex w-[560px] max-w-[calc(100vw-32px)] items-center gap-2 rounded-[18px] border border-zinc-200 bg-white p-1.5 shadow-[0_16px_44px_-30px_rgba(0,0,0,0.45)]"
-              >
-                <div className="flex h-10 min-w-0 flex-1 items-center gap-2 rounded-[14px] bg-zinc-50 px-3">
-                  <Sparkles size={15} className="shrink-0 text-zinc-400" />
-                  <input
-                    ref={quickEditInputRef}
-                    value={inlineEditPrompt}
-                    onChange={(event) => setInlineEditPromptForItem(selectedItem.id, event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Escape') {
-                        event.preventDefault();
-                        setQuickEditItemId(null);
-                      }
-                    }}
-                    disabled={selectedItemIsInlineEditing}
-                    placeholder="输入一句话快捷编辑这张图..."
-                    className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-zinc-800 outline-none placeholder:text-zinc-400"
-                  />
-                  <span className="hidden shrink-0 text-[10px] font-black uppercase tracking-widest text-zinc-300 sm:block">Esc 关闭</span>
-                </div>
-                <button
-                  type="submit"
-                  disabled={!inlineEditPrompt.trim() || selectedItemIsInlineEditing}
-                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[14px] bg-zinc-900 text-white transition-all hover:bg-zinc-800 active:scale-95 disabled:cursor-not-allowed disabled:opacity-30"
-                  title="提交快捷编辑"
-                >
-                  {selectedItemIsInlineEditing ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
-                </button>
-              </form>
-            )}
             {selectedInlineEditError && (
               <div className="max-w-[520px] rounded-xl bg-red-50 border border-red-100 px-3 py-2 text-[11px] font-bold text-red-500 shadow-lg">
                 {selectedInlineEditError}
               </div>
             )}
             </div>
+          </div>
+        )}
+
+        {selectedItem?.type === 'image' && selectedIds.length === 1 && selectedItemIsQuickEditing && !isDraggingSelectedImage && (
+          <div
+            className="absolute z-[2000000] pointer-events-auto"
+            style={{
+              left: selectedQuickEditInputPosition.left,
+              top: selectedQuickEditInputPosition.top
+            }}
+          >
+            <form
+              onSubmit={handleInlineImageRedraw}
+              className="flex items-center gap-2 rounded-[18px] border border-zinc-200 bg-white p-1.5 shadow-[0_16px_44px_-30px_rgba(0,0,0,0.45)] animate-in fade-in zoom-in-95"
+              style={{
+                width: selectedQuickEditInputPosition.width,
+                transform: selectedQuickEditInputPosition.transform,
+                transformOrigin: selectedQuickEditInputPosition.transformOrigin
+              }}
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <div className="flex h-10 min-w-0 flex-1 items-center gap-2 rounded-[14px] bg-zinc-50 px-3">
+                <Sparkles size={15} className="shrink-0 text-zinc-400" />
+                <input
+                  ref={quickEditInputRef}
+                  value={inlineEditPrompt}
+                  onChange={(event) => setInlineEditPromptForItem(selectedItem.id, event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') {
+                      event.preventDefault();
+                      setQuickEditItemId(null);
+                    }
+                  }}
+                  disabled={selectedItemIsInlineEditing}
+                  placeholder="输入一句话快捷编辑这张图..."
+                  className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-zinc-800 outline-none placeholder:text-zinc-400"
+                />
+                <span className="hidden shrink-0 text-[10px] font-black uppercase tracking-widest text-zinc-300 sm:block">Esc 关闭</span>
+              </div>
+              <button
+                type="submit"
+                disabled={!inlineEditPrompt.trim() || selectedItemIsInlineEditing}
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[14px] bg-zinc-900 text-white transition-all hover:bg-zinc-800 active:scale-95 disabled:cursor-not-allowed disabled:opacity-30"
+                title="提交快捷编辑"
+              >
+                {selectedItemIsInlineEditing ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
+              </button>
+            </form>
           </div>
         )}
       </div>

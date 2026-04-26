@@ -37,9 +37,12 @@ public class AssetService {
     private static final int PREVIEW_MAX_SIDE = 1600;
     private static final int THUMBNAIL_MAX_SIDE = 512;
     private static final int MODEL_INPUT_MAX_SIDE = 2048;
-    private static final float PREVIEW_JPEG_QUALITY = 0.84f;
-    private static final float THUMBNAIL_JPEG_QUALITY = 0.78f;
+    private static final float PREVIEW_WEBP_QUALITY = 0.82f;
+    private static final float THUMBNAIL_WEBP_QUALITY = 0.76f;
+    private static final float CANVAS_VIEW_WEBP_QUALITY = 0.82f;
     private static final float MODEL_INPUT_JPEG_QUALITY = 0.86f;
+    private static final String WEBP_FORMAT = "webp";
+    private static final String WEBP_CONTENT_TYPE = "image/webp";
 
     private final AssetMapper assetMapper;
     private final CanvasMapper canvasMapper;
@@ -59,6 +62,7 @@ public class AssetService {
     @PostConstruct
     public void ensureBucketExists() {
         try {
+            ImageIO.scanForPlugins();
             boolean exists = minioClient.bucketExists(BucketExistsArgs.builder()
                     .bucket(properties.minio().bucket())
                     .build());
@@ -144,21 +148,28 @@ public class AssetService {
     public AssetContent getModelInputContentForUser(UUID userId, UUID assetId) {
         AssetEntity entity = requireUserAsset(userId, assetId);
         byte[] originalBytes = readOriginalBytes(entity);
+        PreparedImageContent preparedImage = prepareModelInputImage(originalBytes, entity.getMimeType());
+        return new AssetContent(entity, new ByteArrayInputStream(preparedImage.bytes()), preparedImage.contentType());
+    }
+
+    public PreparedImageContent prepareModelInputImage(byte[] originalBytes, String contentType) {
+        String normalizedContentType = normalizeMimeType(contentType);
         BufferedImage image = readImage(originalBytes);
         if (image == null) {
-            return new AssetContent(entity, new ByteArrayInputStream(originalBytes), entity.getMimeType());
+            return new PreparedImageContent(originalBytes, normalizedContentType);
         }
 
         try {
-            EncodedImage encoded = encodeVariant(image, MODEL_INPUT_MAX_SIDE, MODEL_INPUT_JPEG_QUALITY);
+            EncodedImage encoded = encodeJpegOrPngVariant(image, MODEL_INPUT_MAX_SIDE, MODEL_INPUT_JPEG_QUALITY);
             boolean resized = Math.max(image.getWidth(), image.getHeight()) > MODEL_INPUT_MAX_SIDE;
-            if (resized || encoded.bytes().length < originalBytes.length) {
-                return new AssetContent(entity, new ByteArrayInputStream(encoded.bytes()), encoded.contentType());
+            boolean needsCompatibilityConversion = "image/webp".equals(normalizedContentType);
+            if (resized || needsCompatibilityConversion || encoded.bytes().length < originalBytes.length) {
+                return new PreparedImageContent(encoded.bytes(), encoded.contentType());
             }
         } catch (IOException ignored) {
         }
 
-        return new AssetContent(entity, new ByteArrayInputStream(originalBytes), entity.getMimeType());
+        return new PreparedImageContent(originalBytes, normalizedContentType);
     }
 
     private AssetEntity requireUserAsset(UUID userId, UUID assetId) {
@@ -194,11 +205,22 @@ public class AssetService {
     }
 
     public AssetContent getPreview(UUID assetId) {
-        return getVariantContent(assetId, "preview", PREVIEW_MAX_SIDE, PREVIEW_JPEG_QUALITY);
+        return getVariantContent(assetId, "preview", PREVIEW_MAX_SIDE, PREVIEW_WEBP_QUALITY);
     }
 
     public AssetContent getThumbnail(UUID assetId) {
-        return getVariantContent(assetId, "thumbnail", THUMBNAIL_MAX_SIDE, THUMBNAIL_JPEG_QUALITY);
+        return getVariantContent(assetId, "thumbnail", THUMBNAIL_MAX_SIDE, THUMBNAIL_WEBP_QUALITY);
+    }
+
+    public AssetContent getCanvasView(UUID assetId, int requestedWidth) {
+        int width = CanvasViewVariantPolicy.normalizeWidth(requestedWidth);
+        return getVariantContent(
+                assetId,
+                CanvasViewVariantPolicy.variantName(width),
+                width,
+                CANVAS_VIEW_WEBP_QUALITY,
+                ResizeMode.MAX_WIDTH
+        );
     }
 
     private void validateImage(MultipartFile file) {
@@ -268,17 +290,27 @@ public class AssetService {
 
     private void uploadImageVariants(String objectKey, BufferedImage image) throws Exception {
         if (image == null) return;
-        uploadImageVariant(variantObjectKey(objectKey, "preview", image), image, PREVIEW_MAX_SIDE, PREVIEW_JPEG_QUALITY);
-        uploadImageVariant(variantObjectKey(objectKey, "thumbnail", image), image, THUMBNAIL_MAX_SIDE, THUMBNAIL_JPEG_QUALITY);
+        uploadImageVariant(variantObjectKey(objectKey, "preview", WEBP_FORMAT), image, PREVIEW_MAX_SIDE, PREVIEW_WEBP_QUALITY, ResizeMode.MAX_SIDE);
+        uploadImageVariant(variantObjectKey(objectKey, "thumbnail", WEBP_FORMAT), image, THUMBNAIL_MAX_SIDE, THUMBNAIL_WEBP_QUALITY, ResizeMode.MAX_SIDE);
+        for (int width : CanvasViewVariantPolicy.WIDTH_TIERS) {
+            uploadImageVariant(
+                    variantObjectKey(objectKey, CanvasViewVariantPolicy.variantName(width), WEBP_FORMAT),
+                    image,
+                    width,
+                    CANVAS_VIEW_WEBP_QUALITY,
+                    ResizeMode.MAX_WIDTH
+            );
+        }
     }
 
     private void uploadImageVariant(
             String objectKey,
             BufferedImage source,
-            int maxSide,
-            float jpegQuality
+            int maxDimension,
+            float webpQuality,
+            ResizeMode resizeMode
     ) throws Exception {
-        EncodedImage encoded = encodeVariant(source, maxSide, jpegQuality);
+        EncodedImage encoded = encodeWebpVariant(source, maxDimension, webpQuality, resizeMode);
         try (InputStream inputStream = new ByteArrayInputStream(encoded.bytes())) {
             minioClient.putObject(PutObjectArgs.builder()
                     .bucket(properties.minio().bucket())
@@ -289,45 +321,102 @@ public class AssetService {
         }
     }
 
-    private AssetContent getVariantContent(UUID assetId, String variant, int maxSide, float jpegQuality) {
+    private AssetContent getVariantContent(UUID assetId, String variant, int maxSide, float webpQuality) {
+        return getVariantContent(assetId, variant, maxSide, webpQuality, ResizeMode.MAX_SIDE);
+    }
+
+    private AssetContent getVariantContent(
+            UUID assetId,
+            String variant,
+            int maxDimension,
+            float webpQuality,
+            ResizeMode resizeMode
+    ) {
         AssetEntity entity = assetMapper.findById(assetId);
         if (entity == null) {
             throw new ApiException(HttpStatus.NOT_FOUND, "ASSET_NOT_FOUND", "图片资源不存在");
+        }
+
+        AssetContent webpContent = tryOpenVariant(entity, variantObjectKey(entity.getObjectKey(), variant, WEBP_FORMAT));
+        if (webpContent != null) {
+            return webpContent;
+        }
+
+        AssetContent generatedWebpContent = generateVariantFromOriginal(entity, variant, maxDimension, webpQuality, resizeMode);
+        if (generatedWebpContent != null) {
+            return generatedWebpContent;
         }
 
         for (String objectKey : List.of(
                 variantObjectKey(entity.getObjectKey(), variant, "jpg"),
                 variantObjectKey(entity.getObjectKey(), variant, "png")
         )) {
-            try {
-                GetObjectResponse object = minioClient.getObject(GetObjectArgs.builder()
-                        .bucket(properties.minio().bucket())
-                        .object(objectKey)
-                        .build());
-                return new AssetContent(entity, object, variantContentType(objectKey));
-            } catch (Exception ignored) {
-            }
+            AssetContent legacyContent = tryOpenVariant(entity, objectKey);
+            if (legacyContent != null) return legacyContent;
         }
-        return generateVariantFromOriginal(entity, maxSide, jpegQuality);
+
+        return getContent(entity.getId());
     }
 
-    private AssetContent generateVariantFromOriginal(AssetEntity entity, int maxSide, float jpegQuality) {
+    private AssetContent tryOpenVariant(AssetEntity entity, String objectKey) {
+        try {
+            GetObjectResponse object = minioClient.getObject(GetObjectArgs.builder()
+                    .bucket(properties.minio().bucket())
+                    .object(objectKey)
+                    .build());
+            return new AssetContent(entity, object, variantContentType(objectKey));
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private AssetContent generateVariantFromOriginal(
+            AssetEntity entity,
+            String variant,
+            int maxDimension,
+            float webpQuality,
+            ResizeMode resizeMode
+    ) {
         try (GetObjectResponse object = minioClient.getObject(GetObjectArgs.builder()
                 .bucket(properties.minio().bucket())
                 .object(entity.getObjectKey())
                 .build())) {
             BufferedImage image = ImageIO.read(object);
             if (image == null) {
-                return getContent(entity.getId());
+                return null;
             }
-            EncodedImage encoded = encodeVariant(image, maxSide, jpegQuality);
+            EncodedImage encoded = encodeWebpVariant(image, maxDimension, webpQuality, resizeMode);
+            String generatedObjectKey = variantObjectKey(entity.getObjectKey(), variant, WEBP_FORMAT);
+            try (InputStream inputStream = new ByteArrayInputStream(encoded.bytes())) {
+                minioClient.putObject(PutObjectArgs.builder()
+                        .bucket(properties.minio().bucket())
+                        .object(generatedObjectKey)
+                        .stream(inputStream, encoded.bytes().length, -1)
+                        .contentType(encoded.contentType())
+                        .build());
+            }
             return new AssetContent(entity, new ByteArrayInputStream(encoded.bytes()), encoded.contentType());
         } catch (Exception exception) {
-            return getContent(entity.getId());
+            return null;
         }
     }
 
-    private EncodedImage encodeVariant(BufferedImage source, int maxSide, float jpegQuality) throws IOException {
+    private EncodedImage encodeWebpVariant(
+            BufferedImage source,
+            int maxDimension,
+            float webpQuality,
+            ResizeMode resizeMode
+    ) throws IOException {
+        BufferedImage resized = switch (resizeMode) {
+            case MAX_SIDE -> resizeToMaxSide(source, maxDimension);
+            case MAX_WIDTH -> resizeToMaxWidth(source, maxDimension);
+        };
+        ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+        writeCompressedImage(resized, WEBP_FORMAT, outputStream, webpQuality);
+        return new EncodedImage(outputStream.toByteArray(), WEBP_CONTENT_TYPE);
+    }
+
+    private EncodedImage encodeJpegOrPngVariant(BufferedImage source, int maxSide, float jpegQuality) throws IOException {
         BufferedImage resized = resizeToMaxSide(source, maxSide);
         boolean hasAlpha = resized.getColorModel().hasAlpha();
         String format = hasAlpha ? "png" : "jpg";
@@ -352,6 +441,21 @@ public class AssetService {
         double scale = Math.min(1.0, (double) maxSide / longestSide);
         int targetWidth = Math.max(1, (int) Math.round(sourceWidth * scale));
         int targetHeight = Math.max(1, (int) Math.round(sourceHeight * scale));
+        return resizeToDimensions(source, targetWidth, targetHeight);
+    }
+
+    private BufferedImage resizeToMaxWidth(BufferedImage source, int maxWidth) {
+        int sourceWidth = source.getWidth();
+        int sourceHeight = source.getHeight();
+        if (sourceWidth <= 0) return source;
+
+        double scale = Math.min(1.0, (double) maxWidth / sourceWidth);
+        int targetWidth = Math.max(1, (int) Math.round(sourceWidth * scale));
+        int targetHeight = Math.max(1, (int) Math.round(sourceHeight * scale));
+        return resizeToDimensions(source, targetWidth, targetHeight);
+    }
+
+    private BufferedImage resizeToDimensions(BufferedImage source, int targetWidth, int targetHeight) {
         int imageType = source.getColorModel().hasAlpha()
                 ? BufferedImage.TYPE_INT_ARGB
                 : BufferedImage.TYPE_INT_RGB;
@@ -373,9 +477,20 @@ public class AssetService {
     }
 
     private void writeJpeg(BufferedImage image, ByteArrayOutputStream outputStream, float quality) throws IOException {
-        Iterator<ImageWriter> writers = ImageIO.getImageWritersByFormatName("jpg");
+        writeCompressedImage(image, "jpg", outputStream, quality);
+    }
+
+    private void writeCompressedImage(
+            BufferedImage image,
+            String format,
+            ByteArrayOutputStream outputStream,
+            float quality
+    ) throws IOException {
+        Iterator<ImageWriter> writers = ImageIO.getImageWritersByFormatName(format);
         if (!writers.hasNext()) {
-            ImageIO.write(image, "jpg", outputStream);
+            if (!ImageIO.write(image, format, outputStream)) {
+                throw new IOException("缺少 %s 图片编码器".formatted(format));
+            }
             return;
         }
 
@@ -385,6 +500,10 @@ public class AssetService {
             ImageWriteParam writeParam = writer.getDefaultWriteParam();
             if (writeParam.canWriteCompressed()) {
                 writeParam.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
+                String[] compressionTypes = writeParam.getCompressionTypes();
+                if (compressionTypes != null && compressionTypes.length > 0) {
+                    writeParam.setCompressionType(preferredCompressionType(compressionTypes));
+                }
                 writeParam.setCompressionQuality(quality);
             }
             writer.write(null, new javax.imageio.IIOImage(image, null, null), writeParam);
@@ -393,8 +512,13 @@ public class AssetService {
         }
     }
 
-    private String variantObjectKey(String objectKey, String variant, BufferedImage image) {
-        return variantObjectKey(objectKey, variant, image.getColorModel().hasAlpha() ? "png" : "jpg");
+    private String preferredCompressionType(String[] compressionTypes) {
+        for (String compressionType : compressionTypes) {
+            if ("Lossy".equalsIgnoreCase(compressionType) || "JPEG".equalsIgnoreCase(compressionType)) {
+                return compressionType;
+            }
+        }
+        return compressionTypes[0];
     }
 
     private String variantObjectKey(String objectKey, String variant, String extension) {
@@ -402,6 +526,7 @@ public class AssetService {
     }
 
     private String variantContentType(String objectKey) {
+        if (objectKey.endsWith(".webp")) return WEBP_CONTENT_TYPE;
         return objectKey.endsWith(".png") ? "image/png" : "image/jpeg";
     }
 
@@ -416,9 +541,17 @@ public class AssetService {
     public record AssetContent(AssetEntity entity, InputStream stream, String contentType) {
     }
 
+    public record PreparedImageContent(byte[] bytes, String contentType) {
+    }
+
     private record ImageSize(Integer width, Integer height) {
     }
 
     private record EncodedImage(byte[] bytes, String contentType) {
+    }
+
+    private enum ResizeMode {
+        MAX_SIDE,
+        MAX_WIDTH
     }
 }

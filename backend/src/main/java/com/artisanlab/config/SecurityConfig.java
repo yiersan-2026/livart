@@ -89,6 +89,7 @@ public class SecurityConfig {
                                 "/api/assets/*/content",
                                 "/api/assets/*/preview",
                                 "/api/assets/*/thumbnail",
+                                "/api/assets/*/view/*",
                                 "/ws/image-jobs"
                         ).permitAll()
                         .anyRequest().authenticated())

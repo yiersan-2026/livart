@@ -373,7 +373,7 @@ const CanvasUtilityDock: React.FC<CanvasUtilityDockProps> = ({
   );
 
   return (
-    <div className="fixed bottom-8 left-6 z-[3000000] flex flex-col items-start gap-3">
+    <div className="fixed bottom-1.5 left-6 z-[3000000] flex flex-col items-start gap-3">
       {activePanel && (
         <div className="animate-in fade-in slide-in-from-bottom-2">
           {activePanel === 'color' && renderColorPanel()}

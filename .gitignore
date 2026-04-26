@@ -22,6 +22,7 @@ dist-ssr
 *.local
 .playwright-cli/
 output/
+.codex-run/
 
 # Editor directories and files
 .vscode/*

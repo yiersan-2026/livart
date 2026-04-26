@@ -509,7 +509,7 @@ public class AiProxyService {
             if (imageAssetId != null) {
                 writeAssetImagePart(output, boundary, userId, imageAssetId);
             } else if (!uploadedImageParts.isEmpty()) {
-                writeMultipartPart(output, boundary, uploadedImageParts.get(0));
+                writeMultipartPart(output, boundary, prepareUploadedImagePart(uploadedImageParts.get(0)));
             }
 
             for (UUID referenceAssetId : referenceAssetIds) {
@@ -518,7 +518,7 @@ public class AiProxyService {
 
             int firstUploadedReferenceIndex = imageAssetId == null && !uploadedImageParts.isEmpty() ? 1 : 0;
             for (int index = firstUploadedReferenceIndex; index < uploadedImageParts.size(); index += 1) {
-                writeMultipartPart(output, boundary, uploadedImageParts.get(index));
+                writeMultipartPart(output, boundary, prepareUploadedImagePart(uploadedImageParts.get(index)));
             }
 
             writeAscii(output, "--" + boundary + "--");
@@ -640,16 +640,29 @@ public class AiProxyService {
         }
     }
 
+    private MultipartPartData prepareUploadedImagePart(MultipartPartData part) {
+        AssetService.PreparedImageContent preparedImage = assetService.prepareModelInputImage(
+                part.body(),
+                part.contentType()
+        );
+        return new MultipartPartData(
+                part.name(),
+                modelInputFilename(null, part.filename(), preparedImage.contentType()),
+                preparedImage.contentType(),
+                preparedImage.bytes()
+        );
+    }
+
     private String modelInputFilename(UUID assetId, String originalFilename, String contentType) {
         String baseName = originalFilename == null || originalFilename.isBlank()
-                ? assetId.toString()
+                ? assetId == null ? "image" : assetId.toString()
                 : originalFilename.replaceAll("[\\\\/\\r\\n\\t]", "_").trim();
         int dotIndex = baseName.lastIndexOf('.');
         if (dotIndex > 0) {
             baseName = baseName.substring(0, dotIndex);
         }
         if (baseName.isBlank()) {
-            baseName = assetId.toString();
+            baseName = assetId == null ? "image" : assetId.toString();
         }
         return "%s%s".formatted(baseName, imageExtensionForContentType(contentType));
     }

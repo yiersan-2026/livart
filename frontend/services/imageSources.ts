@@ -1,11 +1,56 @@
 import type { CanvasItem } from '../types';
 
-export const getCanvasImageSrc = (item: CanvasItem) => {
-  return item.previewContent || item.content;
+type ImageVariant = 'content' | 'preview' | 'thumbnail' | `view/${number}`;
+
+export const CANVAS_IMAGE_WIDTH_TIERS = [512, 1024, 2048] as const;
+
+const isDataImageUrl = (value: unknown): value is string => {
+  return typeof value === 'string' && value.startsWith('data:image/');
+};
+
+const getAssetVariantUrlFromValue = (value: unknown, variant: ImageVariant) => {
+  if (typeof value !== 'string') return '';
+  const match = value.match(/\/api\/assets\/([^/]+)\/(?:content|preview|thumbnail|view\/\d+)(?:[?#].*)?$/);
+  if (!match) return '';
+  return `/api/assets/${match[1]}/${variant}`;
+};
+
+const getAssetVariantUrl = (item: CanvasItem, variant: ImageVariant) => {
+  if (item.assetId) {
+    return `/api/assets/${encodeURIComponent(item.assetId)}/${variant}`;
+  }
+  return (
+    getAssetVariantUrlFromValue(item.previewContent, variant) ||
+    getAssetVariantUrlFromValue(item.thumbnailContent, variant) ||
+    getAssetVariantUrlFromValue(item.content, variant)
+  );
+};
+
+export const getCanvasImageWidthTierSize = (item: CanvasItem, zoom = 1) => {
+  const safeZoom = Math.max(0.01, Number.isFinite(zoom) ? zoom : 1);
+  const devicePixelRatio = typeof window === 'undefined' ? 1 : Math.max(1, window.devicePixelRatio || 1);
+  const visibleWidth = Math.max(1, Number(item.width) || 1) * safeZoom * devicePixelRatio;
+  return CANVAS_IMAGE_WIDTH_TIERS.find(width => width >= visibleWidth) || CANVAS_IMAGE_WIDTH_TIERS[CANVAS_IMAGE_WIDTH_TIERS.length - 1];
+};
+
+export const getCanvasImageTierSize = getCanvasImageWidthTierSize;
+
+export const getCanvasImageSrc = (item: CanvasItem, zoom = 1) => {
+  const tierSize = getCanvasImageWidthTierSize(item, zoom);
+  return (
+    getAssetVariantUrl(item, `view/${tierSize}`) ||
+    item.previewContent ||
+    (isDataImageUrl(item.content) ? item.content : '')
+  );
 };
 
 export const getThumbnailImageSrc = (item: CanvasItem) => {
-  return item.thumbnailContent || item.previewContent || item.content;
+  return (
+    getAssetVariantUrl(item, 'thumbnail') ||
+    item.thumbnailContent ||
+    item.previewContent ||
+    (isDataImageUrl(item.content) ? item.content : '')
+  );
 };
 
 export const getOriginalImageSrc = (item: CanvasItem) => {

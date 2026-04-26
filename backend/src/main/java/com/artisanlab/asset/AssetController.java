@@ -55,6 +55,15 @@ public class AssetController {
         writeContent(assetService.getThumbnail(id), response);
     }
 
+    @GetMapping("/{id}/view/{width}")
+    public void canvasView(
+            @PathVariable UUID id,
+            @PathVariable int width,
+            HttpServletResponse response
+    ) throws IOException {
+        writeContent(assetService.getCanvasView(id, width), response);
+    }
+
     private void writeContent(AssetService.AssetContent content, HttpServletResponse response) throws IOException {
         response.setContentType(content.contentType());
         response.setHeader(HttpHeaders.CACHE_CONTROL, CacheControl.maxAge(365, TimeUnit.DAYS).cachePublic().getHeaderValue());

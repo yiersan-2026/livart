@@ -1,6 +1,6 @@
 
 import React, { useRef } from 'react';
-import { MousePointer2, Hand, Image as ImageIcon, Type, ZoomIn, ZoomOut, Maximize, Undo2, Redo2 } from 'lucide-react';
+import { MousePointer2, Hand, Image as ImageIcon, Type, ZoomIn, ZoomOut, Maximize, Undo2, Redo2, LayoutGrid } from 'lucide-react';
 import type { CanvasTool } from '../types';
 
 interface ToolbarProps {
@@ -15,9 +15,11 @@ interface ToolbarProps {
   canRedo: boolean;
   onUndo: () => void;
   onRedo: () => void;
+  canAutoArrangeImages: boolean;
+  onAutoArrangeImages: () => void;
 }
 
-const Toolbar: React.FC<ToolbarProps> = ({ zoom, onZoomChange, onResetView, onAddImage, onAddText, activeTool, onToolChange, canUndo, canRedo, onUndo, onRedo }) => {
+const Toolbar: React.FC<ToolbarProps> = ({ zoom, onZoomChange, onResetView, onAddImage, onAddText, activeTool, onToolChange, canUndo, canRedo, onUndo, onRedo, canAutoArrangeImages, onAutoArrangeImages }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleImageClick = () => {
@@ -104,6 +106,16 @@ const Toolbar: React.FC<ToolbarProps> = ({ zoom, onZoomChange, onResetView, onAd
         >
           <Type size={18} />
           {renderTooltip('添加文本')}
+        </button>
+
+        <button
+          onClick={onAutoArrangeImages}
+          disabled={!canAutoArrangeImages}
+          className={iconButtonClass}
+          aria-label="排列图片"
+        >
+          <LayoutGrid size={18} />
+          {renderTooltip('排列')}
         </button>
       </div>
 
