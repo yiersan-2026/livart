@@ -647,10 +647,7 @@ const Canvas: React.FC<CanvasProps> = ({
       );
     }
 
-    const aboveTop = imageTop - editorHeight - INLINE_IMAGE_EDITOR_GAP;
-    const belowTop = imageTop + imageHeight + INLINE_IMAGE_EDITOR_GAP;
-    const canFitAbove = aboveTop >= CANVAS_OVERLAY_MARGIN;
-    let screenTop = canFitAbove ? aboveTop : belowTop;
+    let screenTop = imageTop - editorHeight - INLINE_IMAGE_EDITOR_GAP;
 
     if (viewportHeight > 0) {
       screenTop = clampValue(
