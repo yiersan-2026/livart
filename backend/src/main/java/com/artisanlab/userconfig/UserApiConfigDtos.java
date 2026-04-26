@@ -24,7 +24,8 @@ public final class UserApiConfigDtos {
             String chatModel,
             String textToImageUrl,
             String imageToImageUrl,
-            OffsetDateTime updatedAt
+            OffsetDateTime updatedAt,
+            boolean serverDefault
     ) {
     }
 }

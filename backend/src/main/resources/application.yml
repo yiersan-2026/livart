@@ -58,6 +58,11 @@ artisan:
     access-key: ${MINIO_ACCESS_KEY:}
     secret-key: ${MINIO_SECRET_KEY:}
     bucket: ${MINIO_BUCKET:livart}
+  ai:
+    default-base-url: ${LIVART_DEFAULT_API_BASE_URL:}
+    default-api-key: ${LIVART_DEFAULT_API_KEY:}
+    default-image-model: ${LIVART_DEFAULT_IMAGE_MODEL:gpt-image-2}
+    default-chat-model: ${LIVART_DEFAULT_CHAT_MODEL:gpt-5.5}
   rabbitmq:
     canvas-save-queue: ${CANVAS_SAVE_QUEUE:livart.canvas.save.dev}
     canvas-save-dead-letter-queue: ${CANVAS_SAVE_DEAD_LETTER_QUEUE:livart.canvas.save.dev.dead}

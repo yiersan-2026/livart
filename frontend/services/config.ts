@@ -26,6 +26,7 @@ export interface ApiConfig {
   apiKey: string;
   model: string;
   chatModel: string;
+  serverDefault?: boolean;
 }
 
 interface ApiResponse<T> {
@@ -52,7 +53,8 @@ export const DEFAULT_API_CONFIG: ApiConfig = {
   ...buildImageApiUrls(defaultBaseUrl),
   apiKey: '',
   model: process.env.IMAGE_API_MODEL || 'gpt-image-2',
-  chatModel: process.env.PROMPT_OPTIMIZER_MODEL || process.env.CHAT_API_MODEL || 'gpt-5.5'
+  chatModel: process.env.PROMPT_OPTIMIZER_MODEL || process.env.CHAT_API_MODEL || 'gpt-5.5',
+  serverDefault: false
 };
 
 let currentApiConfig = DEFAULT_API_CONFIG;
@@ -73,7 +75,8 @@ export const normalizeApiConfig = (config: Partial<ApiConfig>): ApiConfig => {
     ...imageApiUrls,
     apiKey: (config.apiKey || '').trim(),
     model: imageModel,
-    chatModel
+    chatModel,
+    serverDefault: !!config.serverDefault
   };
 };
 
@@ -131,7 +134,7 @@ export const hasApiConfig = (): boolean => {
   return !!(
     hasLoadedUserApiConfig &&
     currentApiConfig.baseUrl &&
-    currentApiConfig.apiKey &&
+    (currentApiConfig.apiKey || currentApiConfig.serverDefault) &&
     currentApiConfig.model &&
     currentApiConfig.chatModel
   );
