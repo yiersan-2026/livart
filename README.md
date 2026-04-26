@@ -4,6 +4,12 @@
 
 **面向普通用户的一键部署 AI 图像创作工作台**
 
+### 🚀 在线体验 / 生产环境
+
+[https://livart.suntools.pro](https://livart.suntools.pro)
+
+[Gitee](https://gitee.com/sunowen/livart) · [GitHub](https://github.com/yiersan-2026/livart)
+
 ![livart 真实界面截图](./docs/screenshots/livart-canvas.png)
 
 </div>
@@ -18,7 +24,7 @@ livart 是一款基于 **无限画布** 的 AI 图像创作工作台，目标是
 
 本项目基于上一个开源系统 [yiqi-software/ArtisanLab](https://gitee.com/yiqi-software/ArtisanLab) 二次开发而来。原项目提供了无限画布、基础 AI 图像生成、画布元素编辑和视觉逻辑工作流能力；livart 在此基础上补充了更完整的图生图、局部重绘、删除物体、永久画布、账号体系、后端持久化、图片资源压缩、Docker 部署和 Lovart 风格交互。
 
-当前开源地址：[sunowen/livart](https://gitee.com/sunowen/livart.git)
+当前开源地址：[Gitee sunowen/livart](https://gitee.com/sunowen/livart.git) · [GitHub yiersan-2026/livart](https://github.com/yiersan-2026/livart.git)
 
 ## 本版本新增能力
 
