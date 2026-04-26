@@ -198,7 +198,7 @@ const normalizeTransientItemState = (item: CanvasItem): CanvasItem | null => {
 };
 
 const persistItemAssets = async (item: CanvasItem): Promise<CanvasItem> => {
-  const [imageContent, drawingData, maskData, compositeImage, layers] = await Promise.all([
+  const [imageContent, drawingData, maskData, redrawMaskData, removerMaskData, compositeImage, layers] = await Promise.all([
     item.type === 'image' ? persistCanvasImageValue(item) : Promise.resolve({
       content: item.content,
       previewContent: item.previewContent,
@@ -206,6 +206,8 @@ const persistItemAssets = async (item: CanvasItem): Promise<CanvasItem> => {
     }),
     persistRawImageValue(item.drawingData, `${item.id}-drawing`),
     persistRawImageValue(item.maskData, `${item.id}-mask`),
+    persistRawImageValue(item.redrawMaskData, `${item.id}-redraw-mask`),
+    persistRawImageValue(item.removerMaskData, `${item.id}-remover-mask`),
     persistRawImageValue(item.compositeImage, `${item.id}-composite`),
     Promise.all((item.layers || []).map(async layer => ({
       ...layer,
@@ -223,6 +225,8 @@ const persistItemAssets = async (item: CanvasItem): Promise<CanvasItem> => {
     thumbnailContent: imageContent.thumbnailContent,
     drawingData,
     maskData,
+    redrawMaskData,
+    removerMaskData,
     compositeImage,
     layers
   };

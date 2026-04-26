@@ -67,6 +67,12 @@ const MAX_HISTORY_ENTRIES = 80;
 const DEFAULT_CANVAS_BACKGROUND_COLOR = '#fcfcfc';
 
 type ImageEditMode = 'local-redraw' | 'remover';
+
+const getImageEditMaskData = (item: CanvasItem, mode: ImageEditMode) => (
+  mode === 'remover'
+    ? item.removerMaskData || item.maskData
+    : item.redrawMaskData || item.maskData
+);
 type SidebarPromptSeed = {
   id: string;
   imageId: string;
@@ -1427,7 +1433,7 @@ function App() {
         const persistedById = new Map(persistedEditImages.map(item => [item.id, item]));
         setItems(prev => prev.map(item => persistedById.get(item.id) || item));
 
-        const localMaskData = activeImageEditMode ? editBaseImage.maskData : undefined;
+        const localMaskData = activeImageEditMode ? getImageEditMaskData(editBaseImage, activeImageEditMode) : undefined;
         if (activeImageEditMode && !localMaskData) {
           throw new Error(activeImageEditMode === 'remover' ? '请先用画笔涂抹需要删除的物体' : '请先用画笔涂抹需要局部重绘的区域');
         }

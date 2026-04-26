@@ -56,6 +56,7 @@ interface CanvasProps {
 
 type ResizeDirection = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
 type MaskPoint = { x: number; y: number };
+type ImageMaskMode = 'local-redraw' | 'remover';
 type CropRect = { x: number; y: number; width: number; height: number };
 type CropDragState = {
   mode: 'move' | ResizeDirection;
@@ -79,7 +80,7 @@ type SnapCandidate = {
 };
 
 const REMOVER_PROMPT = '把圈起来的地方删除掉。';
-const BACKGROUND_REMOVAL_PROMPT = '先识别图片中的主要主体：画面最主要的人物、商品、动物、车辆或成组前景对象；主体包含其穿戴、手持、贴附和与主体直接组成整体的部分。只保留主体，去掉主体以外的一切背景和无关物体，只改变非主体区域透明度/alpha matte，不要改变主体 RGB 像素。不要重绘、修复、补全、美化、移动或缩放主体；严格保留原图中已经可见的主体像素、裁切范围、构图、脸、表情、姿态、服装、颜色、纹理、发丝和边缘细节；原图里被裁切到画面外的身体、头发、衣服不要补出来。输出透明背景 PNG。';
+const BACKGROUND_REMOVAL_PROMPT = '先识别图片中的主要主体：画面最主要的人物、商品、动物、车辆或成组前景对象；主体包含其穿戴、手持、贴附和与主体直接组成整体的部分。只保留主体，把主体以外的一切背景和无关物体替换为纯白色背景（#FFFFFF），不要透明背景，不要浅灰、米白或渐变。不要改变主体 RGB 像素，不要重绘、修复、补全、美化、移动或缩放主体；严格保留原图中已经可见的主体像素、裁切范围、构图、脸、表情、姿态、服装、颜色、纹理、发丝和边缘细节；原图里被裁切到画面外的身体、头发、衣服不要补出来。输出白底图片。';
 
 const getCanvasDimension = (value: number) => Math.max(1, Math.round(value));
 
@@ -146,6 +147,18 @@ const TEXT_FONT_FAMILIES = [
   'Impact',
   'Brush Script MT'
 ];
+
+const getImageMaskDataForMode = (item: CanvasItem, mode: ImageMaskMode) => (
+  mode === 'remover'
+    ? item.removerMaskData || item.maskData
+    : item.redrawMaskData || item.maskData
+);
+
+const getImageMaskUpdateForMode = (mode: ImageMaskMode, maskData?: string): Partial<CanvasItem> => (
+  mode === 'remover'
+    ? { removerMaskData: maskData, maskData: undefined }
+    : { redrawMaskData: maskData, maskData: undefined }
+);
 const TEXT_FONT_STYLES = [
   { label: 'Regular', fontWeight: 400, fontStyle: 'normal' as const },
   { label: 'Black', fontWeight: 900, fontStyle: 'normal' as const },
@@ -873,6 +886,12 @@ const Canvas: React.FC<CanvasProps> = ({
   const selectedItemIsQuickEditing = !!selectedItemCanQuickEdit && selectedItem?.id === quickEditItemId;
   const selectedItemIsCrop = selectedItem?.type === 'image' && selectedItem.id === cropItemId;
   const selectedItemHasImageMaskTool = selectedItemIsLocalRedraw || selectedItemIsRemover;
+  const selectedImageMaskMode: ImageMaskMode | null = selectedItemIsRemover
+    ? 'remover'
+    : selectedItemIsLocalRedraw ? 'local-redraw' : null;
+  const selectedImageMaskData = selectedItem?.type === 'image' && selectedImageMaskMode
+    ? getImageMaskDataForMode(selectedItem, selectedImageMaskMode)
+    : undefined;
   const activeImageMaskStrokeColor = selectedItemIsRemover ? 'rgba(239, 68, 68, 0.55)' : 'rgba(99, 102, 241, 0.55)';
   const selectedInlineEditError = selectedItem ? inlineEditErrors[selectedItem.id] : '';
   const inlineEditPrompt = selectedItem?.type === 'image' ? inlineEditPrompts[selectedItem.id] || '' : '';
@@ -1245,10 +1264,10 @@ const Canvas: React.FC<CanvasProps> = ({
     if (!context) return;
 
     context.clearRect(0, 0, width, height);
-    if (!selectedItem.maskData) return;
+    if (!selectedImageMaskData) return;
 
     let cancelled = false;
-    loadImageElement(selectedItem.maskData)
+    loadImageElement(selectedImageMaskData)
       .then((image) => {
         if (cancelled) return;
         context.clearRect(0, 0, width, height);
@@ -1261,7 +1280,14 @@ const Canvas: React.FC<CanvasProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [selectedItemHasImageMaskTool, selectedItem?.id, selectedItem?.maskData, selectedItem?.width, selectedItem?.height]);
+  }, [
+    selectedItemHasImageMaskTool,
+    selectedImageMaskData,
+    selectedImageMaskMode,
+    selectedItem?.id,
+    selectedItem?.width,
+    selectedItem?.height
+  ]);
 
   useEffect(() => {
     if (selectedItem?.type !== 'workflow' || activeTool === 'select') return;
@@ -1320,8 +1346,11 @@ const Canvas: React.FC<CanvasProps> = ({
     setInlineEditPrompts(prev => ({ ...prev, [id]: prompt }));
   };
 
-  const getCurrentMaskDataForItem = (id: string, fallbackMaskData?: string) => {
-    if ((localRedrawItemId === id || localRemoverItemId === id) && maskCanvasRef.current) {
+  const getCurrentMaskDataForItem = (id: string, mode: ImageMaskMode, fallbackMaskData?: string) => {
+    const isActiveMask = mode === 'remover'
+      ? localRemoverItemId === id
+      : localRedrawItemId === id;
+    if (isActiveMask && maskCanvasRef.current) {
       return maskCanvasRef.current.toDataURL('image/png');
     }
     return fallbackMaskData;
@@ -1821,7 +1850,9 @@ const Canvas: React.FC<CanvasProps> = ({
       }
       maskStrokePointsRef.current = [];
       const data = maskCanvasRef.current?.toDataURL('image/png');
-      if (data && selectedItem) onItemUpdate(selectedItem.id, { maskData: data });
+      if (data && selectedItem && selectedImageMaskMode) {
+        onItemUpdate(selectedItem.id, getImageMaskUpdateForMode(selectedImageMaskMode, data));
+      }
     } else if (isDrawing && selectedItem?.type === 'workflow') {
       setIsDrawing(false);
       const data = drawingCanvasRef.current?.toDataURL();
@@ -2021,7 +2052,10 @@ const Canvas: React.FC<CanvasProps> = ({
         ? `删除 @${targetItem.id} 圈选区域：${rawPrompt}`
         : `删除 @${targetItem.id} 圈选区域`
       : `编辑 @${targetItem.id}：${rawPrompt}`;
-    const useLocalMask = !isBackgroundRemovalMode && (localRedrawItemId === targetItem.id || localRemoverItemId === targetItem.id);
+    const localMaskMode: ImageMaskMode | null = !isBackgroundRemovalMode && localRemoverItemId === targetItem.id
+      ? 'remover'
+      : !isBackgroundRemovalMode && localRedrawItemId === targetItem.id ? 'local-redraw' : null;
+    const useLocalMask = !!localMaskMode;
     const startedAt = Date.now();
     let resultItemId: string | null = null;
     setInlineEditingForItem(targetItem.id, true);
@@ -2030,8 +2064,12 @@ const Canvas: React.FC<CanvasProps> = ({
     onChatMessage(userMessage, 'user');
 
     try {
-      const currentMaskData = useLocalMask
-        ? getCurrentMaskDataForItem(targetItem.id, targetItem.maskData)
+      const currentMaskData = localMaskMode
+        ? getCurrentMaskDataForItem(
+          targetItem.id,
+          localMaskMode,
+          getImageMaskDataForMode(targetItem, localMaskMode)
+        )
         : undefined;
 
       if (useLocalMask && !currentMaskData) {
@@ -2082,11 +2120,11 @@ const Canvas: React.FC<CanvasProps> = ({
       const editImageContext = isBackgroundRemovalMode
         ? [
           '任务类型：background-removal / remove background。',
-          '用户点击了去背景快捷功能：这只是抠图/背景透明化，不是重新生成图片。',
+          '用户点击了去背景快捷功能：这只是抠图并替换为白底，不是重新生成图片。',
           '先识别图片中的主要主体：画面最主要的人物、商品、动物、车辆或成组前景对象；主体包含其穿戴、手持、贴附和与主体直接组成整体的部分。',
-          '只保留主体，去掉主体以外的一切背景和无关物体；只允许改变非主体区域透明度/alpha matte；主体 RGB 像素、原有裁切、构图、主体位置、缩放比例、脸、表情、姿态、服装、颜色、纹理、发丝、边缘细节都不能变。',
+          '只保留主体，把主体以外的一切背景和无关物体替换为纯白色背景（#FFFFFF）；不要透明背景，不要浅灰、米白或渐变；主体 RGB 像素、原有裁切、构图、主体位置、缩放比例、脸、表情、姿态、服装、颜色、纹理、发丝、边缘细节都不能变。',
           '禁止把半张脸补成整张脸，禁止把半身/局部补成全身，禁止补出原图画面外被裁切掉的身体、头发、衣服或物品。',
-          '不要新增场景、新背景、白底/浅色底、新文字、logo、阴影或装饰；输出透明背景 PNG。',
+          '不要新增场景、新文字、logo、阴影或装饰；输出纯白背景图片。',
           imageContext
         ].join('\n')
         : isRemoverMode
@@ -2108,7 +2146,7 @@ const Canvas: React.FC<CanvasProps> = ({
       };
 
       let maskDataUrl: string | null | undefined;
-      if (useLocalMask) {
+      if (localMaskMode) {
         maskDataUrl = await createTransparentEditMask(
           currentMaskData!,
           persistentTargetItem.content,
@@ -2121,7 +2159,7 @@ const Canvas: React.FC<CanvasProps> = ({
         if (!maskDataUrl) {
           throw new Error(isRemoverMode ? '请先用画笔涂抹需要删除的物体' : '请先用画笔涂抹需要局部重绘的区域');
         }
-        onItemUpdate(targetItem.id, { maskData: currentMaskData! });
+        onItemUpdate(targetItem.id, getImageMaskUpdateForMode(localMaskMode, currentMaskData!));
       }
 
       const nextZIndex = Math.max(0, ...items.map(item => item.zIndex || 0)) + 1;
@@ -2326,20 +2364,35 @@ const Canvas: React.FC<CanvasProps> = ({
     if (item.type !== 'image') return null;
 
     const isActiveMaskItem = selectedItemHasImageMaskTool && selectedItem?.id === item.id;
-    if (!isActiveMaskItem && !item.maskData) return null;
+    const activeMaskMode = isActiveMaskItem ? selectedImageMaskMode : null;
+    const legacyMaskData = !item.redrawMaskData && !item.removerMaskData ? item.maskData : undefined;
+    const redrawMaskData = item.redrawMaskData || (activeMaskMode === 'remover' ? undefined : legacyMaskData);
+    const removerMaskData = item.removerMaskData || (activeMaskMode === 'remover' ? legacyMaskData : undefined);
+    const shouldRenderRedrawMask = !!redrawMaskData && activeMaskMode !== 'local-redraw';
+    const shouldRenderRemoverMask = !!removerMaskData && activeMaskMode !== 'remover';
 
-    return isActiveMaskItem ? (
-      <canvas
-        ref={maskCanvasRef}
-        width={getCanvasDimension(item.width)}
-        height={getCanvasDimension(item.height)}
-        className={`absolute inset-0 z-[60] h-full w-full ${
-          activeTool === 'select' ? 'pointer-events-none' : 'cursor-crosshair pointer-events-auto'
-        }`}
-      />
-    ) : item.maskData ? (
-      <img src={item.maskData} className="absolute inset-0 z-[60] h-full w-full pointer-events-none" />
-    ) : null;
+    if (!isActiveMaskItem && !shouldRenderRedrawMask && !shouldRenderRemoverMask) return null;
+
+    return (
+      <>
+        {shouldRenderRedrawMask && (
+          <img src={redrawMaskData} className="absolute inset-0 z-[60] h-full w-full pointer-events-none" />
+        )}
+        {shouldRenderRemoverMask && (
+          <img src={removerMaskData} className="absolute inset-0 z-[61] h-full w-full pointer-events-none" />
+        )}
+        {isActiveMaskItem && (
+          <canvas
+            ref={maskCanvasRef}
+            width={getCanvasDimension(item.width)}
+            height={getCanvasDimension(item.height)}
+            className={`absolute inset-0 z-[62] h-full w-full ${
+              activeTool === 'select' ? 'pointer-events-none' : 'cursor-crosshair pointer-events-auto'
+            }`}
+          />
+        )}
+      </>
+    );
   };
 
   const renderCropOverlay = (item: CanvasItem) => {
@@ -2422,6 +2475,9 @@ const Canvas: React.FC<CanvasProps> = ({
     const toggleTextPopover = (popover: typeof activeTextPopover) => {
       setActiveTextPopover(previous => previous === popover ? null : popover);
     };
+    const stopTextToolbarWheel = (event: React.WheelEvent) => {
+      event.stopPropagation();
+    };
     const applyTextColor = (key: 'color' | 'strokeColor', value: string) => {
       if (!/^#[0-9a-f]{6}$/i.test(value)) return;
       updateSelectedTextStyle(key === 'strokeColor'
@@ -2469,6 +2525,7 @@ const Canvas: React.FC<CanvasProps> = ({
           if (target instanceof HTMLElement && target.closest('select,input,[data-text-toolbar-interactive="true"]')) return;
           event.preventDefault();
         }}
+        onWheel={stopTextToolbarWheel}
       >
         <div className="relative">
           <button
@@ -3009,7 +3066,11 @@ const Canvas: React.FC<CanvasProps> = ({
                     </div>
                     <button
                       type="button"
-                      onClick={() => onItemUpdate(selectedItem.id, { maskData: undefined })}
+                      onClick={() => {
+                        if (selectedImageMaskMode) {
+                          onItemUpdate(selectedItem.id, getImageMaskUpdateForMode(selectedImageMaskMode, undefined));
+                        }
+                      }}
                       className="flex h-11 shrink-0 items-center border-r border-zinc-100 px-3 text-xs font-bold text-zinc-500 transition-colors hover:bg-red-50 hover:text-red-500"
                     >
                       清除

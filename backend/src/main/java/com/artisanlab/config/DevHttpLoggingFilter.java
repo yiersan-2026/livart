@@ -45,7 +45,7 @@ public class DevHttpLoggingFilter extends OncePerRequestFilter {
     private static final Pattern BEARER_PATTERN = Pattern.compile("(?i)Bearer\\s+[A-Za-z0-9._~+/=-]+");
     private static final Pattern SK_KEY_PATTERN = Pattern.compile("sk-[A-Za-z0-9._-]{8,}");
     private static final Pattern LARGE_IMAGE_FIELD_PATTERN = Pattern.compile(
-            "(?i)(\"(?:b64_json|image|data|content|previewContent|thumbnailContent|maskData|drawingData|compositeImage)\"\\s*:\\s*\")([^\"]{200,})(\")"
+            "(?i)(\"(?:b64_json|image|data|content|previewContent|thumbnailContent|maskData|redrawMaskData|removerMaskData|drawingData|compositeImage)\"\\s*:\\s*\")([^\"]{200,})(\")"
     );
 
     @Override
