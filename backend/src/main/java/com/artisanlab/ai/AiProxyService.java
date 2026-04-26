@@ -145,7 +145,7 @@ public class AiProxyService {
             String path,
             HttpServletRequest request
     ) throws IOException {
-        UserApiConfigDtos.Response config = userApiConfigService.getRequiredConfig(userId);
+        UserApiConfigDtos.ResolvedConfig config = userApiConfigService.getRequiredConfig(userId);
         ImageProxyRequestBody requestBody = readImageProxyRequestBody(userId, request, config, label);
         ImageProxyResult result = executeImageRequest(
                 label,
@@ -175,7 +175,7 @@ public class AiProxyService {
             HttpServletRequest request
     ) throws IOException {
         cleanupImageJobs();
-        UserApiConfigDtos.Response config = userApiConfigService.getRequiredConfig(userId);
+        UserApiConfigDtos.ResolvedConfig config = userApiConfigService.getRequiredConfig(userId);
         UUID jobId = UUID.randomUUID();
         ImageJobState job = new ImageJobState(jobId, userId, label);
         imageJobs.put(jobId, job);
@@ -225,7 +225,7 @@ public class AiProxyService {
             UUID userId,
             AiProxyDtos.ImageReferenceAnalysisRequest request
     ) {
-        UserApiConfigDtos.Response config = userApiConfigService.getRequiredConfig(userId);
+        UserApiConfigDtos.ResolvedConfig config = userApiConfigService.getRequiredConfig(userId);
         long startedAt = System.currentTimeMillis();
 
         try {
@@ -460,7 +460,7 @@ public class AiProxyService {
     private ImageProxyRequestBody readImageProxyRequestBody(
             UUID userId,
             HttpServletRequest request,
-            UserApiConfigDtos.Response config,
+            UserApiConfigDtos.ResolvedConfig config,
             String label
     ) throws IOException {
         String contentType = request.getContentType();
@@ -530,7 +530,7 @@ public class AiProxyService {
     }
 
     private ImageProxyRequestBody readJsonImageProxyRequestBody(
-            UserApiConfigDtos.Response config,
+            UserApiConfigDtos.ResolvedConfig config,
             String label,
             String contentType,
             byte[] body
@@ -600,7 +600,7 @@ public class AiProxyService {
 
     private String normalizePromptOptimizationMode(String value, String fallbackMode) {
         String normalizedValue = value == null ? "" : value.trim();
-        if ("image-remover".equals(normalizedValue)) {
+        if ("image-remover".equals(normalizedValue) || "background-removal".equals(normalizedValue)) {
             return normalizedValue;
         }
         return fallbackMode;
@@ -732,18 +732,24 @@ public class AiProxyService {
     }
 
     private String optimizePromptInline(
-            UserApiConfigDtos.Response config,
+            UserApiConfigDtos.ResolvedConfig config,
             String mode,
             String prompt,
             String imageContext
     ) {
         String trimmedPrompt = prompt == null ? "" : prompt.trim();
+        if ("background-removal".equals(mode) && trimmedPrompt.isBlank()) {
+            trimmedPrompt = "去除图片背景";
+        }
         if (trimmedPrompt.isBlank()) {
             return prompt == null ? "" : prompt;
         }
 
         if ("image-remover".equals(mode)) {
             return buildDeterministicRemoverPrompt(trimmedPrompt);
+        }
+        if ("background-removal".equals(mode)) {
+            return buildDeterministicBackgroundRemovalPrompt(trimmedPrompt);
         }
 
         String trimmedImageContext = imageContext == null ? "" : imageContext.trim();
@@ -1216,6 +1222,21 @@ public class AiProxyService {
                     - 必须在提示词末尾加入完整负面约束：%s""".formatted(NEGATIVE_PROMPT_TEXT);
         }
 
+        if ("background-removal".equals(mode)) {
+            return """
+                    你是专业 AI 图片去背景提示词优化器。只输出优化后的提示词，不要解释，不要 Markdown，不要加标题。
+                    要求：
+                    - 当前任务是去背景/抠图，不是更换背景、不是扩图、不是重绘、不是美化。
+                    - 优化后的提示词必须先要求模型识别图片中的主要主体：画面最主要的人物、商品、动物、车辆或成组前景对象；主体包含穿戴、手持、贴附和与主体直接组成整体的部分。
+                    - 只保留主体，去掉主体以外的一切背景和无关物体；只允许改变非主体区域的透明度/alpha matte，主体 RGB 像素、裁切边界、构图、主体位置、缩放比例、结构比例、姿态、表情、服装/材质、颜色、纹理和清晰度都不能变。
+                    - 重点保护发丝、毛发、半透明材质、玻璃、纱、反光边缘、手指、脚趾、饰品等细节。
+                    - 禁止把半张脸补成整张脸，禁止把半身/局部补成全身，禁止补出原图画面外被裁切掉的身体、头发、衣服、商品或物品。
+                    - 主体以外所有区域必须被移除为透明背景 PNG，不要用纯白/浅色背景替代透明背景，不要添加场景元素。
+                    - 不要改变主体身份、五官、表情、动作、镜头角度、画幅比例，不要新增文字、logo、水印、阴影杂物或新背景。
+                    - 使用中文输出一段可直接用于图片编辑接口的完整提示词。
+                    - 必须在提示词末尾加入完整负面约束：%s""".formatted(NEGATIVE_PROMPT_TEXT);
+        }
+
         return """
                 %s
                 - 当前任务是文生图，需要把短描述扩写成可直接用于高质量图像生成的完整视觉 brief。""".formatted(sharedRules);
@@ -1223,6 +1244,22 @@ public class AiProxyService {
 
     private String buildDeterministicRemoverPrompt(String prompt) {
         return "把圈起来的地方删除掉。";
+    }
+
+    private String buildDeterministicBackgroundRemovalPrompt(String prompt) {
+        String userPrompt = prompt == null ? "" : prompt.trim();
+        return """
+                只执行去背景/抠图。先识别图片中的主要主体：画面最主要的人物、商品、动物、车辆或成组前景对象；主体包含其穿戴、手持、贴附和与主体直接组成整体的部分。
+                只保留主体，把主体以外的一切背景和无关物体移除为透明背景 PNG。
+                只允许改变非主体区域的透明度/alpha matte；主体 RGB 像素必须尽量与原图一致。不要重绘、不要美化、不要修复、不要扩图、不要换脸、不要改变五官、表情、姿态、服装、材质、颜色、纹理、光影、清晰度、主体位置、缩放比例、画幅比例和原有裁切。
+                只保留原图中已经可见的主体像素和边缘细节，重点保留发丝、毛发、半透明材质、反光边缘、饰品、手指和衣物纹理。
+                禁止补全原图画面外被裁切掉的内容：不要把半张脸补成整张脸，不要把半身或局部补成全身，不要补出被裁切的身体、头发、衣服、商品或物品。
+                不要新增场景、新背景、白底/浅色底、阴影、装饰、文字、logo、水印或任何额外元素。
+                %s
+                %s""".formatted(
+                userPrompt.isBlank() ? "" : "用户补充要求：" + userPrompt,
+                "负面约束：避免主体重绘、人物重绘、五官变化、表情变化、姿态变化、服装变化、颜色变化、画面扩展、主体居中重排、主体缩放变化、补全脸部、补全身体、补全衣服、全身化、换背景、新场景、阴影杂物、白边、锯齿边、残留背景、抠图边缘脏污。"
+        ).trim();
     }
 
     private String sanitizeOptimizedPrompt(String text) {

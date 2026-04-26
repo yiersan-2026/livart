@@ -28,7 +28,7 @@ const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose, onSaved, req
   useEffect(() => {
     if (isOpen) {
       const currentConfig = getApiConfig();
-      setConfig(currentConfig.serverDefault ? { ...currentConfig, apiKey: '' } : currentConfig);
+      setConfig(currentConfig.hasApiKey || currentConfig.serverDefault ? { ...currentConfig, apiKey: '' } : currentConfig);
       setError('');
       setShowApiKey(false);
       setIsSaving(false);
@@ -44,8 +44,12 @@ const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose, onSaved, req
       setError('请填写中转站 Base URL、API Key、生图模型和对话模型');
       return;
     }
-    if (!normalizedConfig.apiKey) {
-      setError(config.serverDefault ? '当前正在使用服务器默认配置。如需改为个人配置，请输入自己的 API Key。' : '请填写 API Key');
+    if (!normalizedConfig.apiKey && config.serverDefault) {
+      setError('当前正在使用服务器默认配置。如需改为个人配置，请输入自己的 API Key。');
+      return;
+    }
+    if (!normalizedConfig.apiKey && !config.hasApiKey) {
+      setError('请填写 API Key');
       return;
     }
 
@@ -101,7 +105,7 @@ const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose, onSaved, req
                 type={showApiKey ? 'text' : 'password'}
                 value={config.apiKey}
                 onChange={(event) => setConfig({ ...config, apiKey: event.target.value })}
-                placeholder={config.serverDefault ? '当前使用服务器默认 API Key' : 'sk-...'}
+                placeholder={config.serverDefault ? '当前使用服务器默认 API Key' : config.hasApiKey ? '已保存 API Key，留空表示不修改' : 'sk-...'}
                 className="w-full px-4 py-3 pr-12 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-black/10 focus:border-gray-300 transition-all"
               />
               <button

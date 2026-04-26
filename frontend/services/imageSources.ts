@@ -44,6 +44,16 @@ export const getCanvasImageSrc = (item: CanvasItem, zoom = 1) => {
   );
 };
 
+export const getLargestCanvasImageSrc = (item: CanvasItem) => {
+  const largestTierSize = CANVAS_IMAGE_WIDTH_TIERS[CANVAS_IMAGE_WIDTH_TIERS.length - 1];
+  return (
+    getAssetVariantUrl(item, `view/${largestTierSize}`) ||
+    item.previewContent ||
+    item.thumbnailContent ||
+    (isDataImageUrl(item.content) ? item.content : '')
+  );
+};
+
 export const getThumbnailImageSrc = (item: CanvasItem) => {
   return (
     getAssetVariantUrl(item, 'thumbnail') ||

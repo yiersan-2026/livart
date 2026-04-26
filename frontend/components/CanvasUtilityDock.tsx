@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Image as ImageIcon, Images, LocateFixed, Map as MapIcon, Palette, Search, X } from 'lucide-react';
 import type { CanvasItem } from '../types';
 import { getImagePreviewFitStyle, getThumbnailImageSrc } from '../services/imageSources';
+import { getCanvasItemDisplayTitle } from '../services/imageTitle';
 
 type UtilityPanel = 'color' | 'files' | 'minimap' | null;
 
@@ -31,9 +32,7 @@ const CANVAS_COLOR_PRESETS = [
   { label: '纯黑', value: '#020617' }
 ];
 
-const getItemTitle = (item: CanvasItem) => (
-  item.label || item.originalPrompt || item.prompt || item.id
-);
+const getItemTitle = (item: CanvasItem) => getCanvasItemDisplayTitle(item);
 
 const getStatusText = (item: CanvasItem) => {
   if (item.status === 'loading') return '生成中';
@@ -89,7 +88,8 @@ const CanvasUtilityDock: React.FC<CanvasUtilityDockProps> = ({
 
     return imageItems.filter(item => {
       const title = getItemTitle(item).toLowerCase();
-      return title.includes(normalizedQuery) || item.id.toLowerCase().includes(normalizedQuery);
+      const prompt = `${item.label || ''} ${item.originalPrompt || ''} ${item.prompt || ''}`.toLowerCase();
+      return title.includes(normalizedQuery) || prompt.includes(normalizedQuery) || item.id.toLowerCase().includes(normalizedQuery);
     });
   }, [fileSearchQuery, imageItems]);
 
@@ -281,9 +281,7 @@ const CanvasUtilityDock: React.FC<CanvasUtilityDockProps> = ({
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm font-black text-gray-800">{getItemTitle(item)}</span>
-                  <span className="mt-1 block truncate font-mono text-[10px] font-black text-gray-300">@{item.id}</span>
                   <span className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] font-black text-gray-400">
-                    <span className="rounded-full bg-gray-100 px-2 py-0.5">{Math.round(item.width)}×{Math.round(item.height)}</span>
                     <span className={`rounded-full px-2 py-0.5 ${
                       item.status === 'error'
                         ? 'bg-red-50 text-red-500'

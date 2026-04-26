@@ -1,19 +1,30 @@
 import React, { useEffect, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import type { ChatMessage, CanvasItem, ImageAspectRatio } from '../types';
-import { Loader2, Hammer, Send } from 'lucide-react';
+import { Download, Eye, Loader2, Send, RotateCcw, RotateCw, ZoomIn, ZoomOut, X } from 'lucide-react';
 import { IMAGE_ASPECT_RATIO_OPTIONS } from '../services/imageSizing';
-import { getImagePreviewFitStyle, getThumbnailImageSrc } from '../services/imageSources';
+import { getImagePreviewFitStyle, getLargestCanvasImageSrc, getOriginalImageSrc, getThumbnailImageSrc } from '../services/imageSources';
+import { formatExecutionDuration } from '../services/taskTiming';
+import { getImageModelDisplayName } from '../services/config';
 import {
   getImageReferenceDisplayText,
   insertImageMention,
   resolveMentionedImageReferences,
   tokenizeImageReferenceText
 } from '../services/imageReferences';
+import { buildImageResultDescription, getCanvasItemDisplayTitle } from '../services/imageTitle';
 import ImageMentionEditor from './ImageMentionEditor';
+import LivartLogo from './LivartLogo';
+
+const IMAGE_VIEWER_MIN_ZOOM = 1;
+const IMAGE_VIEWER_MAX_ZOOM = 10;
+const IMAGE_VIEWER_ZOOM_STEP = 1;
 
 interface SidebarProps {
   messages: ChatMessage[];
   isThinking: boolean;
+  activeTaskStartedAt?: number | null;
+  activeTaskCount?: number;
   onSendMessage: (text: string, aspectRatio: ImageAspectRatio) => void;
   contextImage: CanvasItem | null;
   promptSeed?: { id: string; imageId: string; prompt?: string } | null;
@@ -24,13 +35,25 @@ interface SidebarProps {
   onNavigateToImage: (item: CanvasItem) => void;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, contextImage, promptSeed, inputResetKey = 0, imageItems, onClearContextImage, onNavigateToImage }) => {
+const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStartedAt = null, activeTaskCount = 0, onSendMessage, contextImage, promptSeed, inputResetKey = 0, imageItems, onClearContextImage, onNavigateToImage }) => {
   const [inputValue, setInputValue] = React.useState('');
   const [selectedAspectRatio, setSelectedAspectRatio] = React.useState<ImageAspectRatio>('auto');
+  const [timerNow, setTimerNow] = React.useState(() => Date.now());
+  const [imageViewer, setImageViewer] = React.useState<{ item: CanvasItem; title: string } | null>(null);
+  const [imageViewerZoom, setImageViewerZoom] = React.useState(1);
+  const [imageViewerRotation, setImageViewerRotation] = React.useState(0);
+  const [imageViewerPan, setImageViewerPan] = React.useState({ x: 0, y: 0 });
   const scrollRef = useRef<HTMLDivElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
   const lastContextImageIdRef = useRef<string | null>(null);
   const appliedPromptSeedIdRef = useRef<string | null>(null);
+  const imageViewerDragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    panX: number;
+    panY: number;
+  } | null>(null);
 
   const completedImageItems = useMemo(
     () => imageItems.filter(item => item.type === 'image' && item.status === 'completed' && !!item.content),
@@ -52,6 +75,139 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages, isThinking]);
+
+  useEffect(() => {
+    if (!isThinking || !activeTaskStartedAt) return;
+
+    setTimerNow(Date.now());
+    const timerId = window.setInterval(() => {
+      setTimerNow(Date.now());
+    }, 1000);
+
+    return () => window.clearInterval(timerId);
+  }, [activeTaskStartedAt, isThinking]);
+
+  const resetImageViewerTransform = () => {
+    setImageViewerZoom(1);
+    setImageViewerRotation(0);
+    setImageViewerPan({ x: 0, y: 0 });
+    imageViewerDragRef.current = null;
+  };
+
+  const openImageViewer = (item: CanvasItem, title = getCanvasItemDisplayTitle(item)) => {
+    setImageViewer({ item, title });
+    resetImageViewerTransform();
+  };
+
+  const closeImageViewer = () => {
+    setImageViewer(null);
+    resetImageViewerTransform();
+  };
+
+  const setClampedImageViewerZoom = (nextZoom: number | ((currentZoom: number) => number)) => {
+    setImageViewerZoom(currentZoom => {
+      const rawNextZoom = typeof nextZoom === 'function' ? nextZoom(currentZoom) : nextZoom;
+      return Math.min(IMAGE_VIEWER_MAX_ZOOM, Math.max(IMAGE_VIEWER_MIN_ZOOM, rawNextZoom));
+    });
+  };
+
+  const zoomImageViewerBy = (delta: number) => {
+    setClampedImageViewerZoom(currentZoom => currentZoom + delta);
+  };
+
+  const rotateImageViewerBy = (degrees: number) => {
+    setImageViewerRotation(currentRotation => currentRotation + degrees);
+  };
+
+  const downloadOriginalImage = (item: CanvasItem, title = getCanvasItemDisplayTitle(item)) => {
+    const imageSrc = getOriginalImageSrc(item) || getThumbnailImageSrc(item);
+    const link = document.createElement('a');
+    link.href = imageSrc;
+    link.download = `${title || 'livart-image'}.png`;
+    link.rel = 'noopener';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  };
+
+  const downloadImageViewerImage = () => {
+    if (!imageViewer) return;
+    downloadOriginalImage(imageViewer.item, imageViewer.title);
+  };
+
+  const handleImageViewerWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    if (!imageViewer) return;
+    event.preventDefault();
+    zoomImageViewerBy(event.deltaY > 0 ? -IMAGE_VIEWER_ZOOM_STEP : IMAGE_VIEWER_ZOOM_STEP);
+  };
+
+  const handleImageViewerPointerDown = (event: React.PointerEvent<HTMLImageElement>) => {
+    if (event.button !== 0 || imageViewerZoom <= 1) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    imageViewerDragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      panX: imageViewerPan.x,
+      panY: imageViewerPan.y
+    };
+  };
+
+  const handleImageViewerPointerMove = (event: React.PointerEvent<HTMLImageElement>) => {
+    const dragState = imageViewerDragRef.current;
+    if (!dragState || dragState.pointerId !== event.pointerId) return;
+    setImageViewerPan({
+      x: dragState.panX + event.clientX - dragState.startX,
+      y: dragState.panY + event.clientY - dragState.startY
+    });
+  };
+
+  const handleImageViewerPointerEnd = (event: React.PointerEvent<HTMLImageElement>) => {
+    const dragState = imageViewerDragRef.current;
+    if (!dragState || dragState.pointerId !== event.pointerId) return;
+    imageViewerDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  useEffect(() => {
+    if (!imageViewer) return;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeImageViewer();
+        return;
+      }
+      if (event.key === '+' || event.key === '=') {
+        zoomImageViewerBy(IMAGE_VIEWER_ZOOM_STEP);
+        return;
+      }
+      if (event.key === '-') {
+        zoomImageViewerBy(-IMAGE_VIEWER_ZOOM_STEP);
+        return;
+      }
+      if (event.key === '0') {
+        resetImageViewerTransform();
+        return;
+      }
+      if (event.key === '[') {
+        rotateImageViewerBy(-90);
+        return;
+      }
+      if (event.key === ']') {
+        rotateImageViewerBy(90);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [imageViewer, imageViewerZoom, imageViewerPan]);
+
+  useEffect(() => {
+    if (imageViewerZoom > IMAGE_VIEWER_MIN_ZOOM) return;
+    setImageViewerPan({ x: 0, y: 0 });
+  }, [imageViewerZoom]);
 
   useEffect(() => {
     const currentContextImageId = contextImage?.id ?? null;
@@ -92,15 +248,32 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
     }
   };
 
-  const isInputBusy = isThinking;
+  const activeTaskDurationText = activeTaskStartedAt
+    ? formatExecutionDuration(timerNow - activeTaskStartedAt)
+    : '';
 
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
     const prompt = inputValue.trim();
-    if (!prompt || isInputBusy) return;
+    if (!prompt) return;
 
     onSendMessage(prompt, selectedAspectRatio);
     setInputValue('');
+  };
+
+  const getAspectRatioPreviewStyle = (aspectRatio: ImageAspectRatio): React.CSSProperties => {
+    if (aspectRatio === 'auto') {
+      return { width: 26, height: 18 };
+    }
+
+    const [rawWidth, rawHeight] = aspectRatio.split(':').map(Number);
+    const maxWidth = 30;
+    const maxHeight = 22;
+    const scale = Math.min(maxWidth / rawWidth, maxHeight / rawHeight);
+    return {
+      width: Math.max(10, Math.round(rawWidth * scale)),
+      height: Math.max(10, Math.round(rawHeight * scale))
+    };
   };
 
   const renderFormattedText = (text: string, keyPrefix: string) => {
@@ -173,109 +346,343 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, onSendMessage, 
         {attachedImages.map((item) => {
           const previewStyle = getImagePreviewFitStyle(item, 230, 180);
           return (
-            <button
+            <div
               key={item.id}
-              type="button"
-              onClick={() => onNavigateToImage(item)}
-              title={`定位到 @${item.id}`}
               className="group relative overflow-hidden rounded-2xl bg-white p-2 text-left shadow-sm ring-1 ring-black/5 transition-all hover:-translate-y-0.5 hover:shadow-md hover:ring-indigo-200 active:scale-[0.99]"
             >
-              <div className="overflow-hidden rounded-xl bg-gray-100" style={previewStyle}>
+              <button
+                type="button"
+                onClick={() => openImageViewer(item)}
+                title="打开大图预览"
+                className="block overflow-hidden rounded-xl bg-gray-100 text-left"
+                style={previewStyle}
+              >
                 <img src={getThumbnailImageSrc(item)} className="h-full w-full object-cover transition-transform group-hover:scale-[1.02]" />
-              </div>
-              <span className="absolute right-4 top-4 rounded-full bg-white/90 px-2 py-0.5 text-[10px] font-black text-indigo-600 opacity-0 shadow-sm ring-1 ring-black/5 transition-opacity group-hover:opacity-100">
-                查看
-              </span>
-            </button>
+              </button>
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  downloadOriginalImage(item);
+                }}
+                className="absolute bottom-4 right-4 flex h-8 w-8 items-center justify-center rounded-full bg-white/95 text-zinc-900 opacity-0 shadow-lg ring-1 ring-black/10 transition-all hover:scale-105 hover:bg-white group-hover:opacity-100"
+                title="下载原始图片"
+              >
+                <Download size={15} />
+              </button>
+            </div>
           );
         })}
       </div>
     );
   };
 
-  return (
-    <div className="w-96 bg-white border-l border-gray-200 h-full flex flex-col z-50 overflow-hidden">
-      <div className="p-4 border-b border-gray-50 bg-gray-50/30 flex items-center gap-2">
-        <div className="w-8 h-8 bg-black rounded-lg flex items-center justify-center">
-          <Hammer className="text-white" size={16} />
-        </div>
-        <div>
-          <h2 className="font-black text-gray-800 tracking-tight">livart 对话</h2>
-          <p className="text-[9px] text-gray-400 uppercase tracking-widest font-black">直接生成与编辑图像</p>
-        </div>
-      </div>
+  const getImageResultCards = (message: ChatMessage) => {
+    if (message.role !== 'assistant') return [];
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-6 scrollbar-hide">
-        {messages.map((message) => (
-          <div key={message.id} className={`flex flex-col ${message.role === 'user' ? 'items-end' : 'items-start'}`}>
-            <div className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
-              message.role === 'user'
-                ? 'bg-black text-white shadow-lg'
-                : 'bg-gray-100 text-gray-800'
-            }`}>
-              {renderMessageText(message.text, message.role)}
-              {renderMessageImages(message)}
-            </div>
-            <span className="text-[10px] text-gray-400 mt-1 px-1 font-medium">
-              {new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-            </span>
-          </div>
-        ))}
+    const explicitCards = message.imageResultCards || [];
+    if (explicitCards.length > 0) return explicitCards;
 
-        {isThinking && (
-          <div className="flex items-center gap-3 text-black text-sm font-bold animate-pulse">
-            <Loader2 className="animate-spin" size={16} />
-            <span>livart 正在生成中...</span>
-          </div>
-        )}
-      </div>
+    return (message.imageIds || []).map(imageId => ({
+      imageId
+    }));
+  };
 
-      <div className="p-4 bg-white border-t border-gray-100 space-y-3">
-        <form ref={formRef} onSubmit={handleSubmit} className="relative">
-          <div className="mb-2 flex items-center gap-2 rounded-2xl border border-gray-100 bg-gray-50 p-1.5">
-            <span className="shrink-0 px-2 text-[10px] font-black uppercase tracking-widest text-gray-400">画幅</span>
-            <div className="scrollbar-hide flex min-w-0 flex-1 gap-1 overflow-x-auto">
-              {IMAGE_ASPECT_RATIO_OPTIONS.map((option) => (
+  const renderImageResultCards = (message: ChatMessage) => {
+    const cards = getImageResultCards(message);
+    if (cards.length === 0) return null;
+
+    const attachedCards = cards
+      .map(card => {
+        const item = imageItemsById.get(card.imageId);
+        if (!item || item.type !== 'image' || item.status !== 'completed' || !item.content) return null;
+        const title = card.title || getCanvasItemDisplayTitle(item);
+        return {
+          ...card,
+          item,
+          title,
+          modelName: card.modelName || getImageModelDisplayName(),
+          description: card.description || buildImageResultDescription(title, message.text.includes('编辑') || message.text.includes('去背景') ? 'edited' : 'generated')
+        };
+      })
+      .filter((card): card is NonNullable<typeof card> => !!card);
+
+    if (attachedCards.length === 0) return null;
+
+    return (
+      <div className="grid w-full gap-5">
+        {attachedCards.map((card) => {
+          const previewStyle = getImagePreviewFitStyle(card.item, 332, 260);
+          return (
+            <div key={card.item.id} className="w-full text-left">
+              <div className="mb-3 flex items-center gap-1.5 text-[12px] font-bold text-zinc-400">
+                <Eye size={14} strokeWidth={2.2} />
+                <span>{card.modelName}</span>
+              </div>
+              <h3 className="mb-3 text-[16px] font-black leading-snug text-zinc-800">
+                {card.title}
+              </h3>
+              <div className="group relative overflow-hidden rounded-[4px] bg-zinc-100" style={previewStyle}>
                 <button
-                  key={option.value}
                   type="button"
-                  title={option.title}
-                  disabled={isInputBusy}
-                  onClick={() => setSelectedAspectRatio(option.value)}
-                  className={`shrink-0 rounded-xl px-2.5 py-1.5 text-[11px] font-black transition-all ${
-                    selectedAspectRatio === option.value
-                      ? 'bg-black text-white shadow-lg shadow-black/10'
-                      : 'bg-white text-gray-500 hover:bg-indigo-50 hover:text-indigo-600'
-                  } disabled:opacity-40`}
+                  onClick={() => openImageViewer(card.item, card.title)}
+                  title="打开大图预览"
+                  className="block h-full w-full text-left"
                 >
-                  {option.label}
+                  <img
+                    src={getThumbnailImageSrc(card.item)}
+                    className="h-full w-full object-cover transition-transform group-hover:scale-[1.01]"
+                    alt={card.title}
+                  />
                 </button>
-              ))}
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    downloadOriginalImage(card.item, card.title);
+                  }}
+                  className="absolute bottom-3 right-3 flex h-9 w-9 items-center justify-center rounded-full bg-white/95 text-zinc-900 opacity-0 shadow-lg ring-1 ring-black/10 transition-all hover:scale-105 hover:bg-white group-hover:opacity-100"
+                  title="下载原始图片"
+                >
+                  <Download size={16} />
+                </button>
+              </div>
+              <p className="mt-4 text-[15px] font-medium leading-7 text-zinc-700">
+                {card.description}
+              </p>
             </div>
-          </div>
+          );
+        })}
+      </div>
+    );
+  };
 
-          <div className="flex items-end gap-2 w-full pr-2 py-2 pl-3 bg-gray-50 border border-gray-200 rounded-2xl focus-within:ring-4 focus-within:ring-black/5 focus-within:border-black transition-all">
-            <ImageMentionEditor
-              value={inputValue}
-              imageItems={completedImageItems}
-              onChange={handleInputChange}
-              disabled={isInputBusy}
-              placeholder={contextImage ? '输入对这张图的修改要求...' : '描述画面，或输入 @ 选择参考图...'}
-              className="prompt-editor scrollbar-hide min-w-0 flex-1 min-h-[72px] max-h-28 overflow-y-auto overflow-x-hidden bg-transparent py-1.5 text-sm leading-6 font-medium outline-none whitespace-pre-wrap break-words"
-              itemHint={() => '点击后插入稳定 ID 引用'}
-              onSubmitShortcut={() => formRef.current?.requestSubmit()}
-            />
+  const imageViewerControlClass = 'inline-flex h-10 w-10 items-center justify-center rounded-full text-zinc-100 transition-all hover:bg-white/10 hover:text-white active:scale-95 disabled:cursor-not-allowed disabled:opacity-35';
+
+  const renderImageViewer = () => {
+    if (!imageViewer) return null;
+
+    const viewerImageSrc = getLargestCanvasImageSrc(imageViewer.item) || getThumbnailImageSrc(imageViewer.item);
+    const canZoomOut = imageViewerZoom > IMAGE_VIEWER_MIN_ZOOM;
+    const canZoomIn = imageViewerZoom < IMAGE_VIEWER_MAX_ZOOM;
+
+    if (typeof document === 'undefined') return null;
+
+    return createPortal(
+      <div
+        className="fixed inset-0 z-[6000000] bg-black/50 text-white backdrop-blur-[1px]"
+        role="dialog"
+        aria-modal="true"
+        aria-label="原始大图预览"
+        onMouseDown={(event) => {
+          if (event.target === event.currentTarget) {
+            closeImageViewer();
+          }
+        }}
+      >
+        <button
+          type="button"
+          className="absolute inset-0 z-0 cursor-default"
+          onClick={closeImageViewer}
+          aria-label="关闭大图预览"
+        />
+        <button
+          type="button"
+          className="absolute right-8 top-12 z-20 inline-flex h-11 w-11 items-center justify-center rounded-full bg-zinc-900/80 text-white shadow-2xl ring-1 ring-white/10 transition-all hover:bg-zinc-950 active:scale-95"
+          onClick={closeImageViewer}
+          title="关闭"
+        >
+          <X size={22} />
+        </button>
+
+        <div className="pointer-events-none absolute inset-0 z-10 flex select-none items-center justify-center overflow-hidden px-10 py-20" onWheel={handleImageViewerWheel}>
+          <img
+            src={viewerImageSrc}
+            alt={imageViewer.title}
+            draggable={false}
+            onPointerDown={handleImageViewerPointerDown}
+            onPointerMove={handleImageViewerPointerMove}
+            onPointerUp={handleImageViewerPointerEnd}
+            onPointerCancel={handleImageViewerPointerEnd}
+            onClick={(event) => event.stopPropagation()}
+            className={`pointer-events-auto max-h-[calc(100vh-168px)] max-w-[calc(100vw-80px)] object-contain will-change-transform ${
+              imageViewerZoom > 1 ? 'cursor-grab active:cursor-grabbing' : 'cursor-zoom-in'
+            }`}
+            style={{
+              transform: `translate3d(${imageViewerPan.x}px, ${imageViewerPan.y}px, 0) rotate(${imageViewerRotation}deg) scale(${imageViewerZoom})`,
+              transformOrigin: 'center center',
+              transition: imageViewerDragRef.current ? 'none' : 'transform 120ms ease-out'
+            }}
+          />
+        </div>
+
+        <div className="absolute bottom-9 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 rounded-full bg-zinc-900/80 px-2 py-2 shadow-2xl ring-1 ring-white/10 backdrop-blur-xl">
             <button
-              type="submit"
-              disabled={!inputValue.trim() || isInputBusy}
-              className="w-10 h-10 text-white rounded-xl hover:scale-105 active:scale-95 transition-all flex items-center justify-center shadow-lg shadow-black/10 flex-shrink-0 bg-black disabled:opacity-30"
+              type="button"
+              className={imageViewerControlClass}
+              onClick={() => rotateImageViewerBy(-90)}
+              title="向左旋转 90°"
             >
-              <Send size={18} />
+              <RotateCcw size={18} />
+            </button>
+            <button
+              type="button"
+              className={imageViewerControlClass}
+              onClick={() => rotateImageViewerBy(90)}
+              title="向右旋转 90°"
+            >
+              <RotateCw size={18} />
+            </button>
+            <span className="mx-1 h-5 w-px bg-white/20" />
+            <button
+              type="button"
+              className={imageViewerControlClass}
+              onClick={() => zoomImageViewerBy(-IMAGE_VIEWER_ZOOM_STEP)}
+              disabled={!canZoomOut}
+              title="缩小"
+            >
+              <ZoomOut size={18} />
+            </button>
+            <div className="min-w-14 px-1 text-center text-xs font-black tabular-nums text-zinc-200">
+              {Math.round(imageViewerZoom * 100)}%
+            </div>
+            <button
+              type="button"
+              className={imageViewerControlClass}
+              onClick={() => zoomImageViewerBy(IMAGE_VIEWER_ZOOM_STEP)}
+              disabled={!canZoomIn}
+              title="放大，最多 10 倍"
+            >
+              <ZoomIn size={18} />
+            </button>
+            <span className="mx-1 h-5 w-px bg-white/20" />
+            <button
+              type="button"
+              className={imageViewerControlClass}
+              onClick={downloadImageViewerImage}
+              title="下载原图"
+            >
+              <Download size={18} />
             </button>
           </div>
-        </form>
+      </div>,
+      document.body
+    );
+  };
+
+  return (
+    <>
+      <div className="w-96 bg-white border-l border-gray-200 h-full flex flex-col z-50 overflow-hidden">
+        <div className="p-4 border-b border-gray-50 bg-gray-50/30 flex items-center gap-2">
+          <LivartLogo size={32} className="shrink-0" />
+          <div>
+            <h2 className="font-black text-gray-800 tracking-tight">livart 对话</h2>
+            <p className="text-[9px] text-gray-400 uppercase tracking-widest font-black">直接生成与编辑图像</p>
+          </div>
+        </div>
+
+        <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-6 scrollbar-hide">
+          {messages.map((message) => {
+            const resultCards = renderImageResultCards(message);
+            const isImageResultMessage = !!resultCards;
+
+            return (
+              <div key={message.id} className={`flex flex-col ${message.role === 'user' ? 'items-end' : 'items-start'}`}>
+                <div className={isImageResultMessage
+                  ? 'w-full bg-white text-sm leading-relaxed text-gray-800'
+                  : `max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
+                    message.role === 'user'
+                      ? 'bg-black text-white shadow-lg'
+                      : 'bg-gray-100 text-gray-800'
+                  }`
+                }>
+                  {isImageResultMessage ? resultCards : (
+                    <>
+                      {renderMessageText(message.text, message.role)}
+                      {renderMessageImages(message)}
+                    </>
+                  )}
+                </div>
+                <span className="text-[10px] text-gray-400 mt-1 px-1 font-medium">
+                  {new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  {typeof message.durationMs === 'number' && ` · 耗时 ${formatExecutionDuration(message.durationMs)}`}
+                </span>
+              </div>
+            );
+          })}
+
+          {isThinking && (
+            <div className="flex items-center gap-3 text-black text-sm font-bold animate-pulse">
+              <Loader2 className="animate-spin" size={16} />
+              <span>
+                livart 正在执行{activeTaskCount > 1 ? ` ${activeTaskCount} 个任务` : '中'}...
+                {activeTaskDurationText && ` 最早任务已执行 ${activeTaskDurationText}`}
+                <span className="ml-1 text-gray-400">可继续提交新任务</span>
+              </span>
+            </div>
+          )}
+        </div>
+
+        <div className="p-4 bg-white border-t border-gray-100 space-y-3">
+          <form ref={formRef} onSubmit={handleSubmit} className="relative">
+            <div className="mb-2 flex items-center gap-2 rounded-2xl border border-gray-100 bg-gray-50 p-1.5">
+              <span className="shrink-0 px-2 text-[10px] font-black uppercase tracking-widest text-gray-400">画幅</span>
+              <div className="flex min-w-0 flex-1 flex-wrap gap-1.5">
+                {IMAGE_ASPECT_RATIO_OPTIONS.map((option) => {
+                  const isSelected = selectedAspectRatio === option.value;
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      title={option.title}
+                      onClick={() => setSelectedAspectRatio(option.value)}
+                      className={`flex shrink-0 items-center gap-1 rounded-xl px-1.5 py-1.5 text-[10px] font-black transition-all ${
+                        isSelected
+                          ? 'bg-black text-white shadow-lg shadow-black/10'
+                          : 'bg-white text-gray-500 hover:bg-indigo-50 hover:text-indigo-600'
+                      }`}
+                    >
+                      <span className="flex h-6 w-8 shrink-0 items-center justify-center">
+                        <span
+                          className={`block rounded-[3px] border-2 ${
+                            option.value === 'auto'
+                              ? isSelected ? 'border-dashed border-white' : 'border-dashed border-gray-400'
+                              : isSelected ? 'border-white bg-white/10' : 'border-gray-500 bg-white'
+                          }`}
+                          style={getAspectRatioPreviewStyle(option.value)}
+                        />
+                      </span>
+                      <span>{option.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="flex items-end gap-2 w-full pr-2 py-2 pl-3 bg-gray-50 border border-gray-200 rounded-2xl focus-within:ring-4 focus-within:ring-black/5 focus-within:border-black transition-all">
+              <ImageMentionEditor
+                value={inputValue}
+                imageItems={completedImageItems}
+                onChange={handleInputChange}
+                disabled={false}
+                placeholder={contextImage ? '输入对这张图的修改要求...' : '描述画面，或输入 @ 选择参考图...'}
+                className="prompt-editor scrollbar-hide min-w-0 flex-1 min-h-[72px] max-h-28 overflow-y-auto overflow-x-hidden bg-transparent py-1.5 text-sm leading-6 font-medium outline-none whitespace-pre-wrap break-words"
+                itemHint={() => '点击后插入稳定 ID 引用'}
+                onSubmitShortcut={() => formRef.current?.requestSubmit()}
+              />
+              <button
+                type="submit"
+                disabled={!inputValue.trim()}
+                className="w-10 h-10 text-white rounded-xl hover:scale-105 active:scale-95 transition-all flex items-center justify-center shadow-lg shadow-black/10 flex-shrink-0 bg-black disabled:opacity-30"
+              >
+                <Send size={18} />
+              </button>
+            </div>
+          </form>
+        </div>
       </div>
-    </div>
+      {renderImageViewer()}
+    </>
   );
 };
 

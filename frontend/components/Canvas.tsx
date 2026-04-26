@@ -1,14 +1,14 @@
 
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import type { CanvasItem, CanvasTool, ImageAspectRatio } from '../types';
+import type { CanvasItem, CanvasTool, CanvasTextStyle, ChatMessage, ImageAspectRatio } from '../types';
 import { 
   Loader2, Trash2, Type, 
   Sparkles, ChevronUp, ChevronDown, 
   MousePointer2, Eraser, 
   MessageSquarePlus, Pencil,
   Copy, Layers, Scissors, Check, X,
-  ImagePlus, Palette, Maximize2, Wand2,
-  Download, Send
+  Palette, Maximize2, Wand2,
+  Download, Send, AlignLeft, AlignCenter, AlignRight, SlidersHorizontal
 } from 'lucide-react';
 import { canUseImageJobs, editImage, generateWorkflowImage, type ImageGenerationResult, submitImageEditJob, waitForImageJob } from '../services/gemini';
 import {
@@ -27,6 +27,9 @@ import {
   resolveMentionedImageReferences
 } from '../services/imageReferences';
 import { ensureCanvasImageAsset, getCanvasItemAssetId } from '../services/canvasPersistence';
+import { formatExecutionDuration } from '../services/taskTiming';
+import { buildImageResultDescription, generateImageTitleFromPrompt, getCanvasItemDisplayTitle } from '../services/imageTitle';
+import { getApiConfig, getImageModelDisplayName } from '../services/config';
 
 interface CanvasProps {
   items: CanvasItem[];
@@ -39,10 +42,10 @@ interface CanvasProps {
   onItemDelete: (id: string) => void;
   onItemDeleteMultiple: (ids: string[]) => void;
   onItemAdd: (item: CanvasItem) => void; 
-  onAddTextAt: (x: number, y: number) => void;
+  onAddTextAt: (x: number, y: number) => string;
   onAddImageAt: (file: File, x: number, y: number) => void;
   onAddToChat: (item: CanvasItem) => void;
-  onChatMessage: (text: string, role: 'user' | 'assistant', options?: { imageIds?: string[] }) => void;
+  onChatMessage: (text: string, role: 'user' | 'assistant', options?: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs'>) => void;
   onImagePromptRequest: (item: CanvasItem, prompt?: string, mode?: 'local-redraw' | 'remover') => void;
   onBeforeCanvasMutation: () => void;
   canvasTool: CanvasTool;
@@ -62,8 +65,21 @@ type CropDragState = {
   itemWidth: number;
   itemHeight: number;
 };
+type CanvasRect = Pick<CanvasItem, 'x' | 'y' | 'width' | 'height'>;
+type SnapGuide = {
+  axis: 'x' | 'y';
+  position: number;
+  spanStart: number;
+  spanEnd: number;
+};
+type SnapCandidate = {
+  delta: number;
+  distance: number;
+  guide: SnapGuide;
+};
 
 const REMOVER_PROMPT = '把圈起来的地方删除掉。';
+const BACKGROUND_REMOVAL_PROMPT = '先识别图片中的主要主体：画面最主要的人物、商品、动物、车辆或成组前景对象；主体包含其穿戴、手持、贴附和与主体直接组成整体的部分。只保留主体，去掉主体以外的一切背景和无关物体，只改变非主体区域透明度/alpha matte，不要改变主体 RGB 像素。不要重绘、修复、补全、美化、移动或缩放主体；严格保留原图中已经可见的主体像素、裁切范围、构图、脸、表情、姿态、服装、颜色、纹理、发丝和边缘细节；原图里被裁切到画面外的身体、头发、衣服不要补出来。输出透明背景 PNG。';
 
 const getCanvasDimension = (value: number) => Math.max(1, Math.round(value));
 
@@ -77,8 +93,124 @@ const QUICK_EDIT_FOCUS_MAX_ZOOM = 1.45;
 const CANVAS_OVERLAY_MARGIN = 16;
 const DEFAULT_INLINE_IMAGE_EDITOR_SIZE = { width: 760, height: INLINE_IMAGE_TOOLBAR_HEIGHT };
 const DERIVED_IMAGE_GAP = 20;
+const SNAP_SCREEN_THRESHOLD = 2;
+const SNAP_GUIDE_MARGIN = 28;
+const TEXT_LAYER_PLACEHOLDER = '双击输入文字';
+const TEXT_TOOLBAR_HEIGHT = 44;
+const TEXT_TOOLBAR_WIDTH = 576;
+const EMPTY_TEXT_ITEM_WIDTH = 2;
+const MIN_TEXT_FONT_SIZE = 12;
+const MAX_TEXT_FONT_SIZE = 200;
+const DEFAULT_TEXT_STYLE: Required<CanvasTextStyle> = {
+  fontFamily: 'Inter',
+  fontSize: 32,
+  fontWeight: 700,
+  fontStyle: 'normal',
+  textDecoration: 'none',
+  color: '#18181b',
+  strokeColor: '#ffffff',
+  strokeWidth: 0,
+  backgroundColor: 'transparent',
+  textAlign: 'left',
+  lineHeight: 1.2
+};
+const TEXT_FONT_FAMILIES = [
+  'Inter',
+  'PingFang SC',
+  'Noto Sans SC',
+  'Microsoft YaHei',
+  'Source Han Sans SC',
+  'HarmonyOS Sans SC',
+  'Alibaba PuHuiTi',
+  'Smiley Sans',
+  'Arial',
+  'Helvetica',
+  'Avenir Next',
+  'DIN Alternate',
+  'Futura',
+  'Gill Sans',
+  'Trebuchet MS',
+  'Verdana',
+  'Georgia',
+  'Times New Roman',
+  'Songti SC',
+  'SimSun',
+  'Kaiti SC',
+  'KaiTi',
+  'STKaiti',
+  'SimHei',
+  'Courier New',
+  'Menlo',
+  'Monaco',
+  'Comic Sans MS',
+  'Impact',
+  'Brush Script MT'
+];
+const TEXT_FONT_STYLES = [
+  { label: 'Regular', fontWeight: 400, fontStyle: 'normal' as const },
+  { label: 'Black', fontWeight: 900, fontStyle: 'normal' as const },
+  { label: 'Bold', fontWeight: 700, fontStyle: 'normal' as const },
+  { label: 'ExtraBold', fontWeight: 800, fontStyle: 'normal' as const },
+  { label: 'ExtraLight', fontWeight: 200, fontStyle: 'normal' as const },
+  { label: 'Italic', fontWeight: 400, fontStyle: 'italic' as const },
+  { label: 'Light', fontWeight: 300, fontStyle: 'normal' as const },
+  { label: 'Medium', fontWeight: 500, fontStyle: 'normal' as const },
+  { label: 'SemiBold', fontWeight: 600, fontStyle: 'normal' as const }
+];
+const TEXT_FONT_SIZES = [24, 32, 48, 64, 80, 96, 120, 160];
+const TEXT_STROKE_WIDTHS = [0, 1, 2, 4, 6];
+const TEXT_COLOR_PALETTE = [
+  '#18181b', '#ffffff', '#ef4444', '#f97316', '#f59e0b', '#eab308',
+  '#22c55e', '#10b981', '#06b6d4', '#3b82f6', '#6366f1', '#8b5cf6',
+  '#d946ef', '#ec4899', '#78716c', '#a1a1aa', '#000000', '#f8fafc'
+];
 
 const clampValue = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+
+const getCanvasTextStyle = (item: CanvasItem): Required<CanvasTextStyle> => ({
+  ...DEFAULT_TEXT_STYLE,
+  ...(item.textStyle || {})
+});
+
+const getCanvasTextCss = (style: Required<CanvasTextStyle>): React.CSSProperties => ({
+  color: style.color,
+  backgroundColor: style.backgroundColor,
+  fontSize: style.fontSize,
+  fontWeight: style.fontWeight,
+  fontStyle: style.fontStyle,
+  textDecoration: style.textDecoration,
+  textAlign: style.textAlign,
+  lineHeight: style.lineHeight,
+  fontFamily: `${style.fontFamily}, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`,
+  whiteSpace: 'pre-wrap',
+  overflowWrap: 'break-word',
+  WebkitTextStroke: style.strokeWidth > 0 ? `${style.strokeWidth}px ${style.strokeColor}` : undefined,
+  paintOrder: 'stroke fill'
+});
+
+const getTextContentFrame = (content: string, style: Required<CanvasTextStyle>) => {
+  const lines = content.split('\n');
+  const lineHeight = Math.max(1, style.fontSize * style.lineHeight);
+  const fallbackWidth = Math.max(EMPTY_TEXT_ITEM_WIDTH, Math.ceil(Math.max(...lines.map(line => line.length), 1) * style.fontSize * 0.58));
+  let measuredWidth = fallbackWidth;
+
+  if (typeof document !== 'undefined') {
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    if (context) {
+      context.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize}px ${style.fontFamily}, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+      measuredWidth = Math.max(
+        EMPTY_TEXT_ITEM_WIDTH,
+        Math.ceil(Math.max(...lines.map(line => context.measureText(line || ' ').width)))
+      );
+    }
+  }
+
+  return {
+    width: content.trim() ? measuredWidth + style.strokeWidth * 2 + 2 : EMPTY_TEXT_ITEM_WIDTH,
+    height: Math.max(40, Math.ceil(Math.max(1, lines.length) * lineHeight + style.strokeWidth * 2 + 2))
+  };
+};
 
 const canvasRectsOverlap = (
   left: Pick<CanvasItem, 'x' | 'y' | 'width' | 'height'>,
@@ -90,6 +222,120 @@ const canvasRectsOverlap = (
   left.y < right.y + right.height + padding &&
   left.y + left.height + padding > right.y
 );
+
+const getGroupBounds = (rects: CanvasRect[]): CanvasRect | null => {
+  if (rects.length === 0) return null;
+
+  const minX = Math.min(...rects.map(rect => rect.x));
+  const minY = Math.min(...rects.map(rect => rect.y));
+  const maxX = Math.max(...rects.map(rect => rect.x + rect.width));
+  const maxY = Math.max(...rects.map(rect => rect.y + rect.height));
+  return {
+    x: minX,
+    y: minY,
+    width: maxX - minX,
+    height: maxY - minY
+  };
+};
+
+const getAxisPoints = (rect: CanvasRect, axis: 'x' | 'y') => (
+  axis === 'x'
+    ? [rect.x, rect.x + rect.width / 2, rect.x + rect.width]
+    : [rect.y, rect.y + rect.height / 2, rect.y + rect.height]
+);
+
+const buildSnapGuide = (axis: 'x' | 'y', position: number, sourceRect: CanvasRect, targetRect: CanvasRect): SnapGuide => {
+  if (axis === 'x') {
+    return {
+      axis,
+      position,
+      spanStart: Math.min(sourceRect.y, targetRect.y) - SNAP_GUIDE_MARGIN,
+      spanEnd: Math.max(sourceRect.y + sourceRect.height, targetRect.y + targetRect.height) + SNAP_GUIDE_MARGIN
+    };
+  }
+
+  return {
+    axis,
+    position,
+    spanStart: Math.min(sourceRect.x, targetRect.x) - SNAP_GUIDE_MARGIN,
+    spanEnd: Math.max(sourceRect.x + sourceRect.width, targetRect.x + targetRect.width) + SNAP_GUIDE_MARGIN
+  };
+};
+
+const findSnapCandidate = (
+  axis: 'x' | 'y',
+  sourceRect: CanvasRect,
+  targetRects: CanvasRect[],
+  threshold: number
+): SnapCandidate | null => {
+  const sourcePoints = getAxisPoints(sourceRect, axis);
+
+  return targetRects.reduce<SnapCandidate | null>((bestCandidate, targetRect) => {
+    const targetPoints = getAxisPoints(targetRect, axis);
+
+    for (const sourcePoint of sourcePoints) {
+      for (const targetPoint of targetPoints) {
+        const delta = targetPoint - sourcePoint;
+        const distance = Math.abs(delta);
+        if (distance > threshold) continue;
+
+        if (!bestCandidate || distance < bestCandidate.distance) {
+          bestCandidate = {
+            delta,
+            distance,
+            guide: buildSnapGuide(axis, targetPoint, sourceRect, targetRect)
+          };
+        }
+      }
+    }
+
+    return bestCandidate;
+  }, null);
+};
+
+const getDraggedItemsSnapResult = (
+  items: CanvasItem[],
+  selectedIds: string[],
+  dx: number,
+  dy: number,
+  zoom: number
+) => {
+  const selectedIdSet = new Set(selectedIds);
+  const selectedRects = items.filter(item => selectedIdSet.has(item.id)).map(item => ({
+    x: item.x,
+    y: item.y,
+    width: item.width,
+    height: item.height
+  }));
+  const targetRects = items.filter(item => !selectedIdSet.has(item.id)).map(item => ({
+    x: item.x,
+    y: item.y,
+    width: item.width,
+    height: item.height
+  }));
+  const sourceBounds = getGroupBounds(selectedRects);
+
+  if (!sourceBounds || targetRects.length === 0) {
+    return { dx, dy, guides: [] as SnapGuide[] };
+  }
+
+  const safeZoom = Math.max(0.01, zoom);
+  const threshold = SNAP_SCREEN_THRESHOLD / safeZoom;
+  const proposedBounds = {
+    ...sourceBounds,
+    x: sourceBounds.x + dx,
+    y: sourceBounds.y + dy
+  };
+  const xSnap = findSnapCandidate('x', proposedBounds, targetRects, threshold);
+  const ySnap = findSnapCandidate('y', proposedBounds, targetRects, threshold);
+  const guides = [xSnap?.guide, ySnap?.guide].filter((guide): guide is SnapGuide => !!guide);
+
+  return {
+    dx: dx + (xSnap?.delta || 0),
+    dy: dy + (ySnap?.delta || 0),
+    guides
+  };
+};
 
 const findRightSideCanvasPosition = (
   items: CanvasItem[],
@@ -512,6 +758,13 @@ const sanitizeDownloadFilename = (value: string) => {
     .slice(0, 80) || 'image';
 };
 
+const escapeSvgText = (value: string) => value
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&apos;');
+
 const getImageFileExtension = (source: string, mimeType = '') => {
   const normalizedMimeType = mimeType.toLowerCase();
   if (normalizedMimeType.includes('jpeg') || normalizedMimeType.includes('jpg')) return '.jpg';
@@ -537,7 +790,7 @@ const getImageDataUrlMimeType = (source: string) => {
 };
 
 const buildImageDownloadFilename = (item: CanvasItem, extension: string) => {
-  const filenameBase = sanitizeDownloadFilename(item.label || `image-${item.id}`);
+  const filenameBase = sanitizeDownloadFilename(getCanvasItemDisplayTitle(item) || `image-${item.id}`);
   return `${filenameBase.replace(/\.(png|jpe?g|webp|gif|svg|avif)$/i, '')}${extension}`;
 };
 
@@ -573,6 +826,7 @@ const Canvas: React.FC<CanvasProps> = ({
   const [lastMousePos, setLastMousePos] = useState({ x: 0, y: 0 });
   const [selectionBox, setSelectionBox] = useState<{ startX: number, startY: number, x: number, y: number, w: number, h: number } | null>(null);
   const [isDraggingImageFile, setIsDraggingImageFile] = useState(false);
+  const [snapGuides, setSnapGuides] = useState<SnapGuide[]>([]);
 
   // 绘图工具状态
   const [activeTool, setActiveTool] = useState<'select' | 'brush' | 'eraser'>('select');
@@ -584,10 +838,13 @@ const Canvas: React.FC<CanvasProps> = ({
   const [inlineEditPrompts, setInlineEditPrompts] = useState<Record<string, string>>({});
   const [inlineEditErrors, setInlineEditErrors] = useState<Record<string, string>>({});
   const [inlineEditingIds, setInlineEditingIds] = useState<Set<string>>(() => new Set());
+  const [inlineEditingStartedAt, setInlineEditingStartedAt] = useState<Record<string, number>>({});
+  const [inlineTimerNow, setInlineTimerNow] = useState(() => Date.now());
   const [inlineEditAspectRatio, setInlineEditAspectRatio] = useState<ImageAspectRatio>('auto');
   const [localRedrawItemId, setLocalRedrawItemId] = useState<string | null>(null);
   const [localRemoverItemId, setLocalRemoverItemId] = useState<string | null>(null);
   const [quickEditItemId, setQuickEditItemId] = useState<string | null>(null);
+  const [editingTextItemId, setEditingTextItemId] = useState<string | null>(null);
   const [cropItemId, setCropItemId] = useState<string | null>(null);
   const [cropRect, setCropRect] = useState<CropRect | null>(null);
   const [cropDragState, setCropDragState] = useState<CropDragState | null>(null);
@@ -595,6 +852,9 @@ const Canvas: React.FC<CanvasProps> = ({
   const inlineEditingIdsRef = useRef<Set<string>>(new Set());
   const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const quickEditInputRef = useRef<HTMLInputElement | null>(null);
+  const textEditorRef = useRef<HTMLTextAreaElement | null>(null);
+  const [activeTextPopover, setActiveTextPopover] = useState<'fill' | 'stroke' | 'font' | 'style' | 'size' | null>(null);
+  const [textFontSearch, setTextFontSearch] = useState('');
   const maskStrokePointsRef = useRef<MaskPoint[]>([]);
   const imageToolbarRef = useRef<HTMLDivElement | null>(null);
   const [canvasViewportSize, setCanvasViewportSize] = useState({ width: 0, height: 0 });
@@ -602,6 +862,9 @@ const Canvas: React.FC<CanvasProps> = ({
 
   const containerRef = useRef<HTMLDivElement>(null);
   const selectedItem = items.find(i => selectedIds.length === 1 && i.id === selectedIds[0]);
+  const selectedItemIsText = selectedItem?.type === 'text';
+  const selectedTextStyle = selectedItemIsText ? getCanvasTextStyle(selectedItem) : DEFAULT_TEXT_STYLE;
+  const selectedTextIsEditing = selectedItemIsText && selectedItem.id === editingTextItemId;
   const isDraggingSelectedImage = !!dragState && selectedItem?.type === 'image' && selectedIds.includes(dragState.id);
   const selectedItemIsInlineEditing = selectedItem ? inlineEditingIds.has(selectedItem.id) : false;
   const selectedItemIsLocalRedraw = selectedItem?.type === 'image' && selectedItem.id === localRedrawItemId;
@@ -613,6 +876,10 @@ const Canvas: React.FC<CanvasProps> = ({
   const activeImageMaskStrokeColor = selectedItemIsRemover ? 'rgba(239, 68, 68, 0.55)' : 'rgba(99, 102, 241, 0.55)';
   const selectedInlineEditError = selectedItem ? inlineEditErrors[selectedItem.id] : '';
   const inlineEditPrompt = selectedItem?.type === 'image' ? inlineEditPrompts[selectedItem.id] || '' : '';
+  const selectedInlineEditStartedAt = selectedItem ? inlineEditingStartedAt[selectedItem.id] : undefined;
+  const selectedInlineEditDurationText = selectedItemIsInlineEditing && selectedInlineEditStartedAt
+    ? formatExecutionDuration(inlineTimerNow - selectedInlineEditStartedAt)
+    : '';
   const completedImageItems = useMemo(
     () => items.filter(item => item.type === 'image' && item.status === 'completed' && !!item.content),
     [items]
@@ -623,6 +890,10 @@ const Canvas: React.FC<CanvasProps> = ({
       : [],
     [completedImageItems, selectedItem?.id, selectedItem?.type]
   );
+  useEffect(() => {
+    setActiveTextPopover(null);
+    setTextFontSearch('');
+  }, [selectedItem?.id, selectedItem?.type]);
   const imageItemById = useMemo(
     () => new Map(items.filter(item => item.type === 'image').map(item => [item.id, item])),
     [items]
@@ -743,6 +1014,41 @@ const Canvas: React.FC<CanvasProps> = ({
     };
   }, [canvasViewportSize.width, pan, selectedItem, zoom]);
 
+  const selectedTextToolbarPosition = useMemo(() => {
+    if (!selectedItem || selectedItem.type !== 'text') {
+      return {
+        left: 0,
+        top: 0,
+        transform: 'scale(1)',
+        transformOrigin: 'top left'
+      };
+    }
+
+    const safeZoom = zoom || 1;
+    const viewportWidth = canvasViewportSize.width;
+    const itemLeft = pan.x + selectedItem.x * safeZoom;
+    const itemTop = pan.y + selectedItem.y * safeZoom;
+    const toolbarWidth = TEXT_TOOLBAR_WIDTH;
+    let screenLeft = itemLeft;
+
+    if (viewportWidth > 0) {
+      screenLeft = clampValue(
+        screenLeft,
+        CANVAS_OVERLAY_MARGIN,
+        Math.max(CANVAS_OVERLAY_MARGIN, viewportWidth - CANVAS_OVERLAY_MARGIN - toolbarWidth)
+      );
+    }
+
+    const screenTop = Math.max(CANVAS_OVERLAY_MARGIN, itemTop - TEXT_TOOLBAR_HEIGHT - 10);
+
+    return {
+      left: (screenLeft - pan.x) / safeZoom,
+      top: (screenTop - pan.y) / safeZoom,
+      transform: `scale(${1 / safeZoom})`,
+      transformOrigin: 'top left'
+    };
+  }, [canvasViewportSize.width, pan, selectedItem, zoom]);
+
   // 全局右键菜单状态
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, id: string } | null>(null);
 
@@ -813,6 +1119,7 @@ const Canvas: React.FC<CanvasProps> = ({
     selectedItemIsQuickEditing,
     selectedItemHasImageMaskTool,
     selectedItemIsCrop,
+    selectedInlineEditDurationText,
     inlineEditPrompt,
     selectedInlineEditError,
     selectedItem?.originalPrompt,
@@ -833,12 +1140,52 @@ const Canvas: React.FC<CanvasProps> = ({
   }, [quickEditItemId, selectedIds]);
 
   useEffect(() => {
+    if (canvasTool !== 'text') return;
+
+    setQuickEditItemId(null);
+    setLocalRedrawItemId(null);
+    setLocalRemoverItemId(null);
+    setCropItemId(null);
+    setCropRect(null);
+    setCropDragState(null);
+    setActiveTool('select');
+  }, [canvasTool]);
+
+  useEffect(() => {
     if (!selectedItemIsQuickEditing) return;
     window.requestAnimationFrame(() => {
       quickEditInputRef.current?.focus();
       quickEditInputRef.current?.select();
     });
   }, [selectedItemIsQuickEditing, selectedItem?.id]);
+
+  useEffect(() => {
+    if (!editingTextItemId || selectedIds.includes(editingTextItemId)) return;
+    setEditingTextItemId(null);
+  }, [editingTextItemId, selectedIds]);
+
+  useEffect(() => {
+    if (!selectedTextIsEditing) return;
+
+    window.requestAnimationFrame(() => {
+      const editor = textEditorRef.current;
+      if (!editor) return;
+      editor.focus();
+      const textLength = editor.value.length;
+      editor.setSelectionRange(textLength, textLength);
+    });
+  }, [selectedTextIsEditing, selectedItem?.id]);
+
+  useEffect(() => {
+    if (inlineEditingIds.size === 0) return;
+
+    setInlineTimerNow(Date.now());
+    const timerId = window.setInterval(() => {
+      setInlineTimerNow(Date.now());
+    }, 1000);
+
+    return () => window.clearInterval(timerId);
+  }, [inlineEditingIds.size]);
 
   useEffect(() => {
     if (!cropDragState) return;
@@ -990,6 +1337,58 @@ const Canvas: React.FC<CanvasProps> = ({
     setActiveTool('select');
   };
 
+  const enterTextEditMode = (item: CanvasItem) => {
+    if (item.type !== 'text') return;
+    setSelectedIds([item.id]);
+    resetImageToolModes();
+    setEditingTextItemId(item.id);
+  };
+
+  const finishTextEditMode = (item?: CanvasItem, element?: HTMLTextAreaElement) => {
+    setEditingTextItemId(null);
+    if (!item || item.type !== 'text') return;
+
+    const content = element?.value ?? item.content;
+    if (!content.trim()) {
+      onItemDelete(item.id);
+      setSelectedIds(selectedIds.filter(id => id !== item.id));
+      return;
+    }
+
+    setSelectedIds([]);
+  };
+
+  const updateSelectedTextStyle = (updates: CanvasTextStyle) => {
+    if (!selectedItem || selectedItem.type !== 'text') return;
+    const nextStyle = {
+      ...getCanvasTextStyle(selectedItem),
+      ...updates
+    };
+    const nextFrame = getTextContentFrame(selectedItem.content, nextStyle);
+    onBeforeCanvasMutation();
+    onItemUpdate(selectedItem.id, {
+      textStyle: nextStyle,
+      width: nextFrame.width,
+      height: nextFrame.height
+    });
+  };
+
+  const updateSelectedTextFontSize = (delta: number) => {
+    const nextFontSize = clampValue(selectedTextStyle.fontSize + delta, MIN_TEXT_FONT_SIZE, MAX_TEXT_FONT_SIZE);
+    updateSelectedTextStyle({ fontSize: nextFontSize });
+  };
+
+  const handleTextInput = (item: CanvasItem, element: HTMLTextAreaElement) => {
+    const nextContent = element.value.replace(/\n\n$/g, '\n');
+    const nextFrame = getTextContentFrame(nextContent, getCanvasTextStyle(item));
+    const updates: Partial<CanvasItem> = {
+      content: nextContent,
+      width: nextFrame.width,
+      height: nextFrame.height
+    };
+    onItemUpdate(item.id, updates);
+  };
+
   const focusImageForQuickEdit = (item: CanvasItem) => {
     const viewportWidth = canvasViewportSize.width || containerRef.current?.clientWidth || window.innerWidth;
     const viewportHeight = canvasViewportSize.height || containerRef.current?.clientHeight || window.innerHeight;
@@ -1072,6 +1471,17 @@ const Canvas: React.FC<CanvasProps> = ({
     onImagePromptRequest(item, prompt);
   };
 
+  const applyBackgroundRemoval = (item: CanvasItem) => {
+    resetImageToolModes();
+    setQuickEditItemId(null);
+    clearInlineEditError(item.id);
+    void handleInlineImageRedraw(undefined, {
+      item,
+      prompt: BACKGROUND_REMOVAL_PROMPT,
+      mode: 'background-removal'
+    });
+  };
+
   const handleDownloadSelectedImage = async (item: CanvasItem) => {
     const imageSource = getOriginalImageSrc(item) || getCanvasImageSrc(item);
     if (!imageSource || item.status !== 'completed') return;
@@ -1104,6 +1514,30 @@ const Canvas: React.FC<CanvasProps> = ({
     }
   };
 
+  const handleDownloadSelectedText = (item: CanvasItem) => {
+    if (item.type !== 'text' || !item.content.trim()) return;
+
+    const textStyle = getCanvasTextStyle(item);
+    const textAnchor = textStyle.textAlign === 'center' ? 'middle' : textStyle.textAlign === 'right' ? 'end' : 'start';
+    const textX = textStyle.textAlign === 'center' ? item.width / 2 : textStyle.textAlign === 'right' ? item.width : 0;
+    const textLines = item.content.split('\n');
+    const tspans = textLines.map((line, index) => (
+      `<tspan x="${textX}" dy="${index === 0 ? 0 : textStyle.fontSize * textStyle.lineHeight}">${escapeSvgText(line)}</tspan>`
+    )).join('');
+    const strokeAttributes = textStyle.strokeWidth > 0
+      ? ` stroke="${escapeSvgText(textStyle.strokeColor)}" stroke-width="${textStyle.strokeWidth * 2}" stroke-linejoin="round" paint-order="stroke fill"`
+      : '';
+    const svg = [
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.ceil(item.width)}" height="${Math.ceil(item.height)}" viewBox="0 0 ${Math.ceil(item.width)} ${Math.ceil(item.height)}">`,
+      `<text x="${textX}" y="${textStyle.strokeWidth}" text-anchor="${textAnchor}" dominant-baseline="text-before-edge" font-family="${escapeSvgText(textStyle.fontFamily)}, system-ui, sans-serif" font-size="${textStyle.fontSize}" font-weight="${textStyle.fontWeight}" font-style="${textStyle.fontStyle}" text-decoration="${textStyle.textDecoration}" fill="${escapeSvgText(textStyle.color)}"${strokeAttributes}>${tspans}</text>`,
+      '</svg>'
+    ].join('');
+    const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
+    const objectUrl = URL.createObjectURL(blob);
+    triggerBrowserDownload(objectUrl, `${sanitizeDownloadFilename(item.label || item.content.slice(0, 24) || 'text-layer')}.svg`);
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+  };
+
   const handleConfirmCrop = async () => {
     if (!selectedItem || selectedItem.type !== 'image' || !cropRect) return;
 
@@ -1122,7 +1556,7 @@ const Canvas: React.FC<CanvasProps> = ({
         width: frame.width,
         height: frame.height,
         status: 'completed',
-        label: '裁剪版本',
+        label: `${getCanvasItemDisplayTitle(selectedItem)}裁剪`,
         zIndex: nextZIndex,
         parentId: selectedItem.id,
         prompt: `从 ${selectedItem.id} 裁剪生成`,
@@ -1143,6 +1577,12 @@ const Canvas: React.FC<CanvasProps> = ({
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (isEditableTarget(e.target)) return;
+
+      if (e.key === 'Escape' && canvasTool === 'text') {
+        e.preventDefault();
+        onCanvasToolChange('select');
+        return;
+      }
 
       if (e.key === 'Tab' && selectedItemCanQuickEdit && selectedItem) {
         e.preventDefault();
@@ -1172,7 +1612,7 @@ const Canvas: React.FC<CanvasProps> = ({
       window.removeEventListener('keyup', handleKeyUp);
       window.removeEventListener('click', handleClickOutside);
     };
-  }, [onBeforeCanvasMutation, onItemDeleteMultiple, selectedIds, selectedItem, selectedItemCanQuickEdit]);
+  }, [canvasTool, onBeforeCanvasMutation, onCanvasToolChange, onItemDeleteMultiple, selectedIds, selectedItem, selectedItemCanQuickEdit]);
 
   useEffect(() => {
     const handleWheel = (event: WheelEvent) => {
@@ -1201,8 +1641,19 @@ const Canvas: React.FC<CanvasProps> = ({
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return;
-    if (isSpacePressed || canvasTool === 'pan') {
+    if (isEditableTarget(e.target)) return;
+
+    if (canvasTool === 'text') {
+      e.preventDefault();
       onBeforeCanvasMutation();
+      const newTextId = onAddTextAt((e.clientX - pan.x) / zoom, (e.clientY - pan.y) / zoom);
+      setEditingTextItemId(newTextId);
+      onCanvasToolChange('select');
+      setContextMenu(null);
+      return;
+    }
+
+    if (isSpacePressed || canvasTool === 'pan') {
       setIsPanning(true);
       setLastMousePos({ x: e.clientX, y: e.clientY });
       return;
@@ -1347,9 +1798,11 @@ const Canvas: React.FC<CanvasProps> = ({
     if (dragState) {
       const dx = (e.clientX - lastMousePos.x) / zoom;
       const dy = (e.clientY - lastMousePos.y) / zoom;
+      const snapResult = getDraggedItemsSnapResult(items, selectedIds, dx, dy, zoom);
       items.filter(i => selectedIds.includes(i.id)).forEach(item => {
-        onItemUpdate(item.id, { x: item.x + dx, y: item.y + dy });
+        onItemUpdate(item.id, { x: item.x + snapResult.dx, y: item.y + snapResult.dy });
       });
+      setSnapGuides(snapResult.guides);
       setLastMousePos({ x: e.clientX, y: e.clientY });
     }
   };
@@ -1386,6 +1839,7 @@ const Canvas: React.FC<CanvasProps> = ({
     }
     setIsPanning(false);
     setDragState(null);
+    setSnapGuides([]);
     setResizeState(null);
   };
 
@@ -1424,7 +1878,7 @@ const Canvas: React.FC<CanvasProps> = ({
 
   const startItemDrag = (e: React.MouseEvent, id: string) => {
     if (activeTool !== 'select' || isSpacePressed || canvasTool !== 'select') return;
-    if ((e.target as HTMLElement).tagName === 'TEXTAREA' || (e.target as HTMLElement).tagName === 'INPUT') return;
+    if (isEditableTarget(e.target)) return;
     if (e.button !== 0) return; 
     
     e.stopPropagation();
@@ -1474,9 +1928,21 @@ const Canvas: React.FC<CanvasProps> = ({
           await new Promise(r => { img.onload = r; img.onerror = r; });
           ctx.drawImage(img, item.x - selectedItem.x, item.y - selectedItem.y, item.width, item.height);
         } else if (item.type === 'text') {
-          ctx.font = 'bold 24px sans-serif';
-          ctx.fillStyle = '#000000';
-          ctx.fillText(item.content, item.x - selectedItem.x + 10, item.y - selectedItem.y + 30);
+          const textStyle = getCanvasTextStyle(item);
+          ctx.font = `${textStyle.fontStyle} ${textStyle.fontWeight} ${textStyle.fontSize}px ${textStyle.fontFamily}, system-ui, sans-serif`;
+          ctx.fillStyle = textStyle.color;
+          ctx.strokeStyle = textStyle.strokeColor;
+          ctx.lineWidth = textStyle.strokeWidth * 2;
+          ctx.lineJoin = 'round';
+          ctx.textAlign = textStyle.textAlign;
+          ctx.textBaseline = 'top';
+          const textX = item.x - selectedItem.x + (textStyle.textAlign === 'center' ? item.width / 2 : textStyle.textAlign === 'right' ? item.width : 0);
+          item.content.split('\n').forEach((line, index) => {
+            if (textStyle.strokeWidth > 0) {
+              ctx.strokeText(line, textX, item.y - selectedItem.y + index * textStyle.fontSize * textStyle.lineHeight);
+            }
+            ctx.fillText(line, textX, item.y - selectedItem.y + index * textStyle.fontSize * textStyle.lineHeight);
+          });
         }
       }
       
@@ -1509,7 +1975,7 @@ const Canvas: React.FC<CanvasProps> = ({
         width: workflowResultFrame.width,
         height: workflowResultFrame.height,
         status: 'completed',
-        label: frameworkPrompt || '视觉逻辑生成',
+        label: generateImageTitleFromPrompt(frameworkPrompt || imageResult.originalPrompt || '', '视觉逻辑生成'),
         zIndex: 500,
         prompt: frameworkPrompt || imageResult.originalPrompt || '视觉逻辑生成',
         originalPrompt: frameworkPrompt || imageResult.originalPrompt || '视觉逻辑生成',
@@ -1529,28 +1995,39 @@ const Canvas: React.FC<CanvasProps> = ({
     }
   };
 
-  const handleInlineImageRedraw = async (event: React.FormEvent) => {
-    event.preventDefault();
-    const rawPrompt = inlineEditPrompt.trim();
-    const isRemoverMode = selectedItem?.type === 'image' && localRemoverItemId === selectedItem.id;
-    if ((!rawPrompt && !isRemoverMode) || !selectedItem || selectedItem.type !== 'image' || inlineEditingIdsRef.current.has(selectedItem.id)) return;
+  const handleInlineImageRedraw = async (
+    event?: React.FormEvent,
+    options?: { item?: CanvasItem; prompt?: string; mode?: 'background-removal' }
+  ) => {
+    event?.preventDefault();
+    const targetCandidate = options?.item || selectedItem;
+    const rawPrompt = (options?.prompt ?? inlineEditPrompt).trim();
+    const isBackgroundRemovalMode = options?.mode === 'background-removal';
+    const isRemoverMode = !isBackgroundRemovalMode && targetCandidate?.type === 'image' && localRemoverItemId === targetCandidate.id;
+    if ((!rawPrompt && !isRemoverMode && !isBackgroundRemovalMode) || !targetCandidate || targetCandidate.type !== 'image' || inlineEditingIdsRef.current.has(targetCandidate.id)) return;
 
-    const targetItem = selectedItem;
+    const targetItem = targetCandidate;
     const prompt = isRemoverMode
       ? rawPrompt
         ? `${REMOVER_PROMPT} 用户补充要求：${rawPrompt}`
         : REMOVER_PROMPT
+      : isBackgroundRemovalMode
+        ? rawPrompt || BACKGROUND_REMOVAL_PROMPT
       : rawPrompt;
-    const userMessage = isRemoverMode
+    const userMessage = isBackgroundRemovalMode
+      ? `去背景 @${targetItem.id}`
+      : isRemoverMode
       ? rawPrompt
         ? `删除 @${targetItem.id} 圈选区域：${rawPrompt}`
         : `删除 @${targetItem.id} 圈选区域`
       : `编辑 @${targetItem.id}：${rawPrompt}`;
-    const useLocalMask = localRedrawItemId === targetItem.id || localRemoverItemId === targetItem.id;
+    const useLocalMask = !isBackgroundRemovalMode && (localRedrawItemId === targetItem.id || localRemoverItemId === targetItem.id);
+    const startedAt = Date.now();
     let resultItemId: string | null = null;
     setInlineEditingForItem(targetItem.id, true);
+    setInlineEditingStartedAt(prev => ({ ...prev, [targetItem.id]: startedAt }));
     clearInlineEditError(targetItem.id);
-    onChatMessage(userMessage, 'user', { imageIds: [targetItem.id] });
+    onChatMessage(userMessage, 'user');
 
     try {
       const currentMaskData = useLocalMask
@@ -1566,7 +2043,7 @@ const Canvas: React.FC<CanvasProps> = ({
           ? `${prompt}。只删除或修复用户用蒙版涂抹的局部区域，未被蒙版覆盖的区域必须保持原图不变。`
           : `${prompt}。只修改用户用蒙版涂抹的局部区域，未被蒙版覆盖的区域必须保持原图不变。`
         : prompt;
-      const editReferences = useLocalMask
+      const editReferences = useLocalMask || isBackgroundRemovalMode
         ? [
           targetItem,
           ...resolveMentionedImageReferences(prompt, items).filter(item => item.id !== targetItem.id)
@@ -1578,7 +2055,7 @@ const Canvas: React.FC<CanvasProps> = ({
       const generationPrompt = referenceImages.length > 0
         ? buildReferencedImageEditPrompt(promptToOptimize, editBaseItem, referenceImages, { hasLocalMask: useLocalMask, allItems: items })
         : promptToOptimize;
-      const effectiveAspectRatio = isRemoverMode || inlineEditAspectRatio === 'auto'
+      const effectiveAspectRatio = isRemoverMode || isBackgroundRemovalMode || inlineEditAspectRatio === 'auto'
         ? inferAspectRatioFromDimensions(editBaseItem.width, editBaseItem.height)
         : inlineEditAspectRatio;
 
@@ -1602,7 +2079,17 @@ const Canvas: React.FC<CanvasProps> = ({
         persistentReferenceImages,
         { hasLocalMask: useLocalMask, allItems: items }
       );
-      const removerImageContext = isRemoverMode
+      const editImageContext = isBackgroundRemovalMode
+        ? [
+          '任务类型：background-removal / remove background。',
+          '用户点击了去背景快捷功能：这只是抠图/背景透明化，不是重新生成图片。',
+          '先识别图片中的主要主体：画面最主要的人物、商品、动物、车辆或成组前景对象；主体包含其穿戴、手持、贴附和与主体直接组成整体的部分。',
+          '只保留主体，去掉主体以外的一切背景和无关物体；只允许改变非主体区域透明度/alpha matte；主体 RGB 像素、原有裁切、构图、主体位置、缩放比例、脸、表情、姿态、服装、颜色、纹理、发丝、边缘细节都不能变。',
+          '禁止把半张脸补成整张脸，禁止把半身/局部补成全身，禁止补出原图画面外被裁切掉的身体、头发、衣服或物品。',
+          '不要新增场景、新背景、白底/浅色底、新文字、logo、阴影或装饰；输出透明背景 PNG。',
+          imageContext
+        ].join('\n')
+        : isRemoverMode
         ? [
           '任务类型：image-remover / object removal / inpainting。',
           '这不是普通图生图，也不是 logo 强化；模型必须删除 mask 透明区域内的内容。',
@@ -1614,8 +2101,10 @@ const Canvas: React.FC<CanvasProps> = ({
       const editOptions = {
         imageAssetId: getCanvasItemAssetId(persistentTargetItem),
         referenceAssetIds: persistentReferenceImages.map(getCanvasItemAssetId).filter(Boolean),
-        imageContext: removerImageContext,
-        promptOptimizationMode: isRemoverMode ? 'image-remover' as const : undefined
+        imageContext: editImageContext,
+        promptOptimizationMode: isBackgroundRemovalMode
+          ? 'background-removal' as const
+          : isRemoverMode ? 'image-remover' as const : undefined
       };
 
       let maskDataUrl: string | null | undefined;
@@ -1654,7 +2143,7 @@ const Canvas: React.FC<CanvasProps> = ({
         width: resultFrame.width,
         height: resultFrame.height,
         status: 'loading',
-        label: isRemoverMode ? 'AI 删除中...' : 'AI 重绘中...',
+        label: isBackgroundRemovalMode ? 'AI 去背景中...' : isRemoverMode ? 'AI 删除中...' : 'AI 重绘中...',
         zIndex: nextZIndex,
         parentId: editBaseItem.id,
         prompt: generationPrompt,
@@ -1664,11 +2153,10 @@ const Canvas: React.FC<CanvasProps> = ({
 
       onItemAdd(resultItem);
       resultItemId = newId;
-      setSelectedIds([newId]);
 
       let imageResult: ImageGenerationResult;
       let latestOptimizedPrompt = '';
-      const requestAspectRatio = isRemoverMode ? 'auto' : effectiveAspectRatio;
+      const requestAspectRatio = isRemoverMode || isBackgroundRemovalMode ? 'auto' : effectiveAspectRatio;
       if (canUseImageJobs()) {
         const job = await submitImageEditJob(
           generationPrompt,
@@ -1704,28 +2192,48 @@ const Canvas: React.FC<CanvasProps> = ({
         persistentReferenceImages,
         items
       );
-      onItemUpdate(newId, {
+      const resultTitle = generateImageTitleFromPrompt(
+        rawPrompt || prompt || optimizedPrompt || generationPrompt,
+        isBackgroundRemovalMode ? '去背景' : isRemoverMode ? '删除物体' : '编辑结果'
+      );
+      const resultDescription = buildImageResultDescription(resultTitle, 'edited');
+      const persistedResultItem = await ensureCanvasImageAsset({
+        ...resultItem,
         content: result,
         status: 'completed',
         imageJobId: undefined,
         originalPrompt: rawPrompt || prompt,
         optimizedPrompt,
-        label: isRemoverMode
-          ? '删除物体'
-          : rawPrompt.substring(0, 16) + (rawPrompt.length > 16 ? '...' : '')
+        label: resultTitle
       });
-      onChatMessage(
-        isRemoverMode
-          ? `已完成删除物体：@${newId}`
-          : useLocalMask
-            ? `已完成局部重绘：@${newId}`
-            : `已完成单图编辑：@${newId}`,
-        'assistant',
-        { imageIds: [newId] }
-      );
+      onItemUpdate(newId, {
+        content: persistedResultItem.content,
+        assetId: persistedResultItem.assetId,
+        previewContent: persistedResultItem.previewContent,
+        thumbnailContent: persistedResultItem.thumbnailContent,
+        status: 'completed',
+        imageJobId: undefined,
+        originalPrompt: rawPrompt || prompt,
+        optimizedPrompt,
+        label: resultTitle
+      });
+      onChatMessage(resultDescription, 'assistant', {
+        imageIds: [newId],
+        imageResultCards: [{
+          imageId: newId,
+          modelName: getImageModelDisplayName(getApiConfig().model),
+          title: resultTitle,
+          description: resultDescription
+        }],
+        durationMs: Date.now() - startedAt
+      });
       setInlineEditPromptForItem(targetItem.id, '');
       setQuickEditItemId(null);
-      if (isRemoverMode) {
+      if (isBackgroundRemovalMode) {
+        setLocalRedrawItemId(null);
+        setLocalRemoverItemId(null);
+        setActiveTool('select');
+      } else if (isRemoverMode) {
         setLocalRedrawItemId(null);
         setLocalRemoverItemId(null);
         setActiveTool('select');
@@ -1740,7 +2248,12 @@ const Canvas: React.FC<CanvasProps> = ({
       if (resultItemId) {
         onItemDelete(resultItemId);
       }
-      if (isRemoverMode) {
+      if (isBackgroundRemovalMode) {
+        setSelectedIds([targetItem.id]);
+        setLocalRedrawItemId(null);
+        setLocalRemoverItemId(null);
+        setActiveTool('select');
+      } else if (isRemoverMode) {
         setSelectedIds([targetItem.id]);
         setLocalRedrawItemId(null);
         setLocalRemoverItemId(targetItem.id);
@@ -1752,9 +2265,15 @@ const Canvas: React.FC<CanvasProps> = ({
         setActiveTool('brush');
       }
       setInlineEditErrors(prev => ({ ...prev, [targetItem.id]: message }));
-      onChatMessage(`出错了，没能完成单图编辑：${message}`, 'assistant');
+      onChatMessage(`出错了，没能完成单图编辑：${message}`, 'assistant', {
+        durationMs: Date.now() - startedAt
+      });
     } finally {
       setInlineEditingForItem(targetItem.id, false);
+      setInlineEditingStartedAt(prev => {
+        const { [targetItem.id]: _removedStartedAt, ...nextStartedAt } = prev;
+        return nextStartedAt;
+      });
     }
   };
 
@@ -1879,10 +2398,319 @@ const Canvas: React.FC<CanvasProps> = ({
 
   const contextMenuItem = items.find(i => i.id === contextMenu?.id);
 
+  const renderTextToolbar = () => {
+    if (canvasTool !== 'select' || !selectedItem || selectedItem.type !== 'text' || selectedIds.length !== 1) return null;
+
+    const currentFontStyle = TEXT_FONT_STYLES.find(style => (
+      style.fontWeight === selectedTextStyle.fontWeight && style.fontStyle === selectedTextStyle.fontStyle
+    )) || TEXT_FONT_STYLES[0];
+    const currentAlignIcon = selectedTextStyle.textAlign === 'center'
+      ? <AlignCenter size={16} />
+      : selectedTextStyle.textAlign === 'right'
+        ? <AlignRight size={16} />
+        : <AlignLeft size={16} />;
+    const strokeWidthIndex = TEXT_STROKE_WIDTHS.indexOf(selectedTextStyle.strokeWidth);
+    const nextStrokeWidth = TEXT_STROKE_WIDTHS[(strokeWidthIndex + 1) % TEXT_STROKE_WIDTHS.length];
+    const normalizedFontSearch = textFontSearch.trim().toLowerCase();
+    const visibleFontFamilies = TEXT_FONT_FAMILIES.filter(fontFamily => (
+      !normalizedFontSearch || fontFamily.toLowerCase().includes(normalizedFontSearch)
+    ));
+    const visibleFontSizes = Array.from(new Set([...TEXT_FONT_SIZES, selectedTextStyle.fontSize]))
+      .sort((left, right) => left - right);
+    const toolbarButtonClass = 'flex h-11 items-center justify-center border-r border-zinc-100 text-zinc-700 transition-colors hover:bg-zinc-50 active:bg-zinc-100';
+    const popoverClass = 'absolute left-0 top-[calc(100%+8px)] z-[2200100] rounded-[18px] border border-zinc-200 bg-white p-2 text-zinc-800 shadow-[0_18px_60px_-28px_rgba(0,0,0,0.55)] ring-1 ring-black/5';
+    const toggleTextPopover = (popover: typeof activeTextPopover) => {
+      setActiveTextPopover(previous => previous === popover ? null : popover);
+    };
+    const applyTextColor = (key: 'color' | 'strokeColor', value: string) => {
+      if (!/^#[0-9a-f]{6}$/i.test(value)) return;
+      updateSelectedTextStyle(key === 'strokeColor'
+        ? { strokeColor: value, strokeWidth: selectedTextStyle.strokeWidth > 0 ? selectedTextStyle.strokeWidth : 2 }
+        : { color: value }
+      );
+    };
+    const renderColorPopover = (key: 'color' | 'strokeColor') => {
+      const currentColor = key === 'strokeColor' ? selectedTextStyle.strokeColor : selectedTextStyle.color;
+      return (
+        <div className={`${popoverClass} w-56`} data-text-toolbar-interactive="true">
+          <div className="mb-2 grid grid-cols-6 gap-1.5">
+            {TEXT_COLOR_PALETTE.map(color => (
+              <button
+                key={`${key}-${color}`}
+                type="button"
+                onClick={() => applyTextColor(key, color)}
+                className={`h-7 rounded-full border transition-transform hover:scale-105 active:scale-95 ${
+                  color.toLowerCase() === currentColor.toLowerCase() ? 'border-zinc-950 ring-2 ring-zinc-200' : 'border-zinc-200'
+                }`}
+                style={{ backgroundColor: color }}
+                title={color}
+                aria-label={`选择颜色 ${color}`}
+              />
+            ))}
+          </div>
+          <input
+            type="text"
+            value={currentColor}
+            onChange={(event) => applyTextColor(key, event.target.value.trim())}
+            className="h-9 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 text-xs font-black uppercase text-zinc-700 outline-none focus:border-zinc-400 focus:bg-white"
+            aria-label={key === 'strokeColor' ? '描边颜色 HEX' : '文字颜色 HEX'}
+          />
+        </div>
+      );
+    };
+
+    return (
+      <div
+        className="absolute z-[2200000] flex h-11 items-center overflow-visible rounded-[16px] border border-zinc-200 bg-white/95 text-zinc-700 shadow-[0_10px_30px_-24px_rgba(0,0,0,0.55)] backdrop-blur-xl"
+        style={selectedTextToolbarPosition}
+        onMouseDown={(event) => {
+          event.stopPropagation();
+          const target = event.target;
+          if (target instanceof HTMLElement && target.closest('select,input,[data-text-toolbar-interactive="true"]')) return;
+          event.preventDefault();
+        }}
+      >
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => toggleTextPopover('fill')}
+            className={`${toolbarButtonClass} w-11`}
+            title="文字颜色"
+          >
+            <span className="h-5 w-5 rounded-full border border-zinc-200" style={{ backgroundColor: selectedTextStyle.color }} />
+          </button>
+          {activeTextPopover === 'fill' && renderColorPopover('color')}
+        </div>
+
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => toggleTextPopover('stroke')}
+            className={`${toolbarButtonClass} w-11`}
+            title="描边颜色"
+          >
+            <span className="flex h-5 w-5 items-center justify-center rounded-full border border-zinc-200" style={{ backgroundColor: selectedTextStyle.strokeColor }}>
+              <span className="h-2.5 w-2.5 rounded-full bg-white" />
+            </span>
+          </button>
+          {activeTextPopover === 'stroke' && renderColorPopover('strokeColor')}
+        </div>
+
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => toggleTextPopover('font')}
+            className={`${toolbarButtonClass} w-36 justify-between gap-2 px-3 text-sm font-semibold`}
+            title="字体"
+          >
+            <span className="truncate" style={{ fontFamily: `${selectedTextStyle.fontFamily}, system-ui, sans-serif` }}>
+              {selectedTextStyle.fontFamily}
+            </span>
+            <ChevronDown size={13} className="shrink-0 text-zinc-500" />
+          </button>
+          {activeTextPopover === 'font' && (
+            <div className={`${popoverClass} w-64`} data-text-toolbar-interactive="true">
+              <input
+                type="text"
+                value={textFontSearch}
+                onChange={(event) => setTextFontSearch(event.target.value)}
+                placeholder="搜索字体"
+                className="mb-2 h-9 w-full rounded-xl border-0 bg-zinc-100 px-3 text-sm font-medium text-zinc-800 outline-none placeholder:text-zinc-400 focus:bg-zinc-50"
+              />
+              <div className="mb-2 flex items-center justify-between px-2 text-[11px] font-black text-zinc-500">
+                <span>全部字体</span>
+                <span>{visibleFontFamilies.length}</span>
+              </div>
+              <div className="max-h-72 overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-zinc-300 scrollbar-track-transparent">
+                {visibleFontFamilies.length > 0 ? visibleFontFamilies.map(fontFamily => (
+                  <button
+                    key={fontFamily}
+                    type="button"
+                    onClick={() => {
+                      updateSelectedTextStyle({ fontFamily });
+                      setActiveTextPopover(null);
+                      setTextFontSearch('');
+                    }}
+                    className={`mb-1 flex h-10 w-full items-center rounded-xl px-3 text-left text-lg transition-colors hover:bg-zinc-100 ${
+                      fontFamily === selectedTextStyle.fontFamily ? 'bg-zinc-100 font-black text-zinc-950' : 'text-zinc-800'
+                    }`}
+                    style={{ fontFamily: `${fontFamily}, system-ui, sans-serif` }}
+                  >
+                    <span className="truncate">{fontFamily}</span>
+                  </button>
+                )) : (
+                  <div className="px-3 py-8 text-center text-sm font-semibold text-zinc-400">没有匹配的字体</div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => toggleTextPopover('style')}
+            className={`${toolbarButtonClass} w-28 justify-between gap-2 px-3 text-sm font-medium`}
+            title="字体样式"
+          >
+            <span className="truncate">{currentFontStyle.label}</span>
+            <ChevronDown size={13} className="shrink-0 text-zinc-500" />
+          </button>
+          {activeTextPopover === 'style' && (
+            <div className={`${popoverClass} w-40`} data-text-toolbar-interactive="true">
+              {TEXT_FONT_STYLES.map(style => {
+                const active = style.fontWeight === selectedTextStyle.fontWeight && style.fontStyle === selectedTextStyle.fontStyle;
+                return (
+                  <button
+                    key={style.label}
+                    type="button"
+                    onClick={() => {
+                      updateSelectedTextStyle({ fontWeight: style.fontWeight, fontStyle: style.fontStyle });
+                      setActiveTextPopover(null);
+                    }}
+                    className={`mb-1 flex h-9 w-full items-center justify-between rounded-xl px-3 text-left text-sm transition-colors hover:bg-zinc-100 ${
+                      active ? 'bg-zinc-100 text-zinc-950' : 'text-zinc-700'
+                    }`}
+                    style={{ fontWeight: style.fontWeight, fontStyle: style.fontStyle }}
+                  >
+                    <span>{style.label}</span>
+                    {active && <Check size={14} />}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => toggleTextPopover('size')}
+            className={`${toolbarButtonClass} w-20 gap-2 px-3 text-sm font-medium`}
+            title="字号"
+          >
+            <span className="min-w-8 text-left">{selectedTextStyle.fontSize}</span>
+            <ChevronDown size={13} className="text-zinc-500" />
+          </button>
+          {activeTextPopover === 'size' && (
+            <div className={`${popoverClass} w-24`} data-text-toolbar-interactive="true">
+              {visibleFontSizes.map(fontSize => (
+                <button
+                  key={fontSize}
+                  type="button"
+                  onClick={() => {
+                    updateSelectedTextStyle({ fontSize: clampValue(fontSize, MIN_TEXT_FONT_SIZE, MAX_TEXT_FONT_SIZE) });
+                    setActiveTextPopover(null);
+                  }}
+                  className={`mb-1 flex h-9 w-full items-center justify-between rounded-xl px-3 text-sm font-semibold transition-colors hover:bg-zinc-100 ${
+                    fontSize === selectedTextStyle.fontSize ? 'bg-zinc-100 text-zinc-950' : 'text-zinc-700'
+                  }`}
+                >
+                  <span>{fontSize}</span>
+                  {fontSize === selectedTextStyle.fontSize && <Check size={14} />}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="relative border-r border-zinc-100">
+          <select
+            value={selectedTextStyle.textAlign}
+            onChange={(event) => updateSelectedTextStyle({ textAlign: event.target.value as Required<CanvasTextStyle>['textAlign'] })}
+            className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+            aria-label="文字对齐"
+          >
+            <option value="left">左对齐</option>
+            <option value="center">居中</option>
+            <option value="right">右对齐</option>
+          </select>
+          <div className="flex h-11 w-14 items-center justify-center gap-1 text-zinc-700">
+            {currentAlignIcon}
+            <ChevronDown size={12} className="text-zinc-500" />
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => updateSelectedTextStyle({ strokeWidth: nextStrokeWidth })}
+          className="flex h-11 w-11 items-center justify-center border-r border-zinc-100 text-zinc-700 transition-colors hover:bg-zinc-50"
+          title={`描边粗细：${selectedTextStyle.strokeWidth}px`}
+        >
+          <SlidersHorizontal size={16} />
+        </button>
+
+        <button
+          type="button"
+          onClick={() => handleDownloadSelectedText(selectedItem)}
+          disabled={!selectedItem.content.trim()}
+          className="flex h-11 w-12 items-center justify-center text-zinc-700 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-35"
+          title="下载文字图层"
+        >
+          <Download size={16} />
+        </button>
+      </div>
+    );
+  };
+
+  const renderTextLayer = (item: CanvasItem) => {
+    const textStyle = getCanvasTextStyle(item);
+    const textCss = getCanvasTextCss(textStyle);
+    const isEditingText = editingTextItemId === item.id;
+    const displayText = item.content.trim() ? item.content : TEXT_LAYER_PLACEHOLDER;
+
+    if (isEditingText) {
+      return (
+        <textarea
+          ref={selectedIds.length === 1 && selectedIds[0] === item.id ? textEditorRef : undefined}
+          value={item.content}
+          onChange={(event) => handleTextInput(item, event.currentTarget)}
+          onBlur={(event) => finishTextEditMode(item, event.currentTarget)}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape' || ((event.metaKey || event.ctrlKey) && event.key === 'Enter')) {
+              event.preventDefault();
+              event.currentTarget.blur();
+            }
+          }}
+          onMouseDown={(event) => event.stopPropagation()}
+          className="h-full w-full resize-none cursor-text border-0 bg-transparent p-0 outline-none"
+          style={{
+            ...textCss,
+            overflow: 'hidden',
+            whiteSpace: 'pre',
+            overflowWrap: 'normal'
+          }}
+        />
+      );
+    }
+
+    return (
+      <div
+        className={`h-full w-full cursor-move ${item.content.trim() ? '' : 'text-zinc-300'}`}
+        style={{
+          ...textCss,
+          color: item.content.trim() ? textCss.color : '#a1a1aa'
+        }}
+        onDoubleClick={(event) => {
+          event.stopPropagation();
+          enterTextEditMode(item);
+        }}
+      >
+        {item.content.trim() ? displayText : ''}
+      </div>
+    );
+  };
+
   return (
     <div 
       ref={containerRef}
-      className={`flex-1 relative overflow-hidden canvas-grid bg-[#fcfcfc] select-none ${isSpacePressed || canvasTool === 'pan' ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'}`}
+      className={`flex-1 relative overflow-hidden canvas-grid bg-[#fcfcfc] select-none ${
+        canvasTool === 'text'
+          ? 'cursor-crosshair'
+          : isSpacePressed || canvasTool === 'pan'
+            ? 'cursor-grab active:cursor-grabbing'
+            : 'cursor-default'
+      }`}
       style={{ backgroundColor }}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
@@ -1912,8 +2740,14 @@ const Canvas: React.FC<CanvasProps> = ({
             className={`absolute ${
               item.type === 'image'
                 ? selectedIds.includes(item.id) ? 'outline outline-2 outline-indigo-500' : ''
-                : `rounded-[16px] transition-shadow duration-300 ${
-                  selectedIds.includes(item.id) ? 'ring-2 ring-indigo-500 shadow-2xl' : 'shadow-lg'
+                : item.type === 'text'
+                  ? `rounded-[2px] transition-[outline,background-color] ${
+                    selectedIds.includes(item.id) && item.content.trim()
+                      ? 'outline outline-1 outline-blue-500'
+                      : 'outline outline-1 outline-transparent'
+                  }`
+                  : `rounded-[16px] transition-shadow duration-300 ${
+                    selectedIds.includes(item.id) ? 'ring-2 ring-indigo-500 shadow-2xl' : 'shadow-lg'
                 }`
             } ${item.type === 'workflow' ? 'border-2 border-dashed border-indigo-200' : ''}`}
             style={{ 
@@ -1922,13 +2756,9 @@ const Canvas: React.FC<CanvasProps> = ({
               backgroundColor: item.type === 'image' || item.type === 'text' ? 'transparent' : '#fff'
             }}
           >
-            <div className={`relative h-full w-full overflow-hidden ${item.type === 'image' ? '' : 'rounded-[14px]'}`}>
+            <div className={`relative h-full w-full overflow-hidden ${item.type === 'image' || item.type === 'text' ? '' : 'rounded-[14px]'}`}>
               {item.type === 'text' ? (
-                <textarea
-                  value={item.content}
-                  onChange={(e) => onItemUpdate(item.id, { content: e.target.value })}
-                  className="w-full h-full p-3 bg-transparent outline-none resize-none font-bold text-gray-800"
-                />
+                renderTextLayer(item)
               ) : item.type === 'workflow' ? (
                 <div className="w-full h-full bg-white/30" />
               ) : (() => {
@@ -1965,11 +2795,31 @@ const Canvas: React.FC<CanvasProps> = ({
               {renderCropOverlay(item)}
             </div>
 
-            {item.type !== 'image' && selectedIds.length === 1 && selectedIds[0] === item.id && (
+            {item.type !== 'image' && item.type !== 'text' && selectedIds.length === 1 && selectedIds[0] === item.id && (
               (['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'] as ResizeDirection[]).map(dir => renderResizeHandle(item.id, dir))
             )}
           </div>
         ))}
+
+        {snapGuides.map((guide, index) => (
+          <div
+            key={`${guide.axis}-${guide.position}-${index}`}
+            className="pointer-events-none absolute z-[1900000] bg-indigo-500"
+            style={guide.axis === 'x' ? {
+              left: guide.position,
+              top: guide.spanStart,
+              width: 1 / Math.max(0.01, zoom),
+              height: Math.max(1, guide.spanEnd - guide.spanStart)
+            } : {
+              left: guide.spanStart,
+              top: guide.position,
+              width: Math.max(1, guide.spanEnd - guide.spanStart),
+              height: 1 / Math.max(0.01, zoom)
+            }}
+          />
+        ))}
+
+        {renderTextToolbar()}
 
         {/* 工具栏栏 */}
         {selectedItem?.type === 'workflow' && selectedIds.length === 1 && (
@@ -2010,7 +2860,7 @@ const Canvas: React.FC<CanvasProps> = ({
           </div>
         )}
 
-        {selectedItem?.type === 'image' && selectedIds.length === 1 && !isDraggingSelectedImage && (
+        {canvasTool === 'select' && selectedItem?.type === 'image' && selectedIds.length === 1 && !isDraggingSelectedImage && (
           <div
             className="absolute z-[2000000] pointer-events-auto"
             style={{
@@ -2082,11 +2932,12 @@ const Canvas: React.FC<CanvasProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => applyQuickEditPrompt(selectedItem, '更换背景，保留主体、姿态、服装、材质和光影自然一致。请在这里补充新背景：')}
+                  onClick={() => applyBackgroundRemoval(selectedItem)}
                   disabled={selectedItemIsInlineEditing || selectedItem.status === 'loading'}
                   className="flex h-11 shrink-0 items-center gap-1.5 border-r border-zinc-100 px-3 text-xs font-bold text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 disabled:opacity-35"
+                  title="一键去除背景并保留主体"
                 >
-                  <ImagePlus size={15} />换背景
+                  <Eraser size={15} />去背景
                 </button>
                 <button
                   type="button"
@@ -2185,7 +3036,7 @@ const Canvas: React.FC<CanvasProps> = ({
           </div>
         )}
 
-        {selectedItem?.type === 'image' && selectedIds.length === 1 && selectedItemIsQuickEditing && !isDraggingSelectedImage && (
+        {canvasTool === 'select' && selectedItem?.type === 'image' && selectedIds.length === 1 && selectedItemIsQuickEditing && !isDraggingSelectedImage && (
           <div
             className="absolute z-[2000000] pointer-events-auto"
             style={{
@@ -2194,7 +3045,7 @@ const Canvas: React.FC<CanvasProps> = ({
             }}
           >
             <form
-              onSubmit={handleInlineImageRedraw}
+              onSubmit={(event) => handleInlineImageRedraw(event)}
               className="flex items-center gap-2 rounded-[18px] border border-zinc-200 bg-white p-1.5 shadow-[0_16px_44px_-30px_rgba(0,0,0,0.45)] animate-in fade-in zoom-in-95"
               style={{
                 width: selectedQuickEditInputPosition.width,
@@ -2219,7 +3070,11 @@ const Canvas: React.FC<CanvasProps> = ({
                   placeholder="输入一句话快捷编辑这张图..."
                   className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-zinc-800 outline-none placeholder:text-zinc-400"
                 />
-                <span className="hidden shrink-0 text-[10px] font-black uppercase tracking-widest text-zinc-300 sm:block">Esc 关闭</span>
+                <span className="hidden shrink-0 text-[10px] font-black uppercase tracking-widest text-zinc-300 sm:block">
+                  {selectedItemIsInlineEditing && selectedInlineEditDurationText
+                    ? `已执行 ${selectedInlineEditDurationText}`
+                    : 'Esc 关闭'}
+                </span>
               </div>
               <button
                 type="submit"

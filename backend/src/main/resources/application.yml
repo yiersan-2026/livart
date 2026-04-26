@@ -18,9 +18,9 @@ spring:
     listener:
       simple:
         auto-startup: ${SPRING_RABBITMQ_LISTENER_SIMPLE_AUTO_STARTUP:true}
-        concurrency: 1
-        max-concurrency: 1
-        prefetch: 1
+        concurrency: ${RABBITMQ_LISTENER_CONCURRENCY:3}
+        max-concurrency: ${RABBITMQ_LISTENER_MAX_CONCURRENCY:6}
+        prefetch: ${RABBITMQ_LISTENER_PREFETCH:1}
         default-requeue-rejected: false
         retry:
           enabled: true

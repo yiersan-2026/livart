@@ -52,7 +52,7 @@ export interface ImageEditAssetOptions {
   imageAssetId?: string;
   referenceAssetIds?: string[];
   imageContext?: string;
-  promptOptimizationMode?: 'image-remover';
+  promptOptimizationMode?: 'image-remover' | 'background-removal';
 }
 
 class ImageJobWebSocketUnavailableError extends Error {
@@ -164,18 +164,14 @@ const fetchWithTimeout = async (url: string, options: RequestInit, timeoutMessag
   }
 };
 
-const imageProxyHeaders = (config: ReturnType<typeof getApiConfig>) => ({
+const imageProxyHeaders = () => ({
   'Accept': 'application/json',
-  ...authHeaders(),
-  'X-Livart-Api-Key': config.apiKey,
-  'X-Livart-Upstream-Url': config.textToImageUrl
+  ...authHeaders()
 });
 
-const imageEditProxyHeaders = (config: ReturnType<typeof getApiConfig>) => ({
+const imageEditProxyHeaders = () => ({
   'Accept': 'application/json',
-  ...authHeaders(),
-  'X-Livart-Api-Key': config.apiKey,
-  'X-Livart-Upstream-Url': config.imageToImageUrl
+  ...authHeaders()
 });
 
 const getImageJobWebSocketUrl = () => {
@@ -243,42 +239,8 @@ const mergePromptMetadata = (...metadatas: ImagePromptMetadata[]) => metadatas.r
   optimizedPrompt: metadata.optimizedPrompt || merged.optimizedPrompt
 }), {});
 
-const callGeminiApi = async (contents: any, imageConfig?: any) => {
-  if (!hasApiConfig()) {
-    throw new Error('请先配置 API 地址和密钥');
-  }
-
-  const config = getApiConfig();
-  const url = `${config.baseUrl}/v1beta/models/${config.model}:generateContent`;
-
-  const body: any = {
-    contents: [{ role: 'user', parts: contents }],
-    generationConfig: {
-      responseModalities: ['TEXT', 'IMAGE']
-    }
-  };
-
-  if (imageConfig) {
-    body.generationConfig.imageConfig = imageConfig;
-  }
-
-  const response = await fetchWithTimeout(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-      'Authorization': `Bearer ${config.apiKey}`
-    },
-    body: JSON.stringify(body)
-  }, 'Gemini 图像请求超过 10 分钟仍未完成，请稍后重试');
-
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`API 请求失败: ${error}`);
-  }
-
-  const data = await response.json();
-  return extractImageResultFromResponse(data, getPromptMetadataFromHeaders(response));
+const callGeminiApi = async (..._args: unknown[]) => {
+  throw new Error('当前版本不允许前端直连上游 AI，请使用后端代理模型 gpt-image-2');
 };
 
 const callImageGenerationApi = async (prompt: string, aspectRatio: ImageAspectRatio = 'auto') => {
@@ -292,7 +254,7 @@ const callImageGenerationApi = async (prompt: string, aspectRatio: ImageAspectRa
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...imageProxyHeaders(config)
+      ...imageProxyHeaders()
     },
     body: JSON.stringify({
       model: config.model,
@@ -339,7 +301,7 @@ const callImageEditApi = async (
 
   const response = await fetchWithTimeout(IMAGE_TO_IMAGE_PROXY_URL, {
     method: 'POST',
-    headers: imageEditProxyHeaders(config),
+    headers: imageEditProxyHeaders(),
     body: formData
   }, '图生图请求超过 10 分钟仍未完成，请稍后重试');
 
@@ -573,25 +535,35 @@ const waitForImageJobByWebSocket = async (jobId: string) => {
 
   return new Promise<ImageGenerationResult>((resolve, reject) => {
     let settled = false;
-    const socket = new WebSocket(socketUrl);
+    let activeSocket: WebSocket | null = null;
+    let reconnectTimerId: number | null = null;
+    let reconnectAttempts = 0;
+    const startedAt = Date.now();
     const timeoutId = window.setTimeout(() => {
       finishReject(new Error('图片任务超过 10 分钟仍未完成，请稍后刷新页面查看'));
     }, REQUEST_TIMEOUT_MS);
     const pingIntervalId = window.setInterval(() => {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: 'ping' }));
+      if (activeSocket?.readyState === WebSocket.OPEN) {
+        activeSocket.send(JSON.stringify({ type: 'ping' }));
       }
     }, 25 * 1000);
 
     const cleanup = () => {
       window.clearTimeout(timeoutId);
       window.clearInterval(pingIntervalId);
-      socket.onopen = null;
-      socket.onmessage = null;
-      socket.onerror = null;
-      socket.onclose = null;
-      if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
-        socket.close();
+      if (reconnectTimerId !== null) {
+        window.clearTimeout(reconnectTimerId);
+        reconnectTimerId = null;
+      }
+      if (activeSocket) {
+        activeSocket.onopen = null;
+        activeSocket.onmessage = null;
+        activeSocket.onerror = null;
+        activeSocket.onclose = null;
+        if (activeSocket.readyState === WebSocket.OPEN || activeSocket.readyState === WebSocket.CONNECTING) {
+          activeSocket.close();
+        }
+        activeSocket = null;
       }
     };
 
@@ -609,62 +581,96 @@ const waitForImageJobByWebSocket = async (jobId: string) => {
       reject(error);
     }
 
-    socket.onopen = () => {
-      socket.send(JSON.stringify({
-        type: 'auth',
-        token: session.token,
-        jobId
-      }));
+    const scheduleReconnect = () => {
+      if (settled) return;
+      const elapsedMs = Date.now() - startedAt;
+      if (elapsedMs >= REQUEST_TIMEOUT_MS) {
+        finishReject(new Error('图片任务 WebSocket 多次断开且已超时，请稍后刷新页面查看'));
+        return;
+      }
+
+      reconnectAttempts += 1;
+      const reconnectDelayMs = Math.min(5000, 800 + reconnectAttempts * 700);
+      reconnectTimerId = window.setTimeout(() => {
+        reconnectTimerId = null;
+        connectSocket();
+      }, reconnectDelayMs);
     };
 
-    socket.onmessage = (event) => {
-      let message: ImageJobSocketMessage;
-      try {
-        message = JSON.parse(String(event.data));
-      } catch {
-        finishReject(new ImageJobWebSocketUnavailableError('图片任务 WebSocket 消息格式无效'));
-        return;
-      }
-
-      if (message.type === 'connected' || message.type === 'authenticated' || message.type === 'pong') {
-        return;
-      }
-
-      if (message.type === 'image-job-error' && message.jobId === jobId) {
-        finishReject(new Error(extractApiErrorMessage(message.error) || '图片任务不存在或已过期'));
-        return;
-      }
-
-      if (message.type === 'error') {
-        finishReject(new Error(extractApiErrorMessage(message.error) || '图片任务 WebSocket 连接失败'));
-        return;
-      }
-
-      if (message.type !== 'image-job' || message.job?.jobId !== jobId) {
-        return;
-      }
-
-      if (message.job.status === 'completed') {
+    const handleJobMessage = (job: ImageJobStatus) => {
+      if (job.status === 'completed') {
         try {
-          finishResolve(extractImageResultFromJob(message.job));
+          finishResolve(extractImageResultFromJob(job));
         } catch (error) {
           finishReject(error instanceof Error ? error : new Error('未能从响应中获取图像数据'));
         }
         return;
       }
 
-      if (message.job.status === 'error') {
-        finishReject(new Error(extractImageJobError(message.job.error, message.job)));
+      if (job.status === 'error') {
+        finishReject(new Error(extractImageJobError(job.error, job)));
       }
     };
 
-    socket.onerror = () => {
-      finishReject(new ImageJobWebSocketUnavailableError('图片任务 WebSocket 连接失败'));
+    const connectSocket = () => {
+      if (settled) return;
+      const socket = new WebSocket(socketUrl);
+      activeSocket = socket;
+
+      socket.onopen = () => {
+        reconnectAttempts = 0;
+        socket.send(JSON.stringify({
+          type: 'auth',
+          token: session.token,
+          jobId
+        }));
+      };
+
+      socket.onmessage = (event) => {
+        let message: ImageJobSocketMessage;
+        try {
+          message = JSON.parse(String(event.data));
+        } catch {
+          finishReject(new ImageJobWebSocketUnavailableError('图片任务 WebSocket 消息格式无效'));
+          return;
+        }
+
+        if (message.type === 'connected' || message.type === 'authenticated' || message.type === 'pong') {
+          return;
+        }
+
+        if (message.type === 'image-job-error' && message.jobId === jobId) {
+          finishReject(new Error(extractApiErrorMessage(message.error) || '图片任务不存在或已过期'));
+          return;
+        }
+
+        if (message.type === 'error') {
+          finishReject(new Error(extractApiErrorMessage(message.error) || '图片任务 WebSocket 连接失败'));
+          return;
+        }
+
+        if (message.type !== 'image-job' || message.job?.jobId !== jobId) {
+          return;
+        }
+
+        handleJobMessage(message.job);
+      };
+
+      socket.onerror = () => {
+        if (socket.readyState !== WebSocket.CLOSED && socket.readyState !== WebSocket.CLOSING) {
+          socket.close();
+        }
+      };
+
+      socket.onclose = () => {
+        if (activeSocket === socket) {
+          activeSocket = null;
+          scheduleReconnect();
+        }
+      };
     };
 
-    socket.onclose = () => {
-      finishReject(new ImageJobWebSocketUnavailableError('图片任务 WebSocket 连接已断开'));
-    };
+    connectSocket();
   });
 };
 

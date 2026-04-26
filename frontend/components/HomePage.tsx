@@ -1,6 +1,7 @@
 
 import React, { useState } from 'react';
-import { Sparkles, Plus, ArrowUp, Hammer, Bot, Image as ImageIcon, Video, FolderPlus } from 'lucide-react';
+import { Sparkles, Plus, ArrowUp, Bot, Image as ImageIcon, Video, FolderPlus } from 'lucide-react';
+import LivartLogo from './LivartLogo';
 
 interface HomePageProps {
   onStart: (prompt: string) => void;
@@ -25,9 +26,7 @@ const HomePage: React.FC<HomePageProps> = ({ onStart, onEnterCanvas }) => {
       {/* 顶部 Logo 区域 - 风格与 App 头部统一 */}
       <header className="w-full p-8 flex items-center justify-between z-10">
         <div className="flex items-center gap-4">
-          <div className="w-11 h-11 bg-black rounded-xl flex items-center justify-center shadow-lg hover:scale-105 transition-transform cursor-pointer">
-            <Hammer className="text-white" size={20} />
-          </div>
+          <LivartLogo size={44} className="shrink-0 shadow-lg transition-transform hover:scale-105" />
           <div className="flex flex-col -gap-1">
             <h1 className="text-2xl font-black tracking-tighter text-gray-900 leading-none">livart</h1>
             <span className="text-[9px] font-black uppercase tracking-[0.2em] text-gray-400">Artisan AI Lab</span>

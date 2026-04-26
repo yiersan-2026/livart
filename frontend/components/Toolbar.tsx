@@ -101,7 +101,7 @@ const Toolbar: React.FC<ToolbarProps> = ({ zoom, onZoomChange, onResetView, onAd
 
         <button 
           onClick={onAddText}
-          className={iconButtonClass}
+          className={`${iconButtonClass} ${activeTool === 'text' ? activeIconButtonClass : ''}`}
           aria-label="添加文本组件"
         >
           <Type size={18} />

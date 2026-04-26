@@ -25,12 +25,47 @@ export interface ImageReferenceRoleAnalysis {
 
 type ImageReferenceSpan = { item: CanvasItem; start: number; end: number };
 
-export const getImageReferenceLabel = (item: CanvasItem) => {
-  const label = (item.label || '图片').trim();
-  return label || '图片';
+export const getImageReferenceMentionValue = (item: CanvasItem) => `@${item.id}`;
+
+const stripLeadingPunctuation = (value: string) => {
+  return value.replace(/^[\s，。,.!?！？:：；;、\-—_]+/, '').trim();
 };
 
-export const getImageReferenceMentionValue = (item: CanvasItem) => `@${item.id}`;
+const isLikelyInternalImageId = (value: string, item: CanvasItem) => {
+  const normalizedValue = normalizeImageReference(value.replace(/^@+/, ''));
+  if (!normalizedValue) return false;
+
+  const normalizedId = normalizeImageReference(item.id);
+  return normalizedValue === normalizedId || /^[a-z0-9]{7,14}$/i.test(normalizedValue);
+};
+
+const cleanImageReferenceLabelCandidate = (value: unknown, item: CanvasItem) => {
+  if (typeof value !== 'string') return '';
+
+  const trimmedValue = value.trim();
+  if (!trimmedValue) return '';
+
+  const withoutMentions = stripLeadingPunctuation(
+    trimmedValue
+      .replace(IMAGE_REFERENCE_TOKEN_PATTERN, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+  );
+  const candidate = withoutMentions || trimmedValue.replace(/^@+/, '').trim();
+  if (!candidate || isLikelyInternalImageId(candidate, item)) return '';
+
+  return candidate;
+};
+
+export const getImageReferenceLabel = (item: CanvasItem) => {
+  const candidates = [item.label, item.originalPrompt, item.prompt];
+  for (const candidate of candidates) {
+    const label = cleanImageReferenceLabelCandidate(candidate, item);
+    if (label) return label;
+  }
+
+  return '图片';
+};
 
 export const getImageReferenceDisplayText = (item: CanvasItem) => `@${getImageReferenceLabel(item)}`;
 

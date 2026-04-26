@@ -10,6 +10,8 @@ import io.minio.MakeBucketArgs;
 import io.minio.MinioClient;
 import io.minio.PutObjectArgs;
 import jakarta.annotation.PostConstruct;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -36,6 +38,8 @@ import java.util.UUID;
 
 @Service
 public class AssetService {
+    private static final Logger log = LoggerFactory.getLogger(AssetService.class);
+
     private static final int PREVIEW_MAX_SIDE = 1600;
     private static final int THUMBNAIL_MAX_SIDE = 512;
     private static final int MODEL_INPUT_MAX_SIDE = 2048;
@@ -232,6 +236,8 @@ public class AssetService {
                     .build());
             return new AssetContent(entity, object, entity.getMimeType());
         } catch (Exception exception) {
+            log.warn("[asset] read failed assetId={} bucket={} objectKey={} error={}",
+                    entity.getId(), properties.minio().bucket(), entity.getObjectKey(), exception.getMessage());
             throw new ApiException(HttpStatus.BAD_GATEWAY, "ASSET_READ_FAILED", "读取图片资源失败");
         }
     }
@@ -243,6 +249,8 @@ public class AssetService {
                 .build())) {
             return object.readAllBytes();
         } catch (Exception exception) {
+            log.warn("[asset] read original failed assetId={} bucket={} objectKey={} error={}",
+                    entity.getId(), properties.minio().bucket(), entity.getObjectKey(), exception.getMessage());
             throw new ApiException(HttpStatus.BAD_GATEWAY, "ASSET_READ_FAILED", "读取图片资源失败");
         }
     }

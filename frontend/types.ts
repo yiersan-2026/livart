@@ -28,6 +28,7 @@ export interface CanvasItem {
   prompt?: string;
   originalPrompt?: string;
   optimizedPrompt?: string;
+  textStyle?: CanvasTextStyle;
   imageJobId?: string;
   groundingUrls?: string[];
   // 增强型 Workflow 字段
@@ -37,11 +38,25 @@ export interface CanvasItem {
   compositeImage?: string; // 最终渲染的快照
 }
 
+export interface CanvasTextStyle {
+  fontFamily?: string;
+  fontSize?: number;
+  fontWeight?: number;
+  fontStyle?: 'normal' | 'italic';
+  textDecoration?: 'none' | 'underline' | 'line-through';
+  color?: string;
+  strokeColor?: string;
+  strokeWidth?: number;
+  backgroundColor?: string;
+  textAlign?: 'left' | 'center' | 'right';
+  lineHeight?: number;
+}
+
 export type DesignStyle = 'none' | 'cyberpunk' | 'minimalist' | '3d-clay' | 'watercolor' | 'sketch';
 
 export type ImageAspectRatio = 'auto' | '1:1' | '4:3' | '3:4' | '16:9' | '9:16';
 
-export type CanvasTool = 'select' | 'pan';
+export type CanvasTool = 'select' | 'pan' | 'text';
 
 export interface PlanStep {
   id: string;
@@ -58,4 +73,13 @@ export interface ChatMessage {
   text: string;
   timestamp: number;
   imageIds?: string[];
+  imageResultCards?: ChatImageResultCard[];
+  durationMs?: number;
+}
+
+export interface ChatImageResultCard {
+  imageId: string;
+  modelName?: string;
+  title?: string;
+  description?: string;
 }
