@@ -10,7 +10,7 @@ import {
   Palette, Maximize2, Wand2,
   Download, Send, AlignLeft, AlignCenter, AlignRight, SlidersHorizontal
 } from 'lucide-react';
-import { type ImageGenerationResult, waitForImageJob } from '../services/gemini';
+import { getImageJobQueueMessage, type ImageGenerationResult, type ImageJobStatus, waitForImageJob } from '../services/gemini';
 import {
   centerFrameOnRect,
   fitDimensionsToLongSide,
@@ -70,6 +70,10 @@ const ensureImageNoun = (title: string) => {
   if (!title) return '图片';
   return /(图|图片|照片|人像|作品|结果|海报|插画|场景|头像|素材)$/.test(title) ? title : `${title}图片`;
 };
+
+const buildInlineImageJobQueueNotice = (job: ImageJobStatus) => (
+  getImageJobQueueMessage(job, '图片编辑任务')
+);
 
 type ResizeDirection = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
 type MaskPoint = { x: number; y: number };
@@ -2046,7 +2050,13 @@ const Canvas: React.FC<CanvasProps> = ({
       }
       imageTaskStartedAt = Date.now();
       onImageTaskStart(imageTaskStartedAt);
-      const imageResult = await waitForImageJob(job.jobId);
+      const imageResult = await waitForImageJob(job.jobId, {
+        onStatus: (jobStatus) => {
+          const queueNotice = getImageJobQueueMessage(jobStatus, '视觉逻辑任务');
+          if (!queueNotice) return;
+          onItemUpdate(selectedItem.id, { label: '排队中...' });
+        }
+      });
       const result = imageResult.image;
       
       const newId = Math.random().toString(36).substr(2, 9);
@@ -2281,7 +2291,23 @@ const Canvas: React.FC<CanvasProps> = ({
       onItemAdd(resultItem);
       resultItemId = newId;
 
-      const imageResult: ImageGenerationResult = await waitForImageJob(job.jobId);
+      let queuedInlineJob = false;
+      const imageResult: ImageGenerationResult = await waitForImageJob(job.jobId, {
+        onStatus: (jobStatus) => {
+          const queueNotice = buildInlineImageJobQueueNotice(jobStatus);
+          if (queueNotice) {
+            queuedInlineJob = true;
+            syncInlineAgentPlanMessage(inlineAgentPlan, queueNotice);
+            onItemUpdate(newId, { label: '排队中...' });
+            return;
+          }
+
+          if (jobStatus.status === 'running' && queuedInlineJob) {
+            syncInlineAgentPlanMessage(inlineAgentPlan, '等待生成：图片编辑已开始执行。');
+            onItemUpdate(newId, { label: isBackgroundRemovalMode ? 'AI 去背景中...' : isRemoverMode ? 'AI 删除中...' : 'AI 重绘中...' });
+          }
+        }
+      });
       const completedWaitPlan = applyAgentRunProgressEventToPlan(inlineAgentPlan, {
         stepId: 'wait-image-job',
         title: '等待生成',

@@ -28,6 +28,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -112,6 +113,7 @@ public class AiProxyService {
     private final HttpClient httpClient;
     private final boolean defaultImageSizeEnabled;
     private final int defaultImageLongSide;
+    private final int imageJobWorkerCount;
     private final Map<UUID, ImageJobState> imageJobs = new ConcurrentHashMap<>();
     private final ExecutorService imageJobExecutor;
 
@@ -132,11 +134,12 @@ public class AiProxyService {
         this.springAiTextService = springAiTextService;
         this.defaultImageSizeEnabled = defaultImageSizeEnabled;
         this.defaultImageLongSide = defaultImageLongSide;
+        this.imageJobWorkerCount = resolveImageJobWorkerCount(imageJobWorkerCount);
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(30))
                 .followRedirects(HttpClient.Redirect.NORMAL)
                 .build();
-        this.imageJobExecutor = Executors.newFixedThreadPool(resolveImageJobWorkerCount(imageJobWorkerCount));
+        this.imageJobExecutor = Executors.newFixedThreadPool(this.imageJobWorkerCount);
     }
 
     @PreDestroy
@@ -313,17 +316,20 @@ public class AiProxyService {
     ) {
         job.markRunning();
         publishImageJob(job);
+        publishQueuedImageJobs();
 
         try {
             ImageProxyResult result = executeImageRequest(job.label(), targetUrl, apiKey, accept, contentType, body);
             if (result.statusCode() >= 200 && result.statusCode() <= 299) {
                 job.markCompleted(result);
                 publishImageJob(job);
+                publishQueuedImageJobs();
                 return;
             }
 
             job.markFailed(result.statusCode(), result.body(), result.contentType(), result.attempts(), result.requestId());
             publishImageJob(job);
+            publishQueuedImageJobs();
         } catch (Exception exception) {
             log.error("[image-job] {} failed jobId={} error={}", job.label(), job.id(), safeMessage(exception));
             try {
@@ -333,15 +339,23 @@ public class AiProxyService {
                 ), 0);
                 job.markFailed(result.statusCode(), result.body(), result.contentType(), result.attempts(), result.requestId());
                 publishImageJob(job);
+                publishQueuedImageJobs();
             } catch (IOException ioException) {
                 job.markFailed(502, safeMessage(exception).getBytes(StandardCharsets.UTF_8), "text/plain; charset=utf-8", 0, "");
                 publishImageJob(job);
+                publishQueuedImageJobs();
             }
         }
     }
 
     private void publishImageJob(ImageJobState job) {
         imageJobEventBroadcaster.publishImageJob(job.userId(), toJobResponse(job));
+    }
+
+    private void publishQueuedImageJobs() {
+        imageJobs.values().stream()
+                .filter(job -> "queued".equals(job.status()))
+                .forEach(this::publishImageJob);
     }
 
     private ImageProxyResult executeImageRequest(
@@ -1034,6 +1048,12 @@ public class AiProxyService {
         response.put("createdAt", job.createdAt());
         response.put("updatedAt", job.updatedAt());
         response.put("attempts", job.attempts());
+        response.put("maxConcurrentJobs", imageJobWorkerCount);
+        int queuePosition = imageJobQueuePosition(job);
+        if (queuePosition > 0) {
+            response.put("queuePosition", queuePosition);
+            response.put("queued", true);
+        }
         if (job.originalPrompt() != null && !job.originalPrompt().isBlank()) {
             response.put("originalPrompt", job.originalPrompt());
         }
@@ -1056,6 +1076,26 @@ public class AiProxyService {
         }
 
         return response;
+    }
+
+    private int imageJobQueuePosition(ImageJobState job) {
+        if (!"queued".equals(job.status())) {
+            return 0;
+        }
+
+        List<ImageJobState> activeOrQueuedJobs = imageJobs.values().stream()
+                .filter(candidate -> "queued".equals(candidate.status()) || "running".equals(candidate.status()))
+                .sorted(Comparator
+                        .comparingLong(ImageJobState::createdAt)
+                        .thenComparing(candidate -> candidate.id().toString()))
+                .toList();
+        for (int index = 0; index < activeOrQueuedJobs.size(); index += 1) {
+            if (!activeOrQueuedJobs.get(index).id().equals(job.id())) {
+                continue;
+            }
+            return index >= imageJobWorkerCount ? index - imageJobWorkerCount + 1 : 0;
+        }
+        return 0;
     }
 
     private Map<String, Object> toJobErrorPayload(ImageJobState job) {

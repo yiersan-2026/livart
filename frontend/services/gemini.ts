@@ -15,7 +15,7 @@ export interface ImageGenerationResult extends ImagePromptMetadata {
   requestId?: string;
 }
 
-interface ImageJobStatus extends ImagePromptMetadata {
+export interface ImageJobStatus extends ImagePromptMetadata {
   jobId: string;
   status: 'queued' | 'running' | 'completed' | 'error';
   response?: unknown;
@@ -23,6 +23,13 @@ interface ImageJobStatus extends ImagePromptMetadata {
   upstreamStatus?: number;
   requestId?: string;
   attempts?: number;
+  queuePosition?: number;
+  maxConcurrentJobs?: number;
+  queued?: boolean;
+}
+
+interface WaitForImageJobOptions {
+  onStatus?: (job: ImageJobStatus) => void;
 }
 
 interface ImageJobSocketMessage {
@@ -239,7 +246,20 @@ export const getImageJob = async (jobId: string): Promise<ImageJobStatus> => {
   return data;
 };
 
-const waitForImageJobByWebSocket = async (jobId: string) => {
+export const getImageJobQueueMessage = (job: ImageJobStatus, label = '图片任务') => {
+  const queuePosition = Number(job.queuePosition || 0);
+  if (job.status !== 'queued' || queuePosition <= 0) {
+    return '';
+  }
+
+  const maxConcurrentJobs = Number(job.maxConcurrentJobs || 16);
+  if (queuePosition <= 1) {
+    return `${label}排队中：正在等待空闲生成通道，最多同时处理 ${maxConcurrentJobs} 个任务。`;
+  }
+  return `${label}排队中：前面还有 ${queuePosition - 1} 个任务，最多同时处理 ${maxConcurrentJobs} 个任务。`;
+};
+
+const waitForImageJobByWebSocket = async (jobId: string, options: WaitForImageJobOptions = {}) => {
   const session = getStoredAuthSession();
   const socketUrl = getImageJobWebSocketUrl();
   if (!session?.token || !socketUrl || typeof WebSocket === 'undefined') {
@@ -311,6 +331,7 @@ const waitForImageJobByWebSocket = async (jobId: string) => {
     };
 
     const handleJobMessage = (job: ImageJobStatus) => {
+      options.onStatus?.(job);
       if (job.status === 'completed') {
         try {
           finishResolve(extractImageResultFromJob(job));
@@ -387,6 +408,6 @@ const waitForImageJobByWebSocket = async (jobId: string) => {
   });
 };
 
-export const waitForImageJob = async (jobId: string) => {
-  return waitForImageJobByWebSocket(jobId);
+export const waitForImageJob = async (jobId: string, options: WaitForImageJobOptions = {}) => {
+  return waitForImageJobByWebSocket(jobId, options);
 };

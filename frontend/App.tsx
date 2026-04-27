@@ -10,7 +10,9 @@ import ConfigModal from './components/ConfigModal';
 import CanvasUtilityDock from './components/CanvasUtilityDock';
 import ProjectLinks from './components/ProjectLinks';
 import {
+  getImageJobQueueMessage,
   type ImageGenerationResult,
+  type ImageJobStatus,
   waitForImageJob
 } from './services/gemini';
 import {
@@ -125,6 +127,11 @@ const buildExecutionAnnouncement = (plan: AgentPlan) => {
 
   const countLabel = plan.count > 1 ? `${plan.count}张${title}` : `这张${title}`;
   return `我将为您生成${countLabel}。`;
+};
+
+const buildImageJobQueueNotice = (job: ImageJobStatus, imageIndex?: number) => {
+  const label = typeof imageIndex === 'number' ? `第 ${imageIndex + 1} 张图片` : '图片任务';
+  return getImageJobQueueMessage(job, label);
 };
 
 const waitForMinimumDuration = async (startedAt: number, durationMs: number) => {
@@ -1042,7 +1049,16 @@ function App() {
       const restoredStartedAt = getRestoredImageJobStartedAt(item);
       startTaskTimer(restoredStartedAt);
 
-      waitForImageJob(jobId)
+      waitForImageJob(jobId, {
+        onStatus: (jobStatus) => {
+          const queueNotice = buildImageJobQueueNotice(jobStatus);
+          if (!queueNotice) return;
+          setItems(prev => prev.map(candidate => candidate.id === item.id
+            ? { ...candidate, label: '排队中...' }
+            : candidate
+          ));
+        }
+      })
         .then(async (imageResult) => {
           const resultImg = imageResult.image;
           const persistedImageItem = await ensureCanvasImageAsset({
@@ -1502,6 +1518,16 @@ function App() {
       }));
     };
 
+    const updateExecutionMessage = (nextText: string) => {
+      if (!nextText.trim()) return;
+      collapsedPlanText = nextText;
+      updateMessageById(planningMessageId, message => ({
+        ...message,
+        text: nextText,
+        agentPlan: showAgentPlan ? message.agentPlan : undefined
+      }));
+    };
+
     const markAgentPlanStep = (stepId?: string, terminalStatus?: 'completed' | 'error') => {
       if (!agentPlan) return;
       activePlanStepId = stepId || activePlanStepId;
@@ -1706,9 +1732,36 @@ function App() {
       await waitForMinimumDuration(planningVisibleStartedAt, 1100);
       collapseAgentPlanMessage(buildExecutionAnnouncement(initialPlan));
 
+      const queuedImageJobIds = new Set<string>();
       const resultCards = await Promise.all(agentRun.jobs.map(async (job, index) => {
         const placeholder = placeholderItems[index];
-        const imageResult: ImageGenerationResult = await waitForImageJob(job.jobId);
+        const imageResult: ImageGenerationResult = await waitForImageJob(job.jobId, {
+          onStatus: (jobStatus) => {
+            const queueNotice = buildImageJobQueueNotice(jobStatus, agentRun.jobs.length > 1 ? index : undefined);
+            if (queueNotice) {
+              queuedImageJobIds.add(job.jobId);
+              updateExecutionMessage(queueNotice);
+              setItems(prev => prev.map(item => item.id === placeholder.id
+                ? { ...item, label: '排队中...' }
+                : item
+              ));
+              return;
+            }
+
+            if (jobStatus.status === 'running' && queuedImageJobIds.has(job.jobId)) {
+              updateExecutionMessage(agentRun.jobs.length > 1
+                ? `第 ${index + 1} 张图片已开始生成。`
+                : editBaseImage
+                  ? '图片编辑已开始执行。'
+                  : '图片生成已开始执行。'
+              );
+              setItems(prev => prev.map(item => item.id === placeholder.id
+                ? { ...item, label: plannerMode === 'background-removal' ? 'AI 去背景中...' : editBaseImage ? 'AI 编辑中...' : 'AI 生成中...' }
+                : item
+              ));
+            }
+          }
+        });
         const persistedImageItem = await ensureCanvasImageAsset({
           ...placeholder,
           content: imageResult.image,
