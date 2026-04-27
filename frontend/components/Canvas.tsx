@@ -2066,6 +2066,7 @@ const Canvas: React.FC<CanvasProps> = ({
         id: newId,
         type: 'image',
         content: dataUrl,
+        source: 'crop',
         x: cropPosition.x,
         y: cropPosition.y,
         width: frame.width,

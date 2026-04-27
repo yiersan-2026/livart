@@ -13,7 +13,7 @@ Spring Boot + Spring Security JWT + MyBatis Plus 后端，用 RabbitMQ 串行化
 - `POST /api/auth/logout`：退出登录（前端清理 JWT）
 - `GET /api/user/config`：读取当前用户的中转站配置
 - `PUT /api/user/config`：保存当前用户的中转站配置
-- `GET /api/stats/overview`：读取站点概览统计，返回注册用户数和成功生成图片数
+- `GET /api/stats/overview`：读取站点概览统计，返回注册用户数和 AI 成功生成图片数；生成数包含文生图和图生图等 AI 生成/编辑结果，不包含用户上传图片、社媒/自媒体导入图片和裁剪图
 - `GET /api/canvases`：项目列表，一个项目对应一张画布
 - `POST /api/canvases`：创建项目画布
 - `GET /api/canvases/{id}`：读取指定项目画布

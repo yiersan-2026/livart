@@ -14,6 +14,7 @@ export interface CanvasItem {
   id: string;
   type: 'image' | 'text' | 'research' | 'workflow';
   content: string;
+  source?: 'ai' | 'upload' | 'external' | 'crop';
   assetId?: string;
   previewContent?: string;
   thumbnailContent?: string;

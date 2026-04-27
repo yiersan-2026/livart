@@ -31,7 +31,9 @@ public interface SiteStatsMapper {
                 SELECT COALESCE(
                     NULLIF(item.value ->> 'id', ''),
                     NULLIF(item.value ->> 'assetId', ''),
-                    NULLIF(item.value ->> 'content', '')
+                    NULLIF(item.value ->> 'content', ''),
+                    NULLIF(item.value ->> 'previewContent', ''),
+                    NULLIF(item.value ->> 'thumbnailContent', '')
                 ) AS image_key
                 FROM artisan_canvases canvas
                 CROSS JOIN LATERAL jsonb_array_elements(
@@ -43,12 +45,21 @@ public interface SiteStatsMapper {
                 ) AS item(value)
                 WHERE item.value ->> 'type' = 'image'
                   AND item.value ->> 'status' = 'completed'
-                  AND COALESCE(item.value ->> 'content', '') <> ''
+                  AND COALESCE(item.value ->> 'source', '') NOT IN ('upload', 'external', 'social', 'social-media', 'crop')
+                  AND (
+                      COALESCE(item.value ->> 'content', '') <> ''
+                      OR COALESCE(item.value ->> 'assetId', '') <> ''
+                      OR COALESCE(item.value ->> 'previewContent', '') <> ''
+                      OR COALESCE(item.value ->> 'thumbnailContent', '') <> ''
+                  )
                   AND (
                       COALESCE(item.value ->> 'originalPrompt', '') <> ''
                       OR COALESCE(item.value ->> 'optimizedPrompt', '') <> ''
+                      OR COALESCE(item.value ->> 'prompt', '') <> ''
                   )
                   AND COALESCE(item.value ->> 'originalPrompt', '') NOT LIKE '从 % 裁剪生成'
+                  AND COALESCE(item.value ->> 'optimizedPrompt', '') NOT LIKE '从 % 裁剪生成'
+                  AND COALESCE(item.value ->> 'prompt', '') NOT LIKE '从 % 裁剪生成'
             ),
             generated_images AS (
                 SELECT image_key FROM message_cards WHERE image_key IS NOT NULL
