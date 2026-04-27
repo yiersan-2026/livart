@@ -8,9 +8,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.annotation.PreDestroy;
-import jakarta.servlet.ServletException;
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.Part;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -52,8 +49,6 @@ public class AiProxyService {
     private static final Duration IMAGE_REFERENCE_ANALYZER_TIMEOUT = Duration.ofSeconds(45);
     private static final int IMAGE_PROXY_MAX_ATTEMPTS = 1;
     private static final byte[] CRLF = "\r\n".getBytes(StandardCharsets.UTF_8);
-    private static final String ORIGINAL_PROMPT_HEADER = "X-Livart-Original-Prompt-B64";
-    private static final String OPTIMIZED_PROMPT_HEADER = "X-Livart-Optimized-Prompt-B64";
     private static final List<String> NEGATIVE_PROMPT_TERMS = List.of(
             "画布 UI",
             "工具栏",
@@ -113,32 +108,35 @@ public class AiProxyService {
     private final AssetService assetService;
     private final ObjectMapper objectMapper;
     private final ImageJobEventBroadcaster imageJobEventBroadcaster;
+    private final SpringAiTextService springAiTextService;
     private final HttpClient httpClient;
     private final boolean defaultImageSizeEnabled;
     private final int defaultImageLongSide;
     private final Map<UUID, ImageJobState> imageJobs = new ConcurrentHashMap<>();
-    private final ExecutorService imageJobExecutor = Executors.newFixedThreadPool(
-            Math.max(2, Runtime.getRuntime().availableProcessors())
-    );
+    private final ExecutorService imageJobExecutor;
 
     public AiProxyService(
             UserApiConfigService userApiConfigService,
             AssetService assetService,
             ObjectMapper objectMapper,
             ImageJobEventBroadcaster imageJobEventBroadcaster,
+            SpringAiTextService springAiTextService,
             @Value("${artisan.ai.default-image-size-enabled:true}") boolean defaultImageSizeEnabled,
-            @Value("${artisan.ai.default-image-long-side:2048}") int defaultImageLongSide
+            @Value("${artisan.ai.default-image-long-side:2048}") int defaultImageLongSide,
+            @Value("${artisan.ai.image-job-worker-count:0}") int imageJobWorkerCount
     ) {
         this.userApiConfigService = userApiConfigService;
         this.assetService = assetService;
         this.objectMapper = objectMapper;
         this.imageJobEventBroadcaster = imageJobEventBroadcaster;
+        this.springAiTextService = springAiTextService;
         this.defaultImageSizeEnabled = defaultImageSizeEnabled;
         this.defaultImageLongSide = defaultImageLongSide;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(30))
                 .followRedirects(HttpClient.Redirect.NORMAL)
                 .build();
+        this.imageJobExecutor = Executors.newFixedThreadPool(resolveImageJobWorkerCount(imageJobWorkerCount));
     }
 
     @PreDestroy
@@ -146,57 +144,77 @@ public class AiProxyService {
         imageJobExecutor.shutdownNow();
     }
 
-    public ResponseEntity<byte[]> proxyImageRequest(
-            UUID userId,
-            String label,
-            String path,
-            HttpServletRequest request
-    ) throws IOException {
-        UserApiConfigDtos.ResolvedConfig config = userApiConfigService.getRequiredConfig(userId);
-        ImageProxyRequestBody requestBody = readImageProxyRequestBody(userId, request, config, label);
-        ImageProxyResult result = executeImageRequest(
-                label,
-                joinUrl(config.baseUrl(), path),
-                config.apiKey(),
-                request.getHeader(HttpHeaders.ACCEPT),
-                requestBody.contentType(),
-                requestBody.body()
-        );
-
-        HttpHeaders headers = new HttpHeaders();
-        headers.add(HttpHeaders.CONTENT_TYPE, result.contentType());
-        headers.add(HttpHeaders.CACHE_CONTROL, "no-store");
-        headers.add("X-Proxy-Attempts", String.valueOf(result.attempts()));
-        addPromptMetadataHeaders(headers, requestBody.originalPrompt(), requestBody.optimizedPrompt());
-        if (!result.requestId().isBlank()) {
-            headers.add("X-Upstream-Request-Id", result.requestId());
+    static int resolveImageJobWorkerCount(int configuredWorkerCount) {
+        if (configuredWorkerCount > 0) {
+            return Math.max(1, Math.min(64, configuredWorkerCount));
         }
-
-        return ResponseEntity.status(result.statusCode()).headers(headers).body(result.body());
+        return Math.max(4, Runtime.getRuntime().availableProcessors());
     }
 
-    public ResponseEntity<Map<String, Object>> createImageJob(
+    public Map<String, Object> createTextToImageJobFromAgent(
             UUID userId,
-            String label,
-            String path,
-            HttpServletRequest request
+            String prompt,
+            String aspectRatio
+    ) throws IOException {
+        return createTextToImageJobsFromAgent(userId, prompt, aspectRatio, 1).get(0);
+    }
+
+    public List<Map<String, Object>> createTextToImageJobsFromAgent(
+            UUID userId,
+            String prompt,
+            String aspectRatio,
+            int count
     ) throws IOException {
         cleanupImageJobs();
         UserApiConfigDtos.ResolvedConfig config = userApiConfigService.getRequiredConfig(userId);
+        ObjectNode body = objectMapper.createObjectNode();
+        body.put("model", config.model());
+        body.put("prompt", appendAspectRatioToPrompt(prompt, aspectRatio));
+
+        ImageProxyRequestBody requestBody = readJsonImageProxyRequestBody(
+                config,
+                "text-to-image",
+                "application/json; charset=utf-8",
+                objectMapper.writeValueAsBytes(body)
+        );
+        int jobCount = Math.max(1, Math.min(16, count));
+        List<Map<String, Object>> jobs = new ArrayList<>();
+        for (int index = 0; index < jobCount; index += 1) {
+            jobs.add(enqueueImageJob(userId, "text-to-image", "images/generations", config, "application/json", requestBody));
+        }
+        return List.copyOf(jobs);
+    }
+
+    public Map<String, Object> createImageEditJobFromAgent(
+            UUID userId,
+            AgentImageEditJobRequest request
+    ) throws IOException {
+        cleanupImageJobs();
+        UserApiConfigDtos.ResolvedConfig config = userApiConfigService.getRequiredConfig(userId);
+        ImageProxyRequestBody requestBody = buildAgentImageEditRequestBody(userId, config, request);
+        return enqueueImageJob(userId, "image-to-image", "images/edits", config, "application/json", requestBody);
+    }
+
+    private Map<String, Object> enqueueImageJob(
+            UUID userId,
+            String label,
+            String path,
+            UserApiConfigDtos.ResolvedConfig config,
+            String accept,
+            ImageProxyRequestBody requestBody
+    ) {
         UUID jobId = UUID.randomUUID();
         ImageJobState job = new ImageJobState(jobId, userId, label);
         imageJobs.put(jobId, job);
         publishImageJob(job);
 
-        String accept = request.getHeader(HttpHeaders.ACCEPT);
-        ImageProxyRequestBody requestBody = readImageProxyRequestBody(userId, request, config, label);
         job.setPromptMetadata(requestBody.originalPrompt(), requestBody.optimizedPrompt());
+        String targetUrl = joinUrl(config.baseUrl(), path);
         String contentType = requestBody.contentType();
         byte[] body = requestBody.body();
-        String targetUrl = joinUrl(config.baseUrl(), path);
 
         imageJobExecutor.submit(() -> runImageJob(job, targetUrl, config.apiKey(), accept, contentType, body));
-        return ResponseEntity.accepted().body(toJobResponse(job));
+        return toJobResponse(job);
     }
 
     public ResponseEntity<Map<String, Object>> getImageJob(UUID userId, String jobId) {
@@ -236,45 +254,21 @@ public class AiProxyService {
         long startedAt = System.currentTimeMillis();
 
         try {
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("model", config.chatModel());
-            body.put("instructions", getImageReferenceAnalyzerSystemPrompt());
-            body.put("input", buildImageReferenceAnalyzerInput(request));
-
             log.info(
                     "[image-reference-analyzer] start model={} promptChars={} images={}",
                     config.chatModel(),
                     request.prompt().length(),
                     request.images().size()
             );
-
-            HttpRequest upstreamRequest = HttpRequest.newBuilder(URI.create(joinUrl(config.baseUrl(), "responses")))
-                    .timeout(IMAGE_REFERENCE_ANALYZER_TIMEOUT)
-                    .header(HttpHeaders.CONTENT_TYPE, "application/json")
-                    .header(HttpHeaders.ACCEPT, "application/json")
-                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + config.apiKey())
-                    .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body), StandardCharsets.UTF_8))
-                    .build();
-
-            HttpResponse<byte[]> upstreamResponse = httpClient.send(upstreamRequest, HttpResponse.BodyHandlers.ofByteArray());
-            if (upstreamResponse.statusCode() < 200 || upstreamResponse.statusCode() > 299) {
-                String detail = getBodyPreview(upstreamResponse.body());
-                log.warn(
-                        "[image-reference-analyzer] upstream error status={} duration={}ms body={}",
-                        upstreamResponse.statusCode(),
-                        System.currentTimeMillis() - startedAt,
-                        detail
-                );
-                throw new ApiException(
-                        HttpStatus.BAD_GATEWAY,
-                        "IMAGE_REFERENCE_ANALYZER_UPSTREAM_ERROR",
-                        "图片角色分析上游错误：%s（状态 %d）".formatted(detail, upstreamResponse.statusCode())
-                );
-            }
-
-            JsonNode data = objectMapper.readTree(upstreamResponse.body());
+            String responseText = springAiTextService.completeText(
+                    config,
+                    getImageReferenceAnalyzerSystemPrompt(),
+                    buildImageReferenceAnalyzerInput(request),
+                    IMAGE_REFERENCE_ANALYZER_TIMEOUT,
+                    "image-reference-analyzer"
+            );
             AiProxyDtos.ImageReferenceAnalysisResponse analysis = parseImageReferenceAnalysis(
-                    extractTextFromAiResponse(data),
+                    responseText,
                     request
             );
 
@@ -285,21 +279,20 @@ public class AiProxyService {
                     analysis.referenceImageIds().size()
             );
             return analysis;
-        } catch (HttpTimeoutException exception) {
-            throw new ApiException(
-                    HttpStatus.GATEWAY_TIMEOUT,
-                    "IMAGE_REFERENCE_ANALYZER_TIMEOUT",
-                    "图片角色分析超过 45 秒，请稍后重试：%s".formatted(safeMessage(exception))
-            );
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            throw new ApiException(
-                    HttpStatus.BAD_GATEWAY,
-                    "IMAGE_REFERENCE_ANALYZER_INTERRUPTED",
-                    "图片角色分析请求被中断：%s".formatted(safeMessage(exception))
-            );
         } catch (ApiException exception) {
-            throw exception;
+            throw new ApiException(
+                    exception.status(),
+                    switch (exception.code()) {
+                        case "SPRING_AI_TIMEOUT" -> "IMAGE_REFERENCE_ANALYZER_TIMEOUT";
+                        case "SPRING_AI_UPSTREAM_ERROR" -> "IMAGE_REFERENCE_ANALYZER_UPSTREAM_ERROR";
+                        default -> "IMAGE_REFERENCE_ANALYZER_FAILED";
+                    },
+                    switch (exception.code()) {
+                        case "SPRING_AI_TIMEOUT" -> "图片角色分析超过 45 秒，请稍后重试：%s".formatted(exception.getMessage());
+                        case "SPRING_AI_UPSTREAM_ERROR" -> "图片角色分析上游错误：%s".formatted(exception.getMessage());
+                        default -> "图片角色分析失败：%s".formatted(exception.getMessage());
+                    }
+            );
         } catch (IOException | RuntimeException exception) {
             log.error("[image-reference-analyzer] failed duration={}ms error={}", System.currentTimeMillis() - startedAt, safeMessage(exception));
             throw new ApiException(
@@ -464,76 +457,30 @@ public class AiProxyService {
         return jsonImageProxyResult(HttpStatus.BAD_GATEWAY, Map.of("error", "%s upstream request failed".formatted(label)), IMAGE_PROXY_MAX_ATTEMPTS);
     }
 
-    private ImageProxyRequestBody readImageProxyRequestBody(
+    private ImageProxyRequestBody buildAgentImageEditRequestBody(
             UUID userId,
-            HttpServletRequest request,
             UserApiConfigDtos.ResolvedConfig config,
-            String label
+            AgentImageEditJobRequest request
     ) throws IOException {
-        String contentType = request.getContentType();
-        if (!isMultipartFormData(contentType)) {
-            return readJsonImageProxyRequestBody(config, label, contentType, request.getInputStream().readAllBytes());
+        String boundary = "----LivartProxyBoundary" + UUID.randomUUID().toString().replace("-", "");
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        String prompt = appendAspectRatioToPrompt(request.prompt(), request.aspectRatio());
+        String promptOptimizationMode = normalizePromptOptimizationMode(request.promptOptimizationMode(), "image-to-image");
+        String optimizedPrompt = optimizePromptInline(config, promptOptimizationMode, prompt, request.imageContext());
+
+        writeTextMultipartPart(output, boundary, "model", config.model());
+        writeTextMultipartPart(output, boundary, "prompt", optimizedPrompt);
+        writeAssetImagePart(output, boundary, userId, request.imageAssetId());
+        for (UUID referenceAssetId : request.referenceAssetIds()) {
+            writeAssetImagePart(output, boundary, userId, referenceAssetId);
+        }
+        if (request.maskDataUrl() != null && !request.maskDataUrl().isBlank()) {
+            writeMultipartPart(output, boundary, dataUrlMultipartPart("mask", request.maskDataUrl(), "mask.png"));
         }
 
-        try {
-            String boundary = "----LivartProxyBoundary" + UUID.randomUUID().toString().replace("-", "");
-            ByteArrayOutputStream output = new ByteArrayOutputStream();
-            List<MultipartPartData> passthroughParts = new ArrayList<>();
-            List<MultipartPartData> uploadedImageParts = new ArrayList<>();
-            List<UUID> referenceAssetIds = new ArrayList<>();
-            UUID imageAssetId = null;
-            String prompt = "";
-            String imageContext = "";
-            String promptOptimizationMode = label;
-
-            for (Part part : request.getParts()) {
-                MultipartPartData partData = readMultipartPart(part);
-                if ("imageAssetId".equals(partData.name())) {
-                    imageAssetId = parseAssetId(readUtf8(partData.body()), "imageAssetId");
-                } else if ("referenceAssetId".equals(partData.name())) {
-                    referenceAssetIds.add(parseAssetId(readUtf8(partData.body()), "referenceAssetId"));
-                } else if ("image".equals(partData.name())) {
-                    uploadedImageParts.add(partData);
-                } else if (isPromptContextField(partData.name())) {
-                    imageContext = firstNonBlank(imageContext, readUtf8(partData.body()));
-                } else if ("promptOptimizationMode".equals(partData.name())) {
-                    promptOptimizationMode = normalizePromptOptimizationMode(readUtf8(partData.body()), label);
-                } else {
-                    if ("prompt".equals(partData.name())) {
-                        prompt = firstNonBlank(prompt, readUtf8(partData.body()));
-                    }
-                    passthroughParts.add(partData);
-                }
-            }
-
-            String optimizedPrompt = optimizePromptInline(config, promptOptimizationMode, prompt, imageContext);
-            for (MultipartPartData part : passthroughParts) {
-                writeMultipartPart(output, boundary, "prompt".equals(part.name())
-                        ? withUtf8Body(part, optimizedPrompt)
-                        : part);
-            }
-
-            if (imageAssetId != null) {
-                writeAssetImagePart(output, boundary, userId, imageAssetId);
-            } else if (!uploadedImageParts.isEmpty()) {
-                writeMultipartPart(output, boundary, prepareUploadedImagePart(uploadedImageParts.get(0)));
-            }
-
-            for (UUID referenceAssetId : referenceAssetIds) {
-                writeAssetImagePart(output, boundary, userId, referenceAssetId);
-            }
-
-            int firstUploadedReferenceIndex = imageAssetId == null && !uploadedImageParts.isEmpty() ? 1 : 0;
-            for (int index = firstUploadedReferenceIndex; index < uploadedImageParts.size(); index += 1) {
-                writeMultipartPart(output, boundary, prepareUploadedImagePart(uploadedImageParts.get(index)));
-            }
-
-            writeAscii(output, "--" + boundary + "--");
-            output.write(CRLF);
-            return new ImageProxyRequestBody("multipart/form-data; boundary=" + boundary, output.toByteArray(), prompt, optimizedPrompt);
-        } catch (ServletException exception) {
-            throw new IOException("Failed to read multipart image request", exception);
-        }
+        writeAscii(output, "--" + boundary + "--");
+        output.write(CRLF);
+        return new ImageProxyRequestBody("multipart/form-data; boundary=" + boundary, output.toByteArray(), prompt, optimizedPrompt);
     }
 
     private ImageProxyRequestBody readJsonImageProxyRequestBody(
@@ -596,6 +543,30 @@ public class AiProxyService {
         }
     }
 
+    private String appendAspectRatioToPrompt(String prompt, String aspectRatio) {
+        String instruction = aspectRatioToPromptInstruction(aspectRatio);
+        String trimmedPrompt = prompt == null ? "" : prompt.trim();
+        if (instruction.isBlank() || trimmedPrompt.contains("画幅比例要求")) {
+            return trimmedPrompt;
+        }
+        if (trimmedPrompt.isBlank()) {
+            return instruction;
+        }
+        String separator = trimmedPrompt.matches(".*[。.!！？?]$") ? "\n" : "。\n";
+        return trimmedPrompt + separator + instruction;
+    }
+
+    private String aspectRatioToPromptInstruction(String aspectRatio) {
+        return switch (aspectRatio == null ? "" : aspectRatio.trim()) {
+            case "1:1" -> "画幅比例要求：最终输出为 1:1 方图构图，不要添加白边、相框或多余留白来凑比例。";
+            case "4:3" -> "画幅比例要求：最终输出为 4:3 横向标准构图，不要添加白边、相框或多余留白来凑比例。";
+            case "3:4" -> "画幅比例要求：最终输出为 3:4 竖向标准构图，不要添加白边、相框或多余留白来凑比例。";
+            case "16:9" -> "画幅比例要求：最终输出为 16:9 横向宽屏构图，不要添加白边、相框或多余留白来凑比例。";
+            case "9:16" -> "画幅比例要求：最终输出为 9:16 竖向手机屏幕构图，不要添加白边、相框或多余留白来凑比例。";
+            default -> "";
+        };
+    }
+
     private boolean hasUsableField(ObjectNode data, String fieldName) {
         JsonNode value = data.get(fieldName);
         return value != null && !value.isNull() && (!value.isTextual() || !value.asText().isBlank());
@@ -648,21 +619,6 @@ public class AiProxyService {
         return Math.max(1, Math.round((float) longSide * dimension / longDimension));
     }
 
-    private MultipartPartData readMultipartPart(Part part) throws IOException {
-        try (InputStream inputStream = part.getInputStream()) {
-            return new MultipartPartData(
-                    part.getName(),
-                    getSubmittedFileName(part).orElse(""),
-                    part.getContentType(),
-                    inputStream.readAllBytes()
-            );
-        }
-    }
-
-    private String readUtf8(byte[] body) {
-        return new String(body == null ? new byte[0] : body, StandardCharsets.UTF_8).trim();
-    }
-
     private String readTextField(ObjectNode data, String fieldName) {
         JsonNode value = data.get(fieldName);
         return value != null && value.isTextual() ? value.asText().trim() : "";
@@ -682,20 +638,37 @@ public class AiProxyService {
         return fallbackMode;
     }
 
-    private MultipartPartData withUtf8Body(MultipartPartData part, String value) {
-        return new MultipartPartData(
-                part.name(),
-                part.filename(),
-                part.contentType(),
+    private void writeTextMultipartPart(ByteArrayOutputStream output, String boundary, String name, String value) throws IOException {
+        writeMultipartPart(output, boundary, new MultipartPartData(
+                name,
+                "",
+                "text/plain; charset=utf-8",
                 (value == null ? "" : value).getBytes(StandardCharsets.UTF_8)
-        );
+        ));
     }
 
-    private UUID parseAssetId(String value, String fieldName) {
+    private MultipartPartData dataUrlMultipartPart(String name, String dataUrl, String filename) {
+        String trimmedDataUrl = dataUrl == null ? "" : dataUrl.trim();
+        String contentType = "image/png";
+        String encoded = trimmedDataUrl;
+
+        if (trimmedDataUrl.startsWith("data:")) {
+            int commaIndex = trimmedDataUrl.indexOf(',');
+            if (commaIndex < 0) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_IMAGE_DATA_URL", "图片蒙版数据格式无效");
+            }
+            String metadata = trimmedDataUrl.substring(5, commaIndex);
+            encoded = trimmedDataUrl.substring(commaIndex + 1);
+            String[] metadataParts = metadata.split(";");
+            if (metadataParts.length > 0 && metadataParts[0].startsWith("image/")) {
+                contentType = metadataParts[0].toLowerCase(Locale.ROOT);
+            }
+        }
+
         try {
-            return UUID.fromString(value);
+            return new MultipartPartData(name, filename, contentType, Base64.getDecoder().decode(encoded));
         } catch (IllegalArgumentException exception) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_ASSET_ID", "%s 无效".formatted(fieldName));
+            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_IMAGE_DATA_URL", "图片蒙版 Base64 数据无效");
         }
     }
 
@@ -714,19 +687,6 @@ public class AiProxyService {
                     inputStream.readAllBytes()
             ));
         }
-    }
-
-    private MultipartPartData prepareUploadedImagePart(MultipartPartData part) {
-        AssetService.PreparedImageContent preparedImage = assetService.prepareModelInputImage(
-                part.body(),
-                part.contentType()
-        );
-        return new MultipartPartData(
-                part.name(),
-                modelInputFilename(null, part.filename(), preparedImage.contentType()),
-                preparedImage.contentType(),
-                preparedImage.bytes()
-        );
     }
 
     private String modelInputFilename(UUID assetId, String originalFilename, String contentType) {
@@ -768,10 +728,6 @@ public class AiProxyService {
         output.write(CRLF);
     }
 
-    private boolean isMultipartFormData(String contentType) {
-        return contentType != null && contentType.toLowerCase(Locale.ROOT).contains("multipart/form-data");
-    }
-
     private boolean isJsonContentType(String contentType) {
         return contentType != null && contentType.toLowerCase(Locale.ROOT).contains("json");
     }
@@ -789,14 +745,6 @@ public class AiProxyService {
         }
 
         return builder.toString();
-    }
-
-    private Optional<String> getSubmittedFileName(Part part) {
-        try {
-            return Optional.ofNullable(part.getSubmittedFileName());
-        } catch (RuntimeException exception) {
-            return Optional.empty();
-        }
     }
 
     private String escapeMultipartHeader(String value) {
@@ -832,11 +780,6 @@ public class AiProxyService {
         long startedAt = System.currentTimeMillis();
         try {
             String systemPrompt = getPromptOptimizerSystemPrompt(mode);
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("model", config.chatModel());
-            body.put("instructions", systemPrompt);
-            body.put("input", buildPromptOptimizerInput(trimmedPrompt, trimmedImageContext));
-
             log.info(
                     "[prompt-optimizer] inline start mode={} model={} promptChars={} contextChars={}",
                     mode,
@@ -844,33 +787,17 @@ public class AiProxyService {
                     trimmedPrompt.length(),
                     trimmedImageContext.length()
             );
-            HttpRequest upstreamRequest = HttpRequest.newBuilder(URI.create(joinUrl(config.baseUrl(), "responses")))
-                    .timeout(PROMPT_OPTIMIZER_TIMEOUT)
-                    .header(HttpHeaders.CONTENT_TYPE, "application/json")
-                    .header(HttpHeaders.ACCEPT, "application/json")
-                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + config.apiKey())
-                    .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body), StandardCharsets.UTF_8))
-                    .build();
-
-            HttpResponse<byte[]> upstreamResponse = httpClient.send(upstreamRequest, HttpResponse.BodyHandlers.ofByteArray());
-            if (upstreamResponse.statusCode() < 200 || upstreamResponse.statusCode() > 299) {
-                String detail = getBodyPreview(upstreamResponse.body());
-                log.warn(
-                        "[prompt-optimizer] inline upstream error mode={} status={} duration={}ms body={}",
-                        mode,
-                        upstreamResponse.statusCode(),
-                        System.currentTimeMillis() - startedAt,
-                        detail
-                );
-                throw new ApiException(
-                        HttpStatus.BAD_GATEWAY,
-                        "PROMPT_OPTIMIZER_UPSTREAM_ERROR",
-                        "提示词优化上游错误：%s（状态 %d）".formatted(detail, upstreamResponse.statusCode())
-                );
-            }
-
-            JsonNode data = objectMapper.readTree(upstreamResponse.body());
-            String optimizedPrompt = appendNegativePromptConstraints(sanitizeOptimizedPrompt(extractTextFromAiResponse(data)));
+            String optimizedPrompt = appendNegativePromptConstraints(
+                    sanitizeOptimizedPrompt(
+                            springAiTextService.completeText(
+                                    config,
+                                    systemPrompt,
+                                    buildPromptOptimizerInput(trimmedPrompt, trimmedImageContext),
+                                    PROMPT_OPTIMIZER_TIMEOUT,
+                                    "prompt-optimizer"
+                            )
+                    )
+            );
 
             log.info(
                     "[prompt-optimizer] inline done mode={} duration={}ms optimizedChars={}",
@@ -879,22 +806,21 @@ public class AiProxyService {
                     optimizedPrompt.length()
             );
             return optimizedPrompt;
-        } catch (HttpTimeoutException exception) {
-            throw new ApiException(
-                    HttpStatus.GATEWAY_TIMEOUT,
-                    "PROMPT_OPTIMIZER_TIMEOUT",
-                    "提示词优化超过 2 分钟，请稍后重试：%s".formatted(safeMessage(exception))
-            );
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            throw new ApiException(
-                    HttpStatus.BAD_GATEWAY,
-                    "PROMPT_OPTIMIZER_INTERRUPTED",
-                    "提示词优化请求被中断：%s".formatted(safeMessage(exception))
-            );
         } catch (ApiException exception) {
-            throw exception;
-        } catch (IOException | RuntimeException exception) {
+            throw new ApiException(
+                    exception.status(),
+                    switch (exception.code()) {
+                        case "SPRING_AI_TIMEOUT" -> "PROMPT_OPTIMIZER_TIMEOUT";
+                        case "SPRING_AI_UPSTREAM_ERROR" -> "PROMPT_OPTIMIZER_UPSTREAM_ERROR";
+                        default -> "PROMPT_OPTIMIZER_FAILED";
+                    },
+                    switch (exception.code()) {
+                        case "SPRING_AI_TIMEOUT" -> "提示词优化超过 2 分钟，请稍后重试：%s".formatted(exception.getMessage());
+                        case "SPRING_AI_UPSTREAM_ERROR" -> "提示词优化上游错误：%s".formatted(exception.getMessage());
+                        default -> "提示词优化失败：%s".formatted(exception.getMessage());
+                    }
+            );
+        } catch (RuntimeException exception) {
             log.error("[prompt-optimizer] inline failed mode={} duration={}ms error={}", mode, System.currentTimeMillis() - startedAt, safeMessage(exception));
             throw new ApiException(
                     HttpStatus.BAD_GATEWAY,
@@ -1138,24 +1064,86 @@ public class AiProxyService {
         String message = extractUpstreamErrorMessage(upstreamPayload, job.body());
         String code = extractUpstreamErrorCode(upstreamPayload);
         String type = extractUpstreamErrorType(upstreamPayload);
+        UserFacingImageJobError userFacingError = toUserFacingImageJobError(job.upstreamStatus(), message, code, type);
 
-        error.put("message", message.isBlank() ? "上游 AI 接口调用失败" : message);
+        error.put("message", userFacingError.message());
         error.put("upstreamStatus", job.upstreamStatus());
         error.put("attempts", job.attempts());
-        if (!code.isBlank()) {
-            error.put("code", code);
+        if (!userFacingError.code().isBlank()) {
+            error.put("code", userFacingError.code());
         }
-        if (!type.isBlank()) {
-            error.put("type", type);
+        if (!userFacingError.type().isBlank()) {
+            error.put("type", userFacingError.type());
         }
         if (job.requestId() != null && !job.requestId().isBlank()) {
             error.put("requestId", job.requestId());
         }
-        if (upstreamPayload != null) {
+        if (userFacingError.hideUpstreamPayload()) {
+            error.put("safeMessage", true);
+        } else if (upstreamPayload != null) {
             error.put("upstream", upstreamPayload);
         }
 
         return error;
+    }
+
+    static UserFacingImageJobError toUserFacingImageJobError(
+            int upstreamStatus,
+            String upstreamMessage,
+            String upstreamCode,
+            String upstreamType
+    ) {
+        if (isLikelyContentPolicyBlocked(upstreamStatus, upstreamMessage, upstreamCode, upstreamType)) {
+            return new UserFacingImageJobError(
+                    "图片生成失败：提示词或参考图片可能触发了上游 AI 的内容安全策略，请调整描述、降低敏感内容或更换参考图后再试。",
+                    "POSSIBLE_CONTENT_POLICY_BLOCKED",
+                    "content_policy",
+                    true
+            );
+        }
+
+        return new UserFacingImageJobError(
+                upstreamMessage == null || upstreamMessage.isBlank() ? "上游 AI 接口调用失败" : upstreamMessage,
+                upstreamCode == null ? "" : upstreamCode,
+                upstreamType == null ? "" : upstreamType,
+                false
+        );
+    }
+
+    private static boolean isLikelyContentPolicyBlocked(
+            int upstreamStatus,
+            String upstreamMessage,
+            String upstreamCode,
+            String upstreamType
+    ) {
+        String combined = String.join(
+                " ",
+                upstreamMessage == null ? "" : upstreamMessage,
+                upstreamCode == null ? "" : upstreamCode,
+                upstreamType == null ? "" : upstreamType
+        ).toLowerCase(Locale.ROOT);
+
+        if (upstreamStatus == 502) {
+            return true;
+        }
+
+        return combined.contains("content_policy")
+                || combined.contains("content policy")
+                || combined.contains("safety")
+                || combined.contains("moderation")
+                || combined.contains("policy")
+                || combined.contains("unsafe")
+                || combined.contains("nsfw")
+                || combined.contains("not allowed")
+                || combined.contains("blocked")
+                || combined.contains("rejected")
+                || combined.contains("forbidden")
+                || combined.contains("banned")
+                || combined.contains("违规")
+                || combined.contains("安全")
+                || combined.contains("审核")
+                || combined.contains("敏感")
+                || combined.contains("尺度");
     }
 
     private Object parseResponsePayload(byte[] body, String contentType) {
@@ -1240,13 +1228,6 @@ public class AiProxyService {
         );
     }
 
-    private ResponseEntity<byte[]> jsonBytes(HttpStatus status, Map<String, Object> payload) throws IOException {
-        HttpHeaders headers = new HttpHeaders();
-        headers.add(HttpHeaders.CONTENT_TYPE, "application/json; charset=utf-8");
-        headers.add(HttpHeaders.CACHE_CONTROL, "no-store");
-        return ResponseEntity.status(status).headers(headers).body(objectMapper.writeValueAsBytes(payload));
-    }
-
     private boolean shouldRetryUpstreamResponse(int statusCode, byte[] body) {
         if (statusCode < 500 || statusCode > 599) {
             return false;
@@ -1271,7 +1252,7 @@ public class AiProxyService {
                 要求：
                 - 保留用户原始意图，不新增用户没有要求的主体或文字。
                 - 如果输入中包含“图片角色分析”，必须先理解原图/编辑目标和素材参考的关系，再优化用户原始指令；不要把“图片角色分析”标题和内部说明原样输出。
-                - 原文中任何 @xxx 图片引用标记都是系统占位符，必须逐字保留，不要翻译、删除、换序或改写。
+                - 原文中任何 @xxx 图片引用标记都是系统占位符；如果上下文提供了图片角色分析，必须改写为“原图”“参考图 1”等角色名称，不要输出内部 ID。
                 - 补充清晰的主体、场景、构图、风格、材质、色彩、光影、镜头/视角和质量描述。
                 - 必须在提示词末尾加入完整负面约束：%s
                 - 使用中文输出，保持一段完整提示词。""".formatted(NEGATIVE_PROMPT_TEXT);
@@ -1356,38 +1337,6 @@ public class AiProxyService {
         return "%s。%s".formatted(normalizedPrompt, NEGATIVE_PROMPT_TEXT);
     }
 
-    private String extractTextFromAiResponse(JsonNode data) {
-        JsonNode outputText = data.get("output_text");
-        if (outputText != null && outputText.isTextual()) {
-            return outputText.asText();
-        }
-
-        JsonNode output = data.get("output");
-        if (output != null && output.isArray()) {
-            for (JsonNode outputItem : output) {
-                JsonNode content = outputItem.get("content");
-                if (content != null && content.isArray()) {
-                    for (JsonNode contentItem : content) {
-                        JsonNode text = contentItem.get("text");
-                        if (text != null && text.isTextual()) {
-                            return text.asText();
-                        }
-                    }
-                }
-            }
-        }
-
-        JsonNode choices = data.get("choices");
-        if (choices != null && choices.isArray() && !choices.isEmpty()) {
-            JsonNode content = choices.get(0).path("message").get("content");
-            if (content != null && content.isTextual()) {
-                return content.asText();
-            }
-        }
-
-        throw new ApiException(HttpStatus.BAD_GATEWAY, "PROMPT_OPTIMIZER_EMPTY_TEXT", "未能从提示词优化响应中获取文本");
-    }
-
     private String buildPromptOptimizerInput(String prompt, String imageContext) {
         if (imageContext == null || imageContext.isBlank()) {
             return "原始提示词：" + prompt;
@@ -1429,17 +1378,18 @@ public class AiProxyService {
         return message == null || message.isBlank() ? exception.getClass().getSimpleName() : message;
     }
 
-    private void addPromptMetadataHeaders(HttpHeaders headers, String originalPrompt, String optimizedPrompt) {
-        if (originalPrompt != null && !originalPrompt.isBlank()) {
-            headers.add(ORIGINAL_PROMPT_HEADER, encodePromptHeader(originalPrompt));
+    public record AgentImageEditJobRequest(
+            String prompt,
+            String aspectRatio,
+            UUID imageAssetId,
+            List<UUID> referenceAssetIds,
+            String maskDataUrl,
+            String imageContext,
+            String promptOptimizationMode
+    ) {
+        public AgentImageEditJobRequest {
+            referenceAssetIds = referenceAssetIds == null ? List.of() : List.copyOf(referenceAssetIds);
         }
-        if (optimizedPrompt != null && !optimizedPrompt.isBlank()) {
-            headers.add(OPTIMIZED_PROMPT_HEADER, encodePromptHeader(optimizedPrompt));
-        }
-    }
-
-    private String encodePromptHeader(String value) {
-        return Base64.getEncoder().encodeToString(value.getBytes(StandardCharsets.UTF_8));
     }
 
     private record ImageProxyResult(
@@ -1448,6 +1398,14 @@ public class AiProxyService {
             String contentType,
             int attempts,
             String requestId
+    ) {
+    }
+
+    record UserFacingImageJobError(
+            String message,
+            String code,
+            String type,
+            boolean hideUpstreamPayload
     ) {
     }
 

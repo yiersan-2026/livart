@@ -30,6 +30,7 @@ export interface CanvasItem {
   optimizedPrompt?: string;
   textStyle?: CanvasTextStyle;
   imageJobId?: string;
+  imageJobStartedAt?: number;
   groundingUrls?: string[];
   // 增强型 Workflow 字段
   layers: CompositionLayer[];
@@ -60,6 +61,33 @@ export type ImageAspectRatio = 'auto' | '1:1' | '4:3' | '3:4' | '16:9' | '9:16';
 
 export type CanvasTool = 'select' | 'pan' | 'text';
 
+export interface AgentPlanStep {
+  id: string;
+  title: string;
+  description: string;
+  type: 'analysis' | 'prompt' | 'generate' | 'edit';
+  status: 'pending' | 'running' | 'completed' | 'error';
+}
+
+export interface AgentPlan {
+  allowed: boolean;
+  responseMode: 'execute' | 'answer' | 'reject';
+  rejectionMessage?: string;
+  answerMessage?: string;
+  taskType: 'text-to-image' | 'image-edit';
+  mode: 'generate' | 'edit' | 'background-removal' | 'remover';
+  count: number;
+  baseImageId?: string;
+  referenceImageIds: string[];
+  aspectRatio: ImageAspectRatio;
+  summary: string;
+  displayTitle: string;
+  displayMessage: string;
+  thinkingSteps: string[];
+  steps: AgentPlanStep[];
+  source: 'ai' | 'fallback';
+}
+
 export interface PlanStep {
   id: string;
   title: string;
@@ -77,6 +105,7 @@ export interface ChatMessage {
   imageIds?: string[];
   imageResultCards?: ChatImageResultCard[];
   durationMs?: number;
+  agentPlan?: AgentPlan;
 }
 
 export interface ChatImageResultCard {

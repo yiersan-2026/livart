@@ -3,7 +3,6 @@ package com.artisanlab.ai;
 import com.artisanlab.auth.AuthContext;
 import com.artisanlab.common.ApiResponse;
 import jakarta.validation.Valid;
-import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -19,31 +18,17 @@ import java.util.Map;
 @RequestMapping("/api")
 public class AiProxyController {
     private final AiProxyService aiProxyService;
+    private final AgentRunService agentRunService;
     private final AuthContext authContext;
 
-    public AiProxyController(AiProxyService aiProxyService, AuthContext authContext) {
+    public AiProxyController(
+            AiProxyService aiProxyService,
+            AgentRunService agentRunService,
+            AuthContext authContext
+    ) {
         this.aiProxyService = aiProxyService;
+        this.agentRunService = agentRunService;
         this.authContext = authContext;
-    }
-
-    @PostMapping("/images/generations")
-    public ResponseEntity<byte[]> textToImage(HttpServletRequest request) throws IOException {
-        return aiProxyService.proxyImageRequest(authContext.requireUserId(), "text-to-image", "images/generations", request);
-    }
-
-    @PostMapping("/images/edits")
-    public ResponseEntity<byte[]> imageToImage(HttpServletRequest request) throws IOException {
-        return aiProxyService.proxyImageRequest(authContext.requireUserId(), "image-to-image", "images/edits", request);
-    }
-
-    @PostMapping("/image-jobs/generations")
-    public ResponseEntity<Map<String, Object>> createTextToImageJob(HttpServletRequest request) throws IOException {
-        return aiProxyService.createImageJob(authContext.requireUserId(), "text-to-image", "images/generations", request);
-    }
-
-    @PostMapping("/image-jobs/edits")
-    public ResponseEntity<Map<String, Object>> createImageToImageJob(HttpServletRequest request) throws IOException {
-        return aiProxyService.createImageJob(authContext.requireUserId(), "image-to-image", "images/edits", request);
     }
 
     @GetMapping("/image-jobs/{jobId}")
@@ -56,5 +41,12 @@ public class AiProxyController {
             @Valid @RequestBody AiProxyDtos.ImageReferenceAnalysisRequest request
     ) {
         return ApiResponse.ok(aiProxyService.analyzeImageReferences(authContext.requireUserId(), request));
+    }
+
+    @PostMapping("/agent/runs")
+    public ApiResponse<AiProxyDtos.AgentRunResponse> runAgentTask(
+            @Valid @RequestBody AiProxyDtos.AgentRunRequest request
+    ) throws IOException {
+        return ApiResponse.ok(agentRunService.run(authContext.requireUserId(), request));
     }
 }

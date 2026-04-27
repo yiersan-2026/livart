@@ -1,7 +1,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { PanelRightClose, PanelRight, Settings, FolderPlus, LogOut, Loader2, X, Download, ChevronDown } from 'lucide-react';
-import type { CanvasItem, CanvasTool, ChatMessage, ImageAspectRatio } from './types';
+import type { AgentPlan, CanvasItem, CanvasTool, ChatMessage, ImageAspectRatio } from './types';
 import AuthPanel from './components/AuthPanel';
 import Canvas from './components/Canvas';
 import Sidebar from './components/Sidebar';
@@ -10,25 +10,19 @@ import ConfigModal from './components/ConfigModal';
 import CanvasUtilityDock from './components/CanvasUtilityDock';
 import ProjectLinks from './components/ProjectLinks';
 import {
-  canUseImageJobs,
-  editImage,
-  generateImage,
   type ImageGenerationResult,
-  submitImageEditJob,
-  submitImageGenerationJob,
   waitForImageJob
 } from './services/gemini';
 import {
   DEFAULT_GENERATED_IMAGE_LONG_SIDE,
-  getAspectRatioFrame,
-  inferAspectRatioFromDimensions
+  fitDimensionsToLongSide,
+  getAspectRatioFrame
 } from './services/imageSizing';
 import {
   CanvasPersistenceState,
   CanvasProject,
   createCanvasProject,
   ensureCanvasImageAsset,
-  getCanvasItemAssetId,
   listCanvasProjects,
   loadCanvasProject,
   resetCanvasPersistenceSession,
@@ -44,10 +38,16 @@ import {
 import { getApiConfig, getImageModelDisplayName, loadApiConfig, resetApiConfigSession } from './services/config';
 import { type CanvasExportScope, exportCanvasProjectImage } from './services/canvasExport';
 import {
-  buildImageReferenceRoleContext,
-  buildReferencedImageEditPrompt,
+  applyAgentRunProgressEventToPlan,
+  buildAgentDraftPlan,
+  connectAgentRunEvents,
+  createAgentRun,
+  createAgentRunClientId,
+  updateAgentPlanStepStatuses
+} from './services/agentPlanner';
+import {
   normalizeOptimizedPromptImageReferences,
-  resolveEditReferencesWithAi
+  resolveMentionedImageReferences
 } from './services/imageReferences';
 import { createTransparentEditMask } from './services/imageMask';
 import { buildImageResultDescription, generateImageTitleFromPrompt } from './services/imageTitle';
@@ -65,6 +65,8 @@ const DERIVED_IMAGE_GAP = 20;
 const AUTO_ARRANGE_IMAGE_GAP = 24;
 const MAX_HISTORY_ENTRIES = 80;
 const DEFAULT_CANVAS_BACKGROUND_COLOR = '#fcfcfc';
+const LIVART_SCOPE_REJECTION_MESSAGE = '我目前只支持 livart 里的图片生成、图片编辑、局部重绘、去背景、删除物体、画布操作和作品导出相关问题。你可以直接描述想生成的画面，或告诉我想怎么修改图片。';
+const LIVART_SCOPE_HELP_MESSAGE = '我目前可以帮你处理 livart 里的图片生成、图片编辑、局部重绘、删除物体、去背景、画布操作、画幅比例、参考图、项目导出和下载相关问题。你可以直接描述想生成什么，或者告诉我想如何修改图片。';
 
 type ImageEditMode = 'local-redraw' | 'remover';
 
@@ -73,6 +75,70 @@ const getImageEditMaskData = (item: CanvasItem, mode: ImageEditMode) => (
     ? item.removerMaskData || item.maskData
     : item.redrawMaskData || item.maskData
 );
+
+const collectAgentPlanCandidateImages = (text: string, contextImage: CanvasItem | null, items: CanvasItem[]) => {
+  const completedImages = items.filter(item => item.type === 'image' && item.status === 'completed' && !!item.content);
+  const candidates: CanvasItem[] = [];
+  const seenIds = new Set<string>();
+
+  const pushCandidate = (candidate: CanvasItem | null | undefined) => {
+    if (!candidate || seenIds.has(candidate.id)) return;
+    seenIds.add(candidate.id);
+    candidates.push(candidate);
+  };
+
+  pushCandidate(contextImage ? completedImages.find(item => item.id === contextImage.id) : null);
+  resolveMentionedImageReferences(text, completedImages).forEach(pushCandidate);
+  return candidates.slice(0, 12);
+};
+
+const isProcessDisclosureMessage = (text: string) => {
+  const compact = text.replace(/\s+/g, '');
+  return /我[已会将]?判断|判断这是|判断为|任务类型|文生图任务|图生图任务|意图|接下来|会先|先整理|整理提示词|再生成|最终图片|执行链路|规划步骤|当前步骤/.test(compact);
+};
+
+const ensureImageNoun = (title: string) => {
+  if (!title) return '图片';
+  return /(图|图片|照片|人像|作品|结果|海报|插画|场景|头像|素材)$/.test(title) ? title : `${title}图片`;
+};
+
+const buildExecutionAnnouncement = (plan: AgentPlan) => {
+  if (plan.displayMessage && !isProcessDisclosureMessage(plan.displayMessage)) {
+    return plan.displayMessage;
+  }
+
+  const title = ensureImageNoun(plan.displayTitle || '');
+
+  if (plan.mode === 'background-removal') {
+    return `我将为您去除这张${title}的背景。`;
+  }
+
+  if (plan.mode === 'remover') {
+    return `我将为您删除圈选区域，并生成新的${title}。`;
+  }
+
+  if (plan.taskType === 'image-edit') {
+    return plan.referenceImageIds.length > 0
+      ? `我将为您根据参考图编辑这张${title}。`
+      : `我将为您编辑这张${title}。`;
+  }
+
+  const countLabel = plan.count > 1 ? `${plan.count}张${title}` : `这张${title}`;
+  return `我将为您生成${countLabel}。`;
+};
+
+const waitForMinimumDuration = async (startedAt: number, durationMs: number) => {
+  const elapsed = Date.now() - startedAt;
+  if (elapsed >= durationMs) return;
+  await new Promise(resolve => window.setTimeout(resolve, durationMs - elapsed));
+};
+
+const getRestoredImageJobStartedAt = (item: CanvasItem) => (
+  typeof item.imageJobStartedAt === 'number' && Number.isFinite(item.imageJobStartedAt)
+    ? item.imageJobStartedAt
+    : Date.now()
+);
+
 type SidebarPromptSeed = {
   id: string;
   imageId: string;
@@ -89,7 +155,7 @@ type CanvasHistorySnapshot = {
 const createChatMessage = (
   text: string,
   role: 'user' | 'assistant',
-  options: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs'> = {}
+  options: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan'> = {}
 ): ChatMessage => ({
   id: Math.random().toString(36).substr(2, 9),
   role,
@@ -765,6 +831,7 @@ function App() {
     setSidebarPromptSeed(null);
     setSidebarInputResetKey(prev => prev + 1);
     setSelectedImageEditMode(null);
+    setActiveTaskStartedAts([]);
     resetCanvasHistory(createCanvasHistorySnapshot(state.items, state.viewport.pan, state.viewport.zoom, [], state.settings.backgroundColor || DEFAULT_CANVAS_BACKGROUND_COLOR));
     resumedImageJobIdsRef.current = new Set();
   };
@@ -972,6 +1039,8 @@ function App() {
       const jobId = item.imageJobId;
       if (!jobId || resumedImageJobIdsRef.current.has(jobId)) return;
       resumedImageJobIdsRef.current.add(jobId);
+      const restoredStartedAt = getRestoredImageJobStartedAt(item);
+      startTaskTimer(restoredStartedAt);
 
       waitForImageJob(jobId)
         .then(async (imageResult) => {
@@ -999,6 +1068,7 @@ function App() {
               thumbnailContent: persistedImageItem.thumbnailContent,
               status: 'completed',
               imageJobId: undefined,
+              imageJobStartedAt: undefined,
               originalPrompt: candidate.originalPrompt || imageResult.originalPrompt,
               optimizedPrompt,
               label: generateImageTitleFromPrompt(
@@ -1018,6 +1088,9 @@ function App() {
             ...prev,
             createChatMessage(`恢复中的图片任务失败：${message}`, 'assistant')
           ]);
+        })
+        .finally(() => {
+          finishTaskTimer(restoredStartedAt);
         });
     });
   }, [hasLoadedCanvas, currentProjectId]);
@@ -1227,8 +1300,25 @@ function App() {
     return newId;
   };
 
-  const addMessage = (text: string, role: 'user' | 'assistant', options: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs'> = {}) => {
+  const addMessage = (text: string, role: 'user' | 'assistant', options: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan'> = {}) => {
     setMessages(prev => [...prev, createChatMessage(text, role, options)]);
+  };
+
+  const appendDraftMessage = (
+    text: string,
+    role: 'user' | 'assistant',
+    options: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan'> = {}
+  ) => {
+    const message = createChatMessage(text, role, options);
+    setMessages(prev => [...prev, message]);
+    return message.id;
+  };
+
+  const updateMessageById = (
+    messageId: string,
+    updater: (message: ChatMessage) => ChatMessage
+  ) => {
+    setMessages(prev => prev.map(message => message.id === messageId ? updater(message) : message));
   };
 
   const startTaskTimer = (startedAt: number) => {
@@ -1243,22 +1333,29 @@ function App() {
     });
   };
 
-  const finishOldestTaskTimer = () => {
-    setActiveTaskStartedAts(prev => prev.slice(1));
-  };
-
   const handleCanvasChatMessage = (
     text: string,
     role: 'user' | 'assistant',
-    options: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs'> = {}
+    options: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan'> = {}
   ) => {
     setShowSidebar(true);
-    if (role === 'user') {
-      startTaskTimer(Date.now());
-    } else if (typeof options.durationMs === 'number') {
-      finishOldestTaskTimer();
-    }
     addMessage(text, role, options);
+  };
+
+  const handleCanvasChatDraftMessage = (
+    text: string,
+    role: 'user' | 'assistant',
+    options: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan'> = {}
+  ) => {
+    setShowSidebar(true);
+    return appendDraftMessage(text, role, options);
+  };
+
+  const handleCanvasChatMessageUpdate = (
+    messageId: string,
+    updater: (message: ChatMessage) => ChatMessage
+  ) => {
+    updateMessageById(messageId, updater);
   };
 
   const handleUpdateItem = (id: string, updates: Partial<CanvasItem>) => {
@@ -1372,220 +1469,292 @@ function App() {
   const handleSidebarSendMessage = async (text: string, aspectRatio: ImageAspectRatio = 'auto') => {
     const startedAt = Date.now();
     addMessage(text, 'user');
-    startTaskTimer(startedAt);
 
-    let newId = '';
+    let createdImageIds: string[] = [];
     let editBaseImage: CanvasItem | null = null;
+    let failureActionLabel = 'AI Agent';
+    let imageTaskStartedAt: number | null = null;
+    const planningMessageId = appendDraftMessage('正在分析你的意图...', 'assistant');
+    const planningVisibleStartedAt = Date.now();
+    let agentPlan: AgentPlan | null = null;
+    let activePlanStepId = '';
+    let showAgentPlan = true;
+    let collapsedPlanText = '';
+    const agentRunClientId = createAgentRunClientId();
+    let unsubscribeAgentRunEvents: () => void = () => {};
+
+    const syncAgentPlanMessage = (nextPlan: AgentPlan, nextText = nextPlan.summary) => {
+      agentPlan = nextPlan;
+      updateMessageById(planningMessageId, message => ({
+        ...message,
+        text: showAgentPlan ? nextText : (collapsedPlanText || message.text || nextText),
+        agentPlan: showAgentPlan ? nextPlan : undefined
+      }));
+    };
+
+    const collapseAgentPlanMessage = (nextText: string) => {
+      showAgentPlan = false;
+      collapsedPlanText = nextText;
+      updateMessageById(planningMessageId, message => ({
+        ...message,
+        text: nextText,
+        agentPlan: undefined
+      }));
+    };
+
+    const markAgentPlanStep = (stepId?: string, terminalStatus?: 'completed' | 'error') => {
+      if (!agentPlan) return;
+      activePlanStepId = stepId || activePlanStepId;
+      const nextPlan = {
+        ...agentPlan,
+        steps: updateAgentPlanStepStatuses(agentPlan.steps, stepId || activePlanStepId, terminalStatus)
+      };
+      syncAgentPlanMessage(nextPlan, nextPlan.summary);
+    };
 
     try {
-      const freshContextImage = contextImage
+      syncAgentPlanMessage(buildAgentDraftPlan({ aspectRatio }), '我先识别你的意图，再决定下一步。');
+      let freshContextImage = contextImage
         ? items.find(item => item.id === contextImage.id && item.type === 'image') || contextImage
         : null;
-      const editReferences = (await resolveEditReferencesWithAi(text, freshContextImage, items))
-        .map(reference => items.find(item => item.id === reference.id && item.type === 'image') || reference);
-      editBaseImage = editReferences[0] || null;
-      const editReferenceImages = editReferences.slice(1);
-      const effectiveAspectRatio = editBaseImage && aspectRatio === 'auto'
-        ? inferAspectRatioFromDimensions(editBaseImage.width, editBaseImage.height)
-        : aspectRatio;
-      const activeImageEditMode = editBaseImage && selectedImageEditMode?.imageId === editBaseImage.id
+      const planCandidateImages = collectAgentPlanCandidateImages(text, freshContextImage, items);
+      const requestedEditMode = selectedImageEditMode && freshContextImage && selectedImageEditMode.imageId === freshContextImage.id
         ? selectedImageEditMode.mode
-        : null;
+        : undefined;
 
-      newId = Math.random().toString(36).substr(2, 9);
+      let persistedPlanCandidateImages = planCandidateImages;
+      if (planCandidateImages.length > 0) {
+        persistedPlanCandidateImages = await Promise.all(planCandidateImages.map(item => ensureCanvasImageAsset(item)));
+        const persistedById = new Map(persistedPlanCandidateImages.map(item => [item.id, item]));
+        setItems(prev => prev.map(item => persistedById.get(item.id) || item));
+        if (freshContextImage) {
+          freshContextImage = persistedById.get(freshContextImage.id) || freshContextImage;
+        }
+      }
+
+      let maskDataUrl = '';
+      if (requestedEditMode && freshContextImage) {
+        const localMaskData = getImageEditMaskData(freshContextImage, requestedEditMode);
+        if (!localMaskData) {
+          throw new Error(requestedEditMode === 'remover' ? '请先用画笔涂抹需要删除的物体' : '请先用画笔涂抹需要局部重绘的区域');
+        }
+        maskDataUrl = await createTransparentEditMask(
+          localMaskData,
+          freshContextImage.content,
+          freshContextImage.width,
+          freshContextImage.height,
+          requestedEditMode === 'remover'
+            ? { outlineDilationRadius: 6, editableDilationRadius: 5 }
+            : undefined
+        ) || '';
+        if (!maskDataUrl) {
+          throw new Error(requestedEditMode === 'remover' ? '请先用画笔涂抹需要删除的物体' : '请先用画笔涂抹需要局部重绘的区域');
+        }
+      }
+
+      unsubscribeAgentRunEvents = await connectAgentRunEvents(agentRunClientId, (event) => {
+        if (!showAgentPlan) return;
+        const basePlan = agentPlan || buildAgentDraftPlan({ aspectRatio });
+        const nextPlan = applyAgentRunProgressEventToPlan(basePlan, event);
+        activePlanStepId = event.stepId;
+        syncAgentPlanMessage(nextPlan, event.description ? `${event.title}：${event.description}` : nextPlan.summary);
+      });
+
+      const agentRun = await createAgentRun({
+        prompt: text,
+        aspectRatio,
+        contextImageId: freshContextImage?.id,
+        requestedEditMode,
+        images: persistedPlanCandidateImages,
+        maskDataUrl,
+        clientRunId: agentRunClientId
+      });
+      const initialPlan = agentRun.plan;
+      if (initialPlan.responseMode === 'reject' || !initialPlan.allowed) {
+        const rejectPlan: AgentPlan = {
+          ...buildAgentDraftPlan({ aspectRatio }),
+          allowed: false,
+          responseMode: 'reject',
+          rejectionMessage: initialPlan.rejectionMessage || LIVART_SCOPE_REJECTION_MESSAGE,
+          summary: initialPlan.rejectionMessage || LIVART_SCOPE_REJECTION_MESSAGE,
+          thinkingSteps: initialPlan.thinkingSteps.length > 0 ? initialPlan.thinkingSteps : ['识别对话意图', '判断超出范围'],
+          steps: [
+            {
+              id: 'identify-intent',
+              title: '识别意图',
+              description: '当前内容不属于 livart 可处理的范围。',
+              type: 'analysis',
+              status: 'completed'
+            }
+          ]
+        };
+        syncAgentPlanMessage(rejectPlan, rejectPlan.summary);
+        await waitForMinimumDuration(planningVisibleStartedAt, 1100);
+        updateMessageById(planningMessageId, message => ({
+          ...message,
+          text: initialPlan.rejectionMessage || initialPlan.summary || LIVART_SCOPE_REJECTION_MESSAGE,
+          agentPlan: undefined
+        }));
+        return;
+      }
+      if (initialPlan.responseMode === 'answer') {
+        const answerPlan: AgentPlan = {
+          ...buildAgentDraftPlan({ aspectRatio }),
+          responseMode: 'answer',
+          answerMessage: initialPlan.answerMessage || LIVART_SCOPE_HELP_MESSAGE,
+          summary: initialPlan.answerMessage || LIVART_SCOPE_HELP_MESSAGE,
+          thinkingSteps: initialPlan.thinkingSteps.length > 0 ? initialPlan.thinkingSteps : ['识别对话意图', '判断为功能问答'],
+          steps: [
+            {
+              id: 'identify-intent',
+              title: '识别意图',
+              description: '这是一条 livart 站内功能问答。',
+              type: 'analysis',
+              status: 'completed'
+            }
+          ]
+        };
+        syncAgentPlanMessage(answerPlan, answerPlan.summary);
+        await waitForMinimumDuration(planningVisibleStartedAt, 1100);
+        updateMessageById(planningMessageId, message => ({
+          ...message,
+          text: initialPlan.answerMessage || initialPlan.summary || LIVART_SCOPE_HELP_MESSAGE,
+          agentPlan: undefined
+        }));
+        return;
+      }
+      syncAgentPlanMessage(initialPlan);
+      activePlanStepId = initialPlan.steps[0]?.id || '';
+
+      editBaseImage = initialPlan.taskType === 'image-edit'
+        ? persistedPlanCandidateImages.find(item => item.id === initialPlan.baseImageId)
+        || items.find(item => item.id === initialPlan.baseImageId && item.type === 'image')
+        || null
+        : null;
+      const plannerMode = initialPlan.mode;
+      failureActionLabel = plannerMode === 'background-removal'
+        ? '去背景'
+        : plannerMode === 'remover'
+          ? '局部删除'
+          : editBaseImage
+            ? '单图编辑'
+            : '生成';
+
+      if (initialPlan.steps.length > 1) {
+        markAgentPlanStep(initialPlan.steps[1].id);
+      }
+      if (!agentRun.jobs.length) {
+        throw new Error('Agent 没有创建可执行的图片任务');
+      }
+      imageTaskStartedAt = Date.now();
+      startTaskTimer(imageTaskStartedAt);
+
       const fallbackWidth = editBaseImage ? editBaseImage.width : DEFAULT_GENERATED_IMAGE_LONG_SIDE;
       const fallbackHeight = editBaseImage ? editBaseImage.height : DEFAULT_GENERATED_IMAGE_LONG_SIDE;
       const maxLongSide = editBaseImage
         ? Math.max(editBaseImage.width, editBaseImage.height)
         : DEFAULT_GENERATED_IMAGE_LONG_SIDE;
-      const initialFrame = getAspectRatioFrame(effectiveAspectRatio, fallbackWidth, fallbackHeight, maxLongSide);
+      const initialFrame = editBaseImage && aspectRatio === 'auto'
+        ? fitDimensionsToLongSide(editBaseImage.width, editBaseImage.height, maxLongSide)
+        : getAspectRatioFrame(aspectRatio, fallbackWidth, fallbackHeight, maxLongSide);
       const visibleCanvasRect = getVisibleCanvasRect(pan, zoom, showSidebar);
       const canvasCenterX = visibleCanvasRect.x + visibleCanvasRect.width / 2;
       const canvasCenterY = visibleCanvasRect.y + visibleCanvasRect.height / 2;
-      const generatedPosition = editBaseImage
-        ? findRightSideCanvasPosition(items, editBaseImage, initialFrame.width, initialFrame.height)
-        : findNextRootImageRowPosition(
-          items,
-          canvasCenterX - initialFrame.width / 2,
-          canvasCenterY - initialFrame.height / 2,
-          initialFrame.width,
-          initialFrame.height
-        );
 
-      const newItem: CanvasItem = {
-        id: newId,
-        type: 'image',
-        content: '',
-        x: generatedPosition.x,
-        y: generatedPosition.y,
-        width: initialFrame.width,
-        height: initialFrame.height,
-        status: 'loading',
-        label: editBaseImage ? 'AI 编辑中...' : 'AI 生成中...',
-        zIndex: Math.max(60, ...items.map(item => item.zIndex || 0)) + 1,
-        parentId: editBaseImage?.id,
-        prompt: text,
-        originalPrompt: text,
-        layers: []
-      };
-
-      setItems(prev => [...prev, newItem]);
-
-      let imageResult: ImageGenerationResult;
-      let requestPrompt = text;
-      let latestOptimizedPrompt = '';
-      let optimizedPromptBaseImage = editBaseImage;
-      let optimizedPromptReferenceImages = editReferenceImages;
-      if (editBaseImage) {
-        const persistedEditImages = await Promise.all(
-          [editBaseImage, ...editReferenceImages].map(item => ensureCanvasImageAsset(item))
-        );
-        const persistedBaseImage = persistedEditImages[0];
-        const persistedReferenceImages = persistedEditImages.slice(1);
-        optimizedPromptBaseImage = persistedBaseImage;
-        optimizedPromptReferenceImages = persistedReferenceImages;
-        const persistedById = new Map(persistedEditImages.map(item => [item.id, item]));
-        setItems(prev => prev.map(item => persistedById.get(item.id) || item));
-
-        const localMaskData = activeImageEditMode ? getImageEditMaskData(editBaseImage, activeImageEditMode) : undefined;
-        if (activeImageEditMode && !localMaskData) {
-          throw new Error(activeImageEditMode === 'remover' ? '请先用画笔涂抹需要删除的物体' : '请先用画笔涂抹需要局部重绘的区域');
-        }
-
-        const promptToOptimize = activeImageEditMode
-          ? activeImageEditMode === 'remover'
-            ? `${text}。只删除或修复用户用蒙版涂抹的局部区域，未被蒙版覆盖的区域必须保持原图不变。`
-            : `${text}。只修改用户用蒙版涂抹的局部区域，未被蒙版覆盖的区域必须保持原图不变。`
-          : text;
-        const editPrompt = buildReferencedImageEditPrompt(promptToOptimize, persistedBaseImage, persistedReferenceImages, {
-          hasLocalMask: !!activeImageEditMode,
-          allItems: items
-        });
-        requestPrompt = editPrompt;
-        const referenceContents = persistedReferenceImages.map(item => item.content);
-        const imageContext = buildImageReferenceRoleContext(promptToOptimize, persistedBaseImage, persistedReferenceImages, {
-          hasLocalMask: !!activeImageEditMode,
-          allItems: items
-        });
-        const requestImageContext = activeImageEditMode === 'remover'
-          ? [
-            '任务类型：image-remover / object removal / inpainting。',
-            'mask 透明区域就是用户圈选/涂抹的删除区域，必须删除该区域内的内容并自然补全背景。',
-            '未被 mask 覆盖的区域必须尽量保持原图不变。',
-            imageContext
-          ].join('\n')
-          : imageContext;
-        const maskDataUrl = activeImageEditMode
-          ? await createTransparentEditMask(
-            localMaskData!,
-            persistedBaseImage.content,
-            editBaseImage.width,
-            editBaseImage.height,
-            activeImageEditMode === 'remover'
-              ? { outlineDilationRadius: 6, editableDilationRadius: 5 }
-              : undefined
-          )
-          : undefined;
-        if (activeImageEditMode && !maskDataUrl) {
-          throw new Error(activeImageEditMode === 'remover' ? '请先用画笔涂抹需要删除的物体' : '请先用画笔涂抹需要局部重绘的区域');
-        }
-        const editOptions = {
-          imageAssetId: getCanvasItemAssetId(persistedBaseImage),
-          referenceAssetIds: persistedReferenceImages.map(getCanvasItemAssetId).filter(Boolean),
-          imageContext: requestImageContext,
-          promptOptimizationMode: activeImageEditMode === 'remover' ? 'image-remover' as const : undefined
-        };
-        const requestAspectRatio = activeImageEditMode === 'remover' ? 'auto' : effectiveAspectRatio;
-        // 执行图像编辑
-        if (canUseImageJobs()) {
-          const job = await submitImageEditJob(
-            editPrompt,
-            persistedBaseImage.content,
-            maskDataUrl || undefined,
-            requestAspectRatio,
-            referenceContents,
-            editOptions
+      let virtualItems = [...items, ...persistedPlanCandidateImages.filter(candidate => !items.some(item => item.id === candidate.id))];
+      const maxZIndex = Math.max(60, ...items.map(item => item.zIndex || 0));
+      const placeholderItems = agentRun.jobs.map((job, index) => {
+        const generatedPosition = editBaseImage
+          ? findRightSideCanvasPosition(virtualItems, editBaseImage, initialFrame.width, initialFrame.height)
+          : findNextRootImageRowPosition(
+            virtualItems,
+            canvasCenterX - initialFrame.width / 2,
+            canvasCenterY - initialFrame.height / 2,
+            initialFrame.width,
+            initialFrame.height
           );
-          latestOptimizedPrompt = job.optimizedPrompt || '';
-          const storedOptimizedPrompt = job.optimizedPrompt
-            ? normalizeOptimizedPromptImageReferences(job.optimizedPrompt, persistedBaseImage, persistedReferenceImages, items)
-            : '';
-          setItems(prev => prev.map(i => i.id === newId ? {
-            ...i,
-            prompt: editPrompt,
-            imageJobId: job.jobId,
-            originalPrompt: text,
-            optimizedPrompt: storedOptimizedPrompt || i.optimizedPrompt
-          } : i));
-          imageResult = await waitForImageJob(job.jobId);
-        } else {
-          imageResult = await editImage(
-            editPrompt,
-            persistedBaseImage.content,
-            maskDataUrl || undefined,
-            requestAspectRatio,
-            referenceContents,
-            editOptions
-          );
-        }
-      } else {
-        // 直接文本生成图片
-        if (canUseImageJobs()) {
-          const job = await submitImageGenerationJob(text, aspectRatio);
-          latestOptimizedPrompt = job.optimizedPrompt || '';
-          setItems(prev => prev.map(i => i.id === newId ? {
-            ...i,
-            imageJobId: job.jobId,
-            originalPrompt: text,
-            optimizedPrompt: job.optimizedPrompt || i.optimizedPrompt
-          } : i));
-          imageResult = await waitForImageJob(job.jobId);
-        } else {
-          imageResult = await generateImage(text, 'none', aspectRatio);
-        }
-      }
-
-      const resultImg = imageResult.image;
-      const persistedImageItem = await ensureCanvasImageAsset({
-        ...newItem,
-        content: resultImg,
-        status: 'completed'
-      });
-      const resultTitle = generateImageTitleFromPrompt(
-        text || requestPrompt || imageResult.optimizedPrompt || latestOptimizedPrompt || '',
-        editBaseImage ? '编辑结果' : '生成图片'
-      );
-      const resultDescription = buildImageResultDescription(resultTitle, editBaseImage ? 'edited' : 'generated');
-
-      setItems(prev => prev.map(i => {
-        if (i.id !== newId) return i;
-        const rawOptimizedPrompt = imageResult.optimizedPrompt || latestOptimizedPrompt || imageResult.originalPrompt || requestPrompt;
-        const optimizedPrompt = optimizedPromptBaseImage && rawOptimizedPrompt
-          ? normalizeOptimizedPromptImageReferences(rawOptimizedPrompt, optimizedPromptBaseImage, optimizedPromptReferenceImages, prev)
-          : rawOptimizedPrompt;
-        return {
-          ...i,
-          content: persistedImageItem.content,
-          assetId: persistedImageItem.assetId,
-          previewContent: persistedImageItem.previewContent,
-          thumbnailContent: persistedImageItem.thumbnailContent,
-          status: 'completed',
-          imageJobId: undefined,
-          prompt: requestPrompt,
+        const imageId = Math.random().toString(36).substr(2, 9);
+        const item: CanvasItem = {
+          id: imageId,
+          type: 'image',
+          content: '',
+          x: generatedPosition.x,
+          y: generatedPosition.y,
+          width: initialFrame.width,
+          height: initialFrame.height,
+          status: 'loading',
+          label: plannerMode === 'background-removal' ? 'AI 去背景中...' : editBaseImage ? 'AI 编辑中...' : 'AI 生成中...',
+          zIndex: maxZIndex + index + 1,
+          parentId: editBaseImage?.id,
+          prompt: agentRun.requestPrompt || text,
           originalPrompt: text,
-          optimizedPrompt,
-          label: resultTitle
+          optimizedPrompt: job.optimizedPrompt || '',
+          imageJobId: job.jobId,
+          imageJobStartedAt: imageTaskStartedAt,
+          layers: []
         };
-      }));
+        virtualItems = [...virtualItems, item];
+        return item;
+      });
+      createdImageIds = placeholderItems.map(item => item.id);
+      setItems(prev => [...prev, ...placeholderItems]);
 
-      addMessage(resultDescription, 'assistant', {
-        imageIds: [newId],
-        imageResultCards: [{
-          imageId: newId,
+      if (initialPlan.steps.length > 2) {
+        activePlanStepId = initialPlan.steps[2].id;
+        markAgentPlanStep(activePlanStepId);
+      }
+      await waitForMinimumDuration(planningVisibleStartedAt, 1100);
+      collapseAgentPlanMessage(buildExecutionAnnouncement(initialPlan));
+
+      const resultCards = await Promise.all(agentRun.jobs.map(async (job, index) => {
+        const placeholder = placeholderItems[index];
+        const imageResult: ImageGenerationResult = await waitForImageJob(job.jobId);
+        const persistedImageItem = await ensureCanvasImageAsset({
+          ...placeholder,
+          content: imageResult.image,
+          status: 'completed'
+        });
+        const resultTitle = agentRun.displayTitle || agentRun.plan.displayTitle || generateImageTitleFromPrompt(
+          text || agentRun.requestPrompt || imageResult.optimizedPrompt || job.optimizedPrompt || '',
+          editBaseImage ? '编辑结果' : '生成图片'
+        );
+        const resultDescription = buildImageResultDescription(resultTitle, editBaseImage ? 'edited' : 'generated');
+        setItems(prev => prev.map(item => {
+          if (item.id !== placeholder.id) return item;
+          const rawOptimizedPrompt = imageResult.optimizedPrompt || job.optimizedPrompt || imageResult.originalPrompt || agentRun.requestPrompt || text;
+          const optimizedPrompt = editBaseImage && rawOptimizedPrompt
+            ? normalizeOptimizedPromptImageReferences(rawOptimizedPrompt, editBaseImage, [], prev)
+            : rawOptimizedPrompt;
+          return {
+            ...item,
+            content: persistedImageItem.content,
+            assetId: persistedImageItem.assetId,
+            previewContent: persistedImageItem.previewContent,
+            thumbnailContent: persistedImageItem.thumbnailContent,
+            status: 'completed',
+            imageJobId: undefined,
+            imageJobStartedAt: undefined,
+            prompt: agentRun.requestPrompt || text,
+            originalPrompt: text,
+            optimizedPrompt,
+            label: resultTitle
+          };
+        }));
+        return {
+          imageId: placeholder.id,
           modelName: getImageModelDisplayName(getApiConfig().model),
           title: resultTitle,
           description: resultDescription
-        }],
+        };
+      }));
+      markAgentPlanStep(activePlanStepId, 'completed');
+
+      const finalMessageText = resultCards.length > 1
+        ? `已为您生成 ${resultCards.length} 张图片。`
+        : resultCards[0]?.description || '已为您生成图片。';
+      addMessage(finalMessageText, 'assistant', {
+        imageIds: resultCards.map(card => card.imageId),
+        imageResultCards: resultCards,
         durationMs: Date.now() - startedAt
       });
 
@@ -1594,16 +1763,30 @@ function App() {
       setSidebarPromptSeed(null);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : '未知错误';
-      if (newId) {
-        setItems(prev => prev.filter(item => item.id !== newId));
+      if (createdImageIds.length > 0) {
+        const createdIdSet = new Set(createdImageIds);
+        setItems(prev => prev.filter(item => !createdIdSet.has(item.id)));
       }
+      markAgentPlanStep(activePlanStepId, 'error');
+      updateMessageById(planningMessageId, message => ({
+        ...message,
+        text: showAgentPlan
+          ? (message.agentPlan?.summary
+            ? `${message.agentPlan.summary} 但执行失败了。`
+            : 'AI 任务规划失败。')
+          : (collapsedPlanText || message.text || '任务已开始，但执行失败了。'),
+        agentPlan: undefined
+      }));
       setSelectedIds(editBaseImage ? [editBaseImage.id] : []);
-      setContextImage(prev => prev?.id === newId ? null : prev);
-      addMessage(`出错了，没能完成生成：${errorMessage}`, 'assistant', {
+      setContextImage(prev => prev && createdImageIds.includes(prev.id) ? null : prev);
+      addMessage(`出错了，没能完成${failureActionLabel}：${errorMessage}`, 'assistant', {
         durationMs: Date.now() - startedAt
       });
     } finally {
-      finishTaskTimer(startedAt);
+      unsubscribeAgentRunEvents();
+      if (imageTaskStartedAt !== null) {
+        finishTaskTimer(imageTaskStartedAt);
+      }
     }
   };
 
@@ -1876,6 +2059,10 @@ function App() {
           onAddImageAt={addImageItem}
           onAddToChat={handleAddToChat}
           onChatMessage={handleCanvasChatMessage}
+          onChatDraftMessage={handleCanvasChatDraftMessage}
+          onChatMessageUpdate={handleCanvasChatMessageUpdate}
+          onImageTaskStart={startTaskTimer}
+          onImageTaskFinish={finishTaskTimer}
           canvasTool={canvasTool}
           onCanvasToolChange={setCanvasTool}
           onBeforeCanvasMutation={flushCanvasHistory}

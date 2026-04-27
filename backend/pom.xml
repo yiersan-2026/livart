@@ -22,7 +22,20 @@
         <mybatis-plus.version>3.5.9</mybatis-plus.version>
         <minio.version>8.5.17</minio.version>
         <webp.imageio.version>0.10.2</webp.imageio.version>
+        <spring-ai.version>1.0.5</spring-ai.version>
     </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.ai</groupId>
+                <artifactId>spring-ai-bom</artifactId>
+                <version>${spring-ai.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <dependencies>
         <dependency>
@@ -72,6 +85,10 @@
             <groupId>com.github.usefulness</groupId>
             <artifactId>webp-imageio</artifactId>
             <version>${webp.imageio.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-openai</artifactId>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>

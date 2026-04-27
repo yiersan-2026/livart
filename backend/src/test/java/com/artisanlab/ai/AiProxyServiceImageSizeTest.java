@@ -2,6 +2,7 @@ package com.artisanlab.ai;
 
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -17,5 +18,20 @@ class AiProxyServiceImageSizeTest {
     })
     void resolvesDefault2kSizeFromPromptAspectRatio(String prompt, String expectedSize) {
         assertThat(AiProxyService.resolveDefaultTextToImageSize(prompt, 2048)).isEqualTo(expectedSize);
+    }
+
+    @Test
+    void defaultImageJobWorkerCountAllowsAtLeastThreeParallelImages() {
+        assertThat(AiProxyService.resolveImageJobWorkerCount(0)).isGreaterThanOrEqualTo(4);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "1, 1",
+            "3, 3",
+            "80, 64"
+    })
+    void resolvesConfiguredImageJobWorkerCount(int configured, int expected) {
+        assertThat(AiProxyService.resolveImageJobWorkerCount(configured)).isEqualTo(expected);
     }
 }

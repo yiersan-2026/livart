@@ -46,6 +46,14 @@ artisan:
     default-chat-model: ${LIVART_DEFAULT_CHAT_MODEL:gpt-5.5}
     default-image-size-enabled: ${LIVART_DEFAULT_IMAGE_SIZE_ENABLED:true}
     default-image-long-side: ${LIVART_DEFAULT_IMAGE_LONG_SIDE:2048}
+    image-job-worker-count: ${LIVART_IMAGE_JOB_WORKER_COUNT:16}
+  knowledge:
+    auto-index-enabled: ${LIVART_KNOWLEDGE_AUTO_INDEX_ENABLED:true}
+    embedding-base-url: ${LIVART_KNOWLEDGE_EMBEDDING_BASE_URL:https://api.siliconflow.cn/v1}
+    embedding-api-key: ${LIVART_KNOWLEDGE_EMBEDDING_API_KEY:}
+    embedding-model: ${LIVART_KNOWLEDGE_EMBEDDING_MODEL:BAAI/bge-m3}
+    embedding-batch-size: ${LIVART_KNOWLEDGE_EMBEDDING_BATCH_SIZE:24}
+    search-limit: ${LIVART_KNOWLEDGE_SEARCH_LIMIT:4}
 
 logging:
   level:

@@ -50,7 +50,7 @@ livart 是一款基于 **无限画布** 的 AI 图像创作工作台，目标是
 - **画幅比例选择**：文生图、图生图和局部重绘支持 `自动`、`1:1`、`4:3`、`3:4`、`16:9`、`9:16`。
 - **自适应图片框**：生成或重绘完成后会读取真实图片尺寸，画布图片框自动匹配图片比例，不再强制正方形。
 - **原图/WebP 预览分层**：上传和生成图片保留原始格式，页面展示全部走 WebP 预览，后端会生成 `512 / 1024 / 2048` 宽度档位并按画布缩放自动取图，下载时仍下载原图。
-- **WebSocket 生图状态推送**：生图任务仍由 REST 提交，运行、完成和失败状态通过 `/ws/image-jobs` 实时推送；失败会同步显示在右侧对话和画布占位图上，不再用轮询兜底；右侧输入框会显示正在执行的任务耗时，多个任务可并发执行。
+- **WebSocket 生图状态推送**：生图任务统一由 `/api/agent/runs` 提交，运行、完成和失败状态通过 `/ws/image-jobs` 实时推送；失败会同步显示在右侧对话和画布占位图上，不再用轮询兜底；右侧输入框会显示正在执行的任务耗时，默认 `16` 个图片 worker 并发处理多用户、多图片任务。
 - **内联提示词自动优化**：前端不再单独调用优化接口；后端会在真正请求上游文生图/图生图接口前，结合图片角色分析自动优化提示词，再把优化后的 `prompt` 发给上游。
 - **提示词记录留档**：每次文生图、图生图、局部重绘、删除物体和裁剪都会在图片节点保存原始提示词与优化后提示词，便于后续追溯、导出和排查。
 - **Lovart 风格图片引用**：右侧输入框支持输入 `@` 选择画布图片，并以可删除的内联标签参与提示词上下文。
@@ -130,6 +130,7 @@ livart 会尝试理解画布上的视觉语义：
 livart 支持创建多个项目画布。前端会把画布元素、消息、缩放位置和图片资源保存到后端：
 
 - PostgreSQL：保存项目、画布状态和快照记录
+- PostgreSQL + pgvector：保存 livart 系统知识库向量，用于回答系统功能、使用方法和限制类问题
 - MinIO：保存画布中的图片资源
 - RabbitMQ：串行化保存请求，减少并发保存冲突
 - 用户系统：项目和上传资源按登录账号隔离，清理浏览器缓存后可通过账号重新加载历史记录
@@ -147,12 +148,12 @@ docs/      项目说明和真实截图
 ### 环境要求
 
 - 普通使用者：只需要安装 Docker Desktop
-- 开发者本地调试：Node.js 18+、Java 17+、PostgreSQL、MinIO、RabbitMQ
+- 开发者本地调试：Node.js 18+、Java 17+、PostgreSQL（建议安装 pgvector 扩展）、MinIO、RabbitMQ
 - 生图能力：支持 OpenAI Images API 兼容接口或 Gemini 图像接口的网络环境
 
 ### Docker 一键部署
 
-项目根目录提供了多阶段 `Dockerfile` 和自包含的 `docker-compose.yml`：Compose 会同时启动 livart、PostgreSQL、RabbitMQ 和 MinIO。浏览器访问同一个 Spring Boot 服务即可，`/api/images/generations`、`/api/images/edits` 和 `/api/image-jobs/*` 都由后端代理；提示词优化已经内置在后端生图链路中，生图任务状态通过同域 `/ws/image-jobs` 推送。
+项目根目录提供了多阶段 `Dockerfile` 和自包含的 `docker-compose.yml`：Compose 会同时启动 livart、带 pgvector 的 PostgreSQL、RabbitMQ 和 MinIO。浏览器访问同一个 Spring Boot 服务即可，前端统一提交到 `/api/agent/runs`，由后端 Agent 判断回答、拒绝或创建图片任务；系统功能问答会先检索 PostgreSQL 向量知识库，提示词优化已经内置在后端生图链路中，生图任务状态通过同域 `/ws/image-jobs` 推送。
 
 先打开 Docker Desktop，等它显示 Docker 正在运行。macOS / Linux / WSL 用户推荐执行安装脚本：
 
@@ -183,7 +184,7 @@ cp .env.reuse.example .env
 docker compose -f docker-compose.reuse.yml --env-file .env up -d --build
 ```
 
-复用模式只构建并启动 livart，不会启动 `postgres`、`rabbitmq`、`minio` 服务。默认会通过 `host.docker.internal` 访问宿主机上已经暴露端口的第三方容器；如果你的第三方容器使用其他地址，请直接修改 `.env` 里的 `DB_HOST`、`RABBITMQ_HOST`、`MINIO_ENDPOINT`。已有 PostgreSQL 需要提前创建好数据库，已有 RabbitMQ/MinIO 账号需要有创建队列和 bucket 的权限。
+复用模式只构建并启动 livart，不会启动 `postgres`、`rabbitmq`、`minio` 服务。默认会通过 `host.docker.internal` 访问宿主机上已经暴露端口的第三方容器；如果你的第三方容器使用其他地址，请直接修改 `.env` 里的 `DB_HOST`、`RABBITMQ_HOST`、`MINIO_ENDPOINT`。已有 PostgreSQL 需要提前创建好数据库，建议安装 pgvector 扩展以启用系统知识库向量检索；没有 pgvector 时会退回关键词检索。已有 RabbitMQ/MinIO 账号需要有创建队列和 bucket 的权限。
 
 如果要改端口或用于公网部署，建议先创建 `.env` 覆盖默认口令：
 
@@ -196,6 +197,8 @@ docker compose up -d --build
 不要把包含数据库密码、MinIO 密钥、RabbitMQ 密码或 AI API Key 的 `.env` 文件提交到仓库。Docker 默认启用 `SPRING_PROFILES_ACTIVE=prod`，生产配置会从环境变量读取数据库、RabbitMQ、MinIO 和 JWT 等参数；如果没有设置服务器默认 AI 配置，用户仍然可以登录后在页面里填写自己的中转站配置，并按用户保存到数据库。
 
 应用日志默认写入容器内 `/tmp/livart-logs/livart-backend.log`，按天滚动并默认只保留最近 1 天；Docker stdout 日志也限制为单个 10MB 文件，避免长期运行撑满磁盘。如需调整，可在 `.env` 中设置 `LOG_PATH`、`LOG_MAX_HISTORY`、`LOG_TOTAL_SIZE_CAP`。
+
+图片生成任务默认使用 `LIVART_IMAGE_JOB_WORKER_COUNT=16`，适合 16 核服务器并行处理多用户任务；如果上游接口限流或 502/504 增多，可以在 `.env` 中把它降到 `8` 或 `12` 后重启服务。
 
 ### 启动后端
 
@@ -229,7 +232,7 @@ npm install
 npm run dev
 ```
 
-前端开发服务器会把 `/api/auth`、`/api/user`、`/api/canvases`、`/api/canvas`、`/api/assets`、`/api/images`、`/api/image-jobs`、`/api/health` 和 `/ws/image-jobs` 代理到 `http://localhost:8080`。
+前端开发服务器会把 `/api/auth`、`/api/user`、`/api/canvases`、`/api/canvas`、`/api/assets`、`/api/agent`、`/api/image-jobs`、`/api/health` 和 `/ws/image-jobs` 代理到 `http://localhost:8080`。
 
 首次进入页面需要注册或登录账号。登录成功后，前端会把 JWT 保存在浏览器本地；如果浏览器缓存被清理，只要重新登录同一个账号，就会从后端加载该账号下的项目画布历史。
 

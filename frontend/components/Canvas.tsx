@@ -1,6 +1,6 @@
 
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import type { CanvasItem, CanvasTool, CanvasTextStyle, ChatMessage, ImageAspectRatio } from '../types';
+import type { AgentPlan, CanvasItem, CanvasTool, CanvasTextStyle, ChatMessage, ImageAspectRatio } from '../types';
 import { 
   Loader2, Trash2, Type, 
   Sparkles, ChevronUp, ChevronDown, 
@@ -10,23 +10,26 @@ import {
   Palette, Maximize2, Wand2,
   Download, Send, AlignLeft, AlignCenter, AlignRight, SlidersHorizontal
 } from 'lucide-react';
-import { canUseImageJobs, editImage, generateWorkflowImage, type ImageGenerationResult, submitImageEditJob, waitForImageJob } from '../services/gemini';
+import { type ImageGenerationResult, waitForImageJob } from '../services/gemini';
 import {
   centerFrameOnRect,
   fitDimensionsToLongSide,
   getAspectRatioFrame,
   getImageFrameFromSource,
-  inferAspectRatioFromDimensions
 } from '../services/imageSizing';
 import { getCanvasImageSrc, getOriginalImageSrc } from '../services/imageSources';
 import {
-  buildImageReferenceRoleContext,
-  buildReferencedImageEditPrompt,
   normalizeOptimizedPromptImageReferences,
-  resolveEditReferencesWithAi,
   resolveMentionedImageReferences
 } from '../services/imageReferences';
-import { ensureCanvasImageAsset, getCanvasItemAssetId } from '../services/canvasPersistence';
+import {
+  applyAgentRunProgressEventToPlan,
+  buildAgentDraftPlan,
+  connectAgentRunEvents,
+  createAgentRun,
+  createAgentRunClientId
+} from '../services/agentPlanner';
+import { ensureCanvasImageAsset } from '../services/canvasPersistence';
 import { formatExecutionDuration } from '../services/taskTiming';
 import { buildImageResultDescription, generateImageTitleFromPrompt, getCanvasItemDisplayTitle } from '../services/imageTitle';
 import { getApiConfig, getImageModelDisplayName } from '../services/config';
@@ -45,7 +48,11 @@ interface CanvasProps {
   onAddTextAt: (x: number, y: number) => string;
   onAddImageAt: (file: File, x: number, y: number) => void;
   onAddToChat: (item: CanvasItem) => void;
-  onChatMessage: (text: string, role: 'user' | 'assistant', options?: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs'>) => void;
+  onChatMessage: (text: string, role: 'user' | 'assistant', options?: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan'>) => void;
+  onChatDraftMessage: (text: string, role: 'user' | 'assistant', options?: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan'>) => string;
+  onChatMessageUpdate: (messageId: string, updater: (message: ChatMessage) => ChatMessage) => void;
+  onImageTaskStart: (startedAt: number) => void;
+  onImageTaskFinish: (startedAt: number) => void;
   onImagePromptRequest: (item: CanvasItem, prompt?: string, mode?: 'local-redraw' | 'remover') => void;
   onBeforeCanvasMutation: () => void;
   canvasTool: CanvasTool;
@@ -53,6 +60,16 @@ interface CanvasProps {
   selectedIds: string[];
   setSelectedIds: (ids: string[]) => void;
 }
+
+const isProcessDisclosureMessage = (text: string) => {
+  const compact = text.replace(/\s+/g, '');
+  return /我[已会将]?判断|判断这是|判断为|任务类型|文生图任务|图生图任务|意图|接下来|会先|先整理|整理提示词|再生成|最终图片|执行链路|规划步骤|当前步骤/.test(compact);
+};
+
+const ensureImageNoun = (title: string) => {
+  if (!title) return '图片';
+  return /(图|图片|照片|人像|作品|结果|海报|插画|场景|头像|素材)$/.test(title) ? title : `${title}图片`;
+};
 
 type ResizeDirection = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
 type MaskPoint = { x: number; y: number };
@@ -826,7 +843,7 @@ const ImageGenerationSkeleton: React.FC<{ hasPreview: boolean }> = ({ hasPreview
 );
 
 const Canvas: React.FC<CanvasProps> = ({ 
-  items, zoom, onZoomChange, pan, onPanChange, backgroundColor, onItemUpdate, onItemDelete, onItemDeleteMultiple, onItemAdd, onAddTextAt, onAddImageAt, onAddToChat, onChatMessage, onImagePromptRequest, onBeforeCanvasMutation, canvasTool, onCanvasToolChange, selectedIds, setSelectedIds
+  items, zoom, onZoomChange, pan, onPanChange, backgroundColor, onItemUpdate, onItemDelete, onItemDeleteMultiple, onItemAdd, onAddTextAt, onAddImageAt, onAddToChat, onChatMessage, onChatDraftMessage, onChatMessageUpdate, onImageTaskStart, onImageTaskFinish, onImagePromptRequest, onBeforeCanvasMutation, canvasTool, onCanvasToolChange, selectedIds, setSelectedIds
 }) => {
   const [dragState, setDragState] = useState<{ id: string, startX: number, startY: number } | null>(null);
   const [resizeState, setResizeState] = useState<{ 
@@ -929,6 +946,7 @@ const Canvas: React.FC<CanvasProps> = ({
     item: CanvasItem
   ) => {
     if (item.type !== 'image' || item.status !== 'completed') return;
+    if (item.parentId) return;
 
     const image = event.currentTarget;
     if (!image.naturalWidth || !image.naturalHeight) return;
@@ -1496,8 +1514,14 @@ const Canvas: React.FC<CanvasProps> = ({
 
   const applyQuickEditPrompt = (item: CanvasItem, prompt: string) => {
     resetImageToolModes();
-    setQuickEditItemId(null);
-    onImagePromptRequest(item, prompt);
+    clearInlineEditError(item.id);
+    setInlineEditPromptForItem(item.id, prompt);
+    setQuickEditItemId(item.id);
+    focusImageForQuickEdit(item);
+    window.requestAnimationFrame(() => {
+      quickEditInputRef.current?.focus();
+      quickEditInputRef.current?.setSelectionRange(prompt.length, prompt.length);
+    });
   };
 
   const applyBackgroundRemoval = (item: CanvasItem) => {
@@ -1934,6 +1958,7 @@ const Canvas: React.FC<CanvasProps> = ({
   const handleGenerateFromFramework = async () => {
     if (!selectedItem || selectedItem.type !== 'workflow') return;
     setIsGenerating(true);
+    let imageTaskStartedAt: number | null = null;
     try {
       const canvas = document.createElement('canvas');
       canvas.width = selectedItem.width;
@@ -1986,8 +2011,42 @@ const Canvas: React.FC<CanvasProps> = ({
       
       const snapshot = canvas.toDataURL('image/png');
       onItemUpdate(selectedItem.id, { status: 'loading' });
-      
-      const imageResult = await generateWorkflowImage(frameworkPrompt, snapshot);
+
+      const snapshotItem: CanvasItem = {
+        id: `workflow-${Math.random().toString(36).substr(2, 9)}`,
+        type: 'image',
+        content: snapshot,
+        x: selectedItem.x,
+        y: selectedItem.y,
+        width: selectedItem.width,
+        height: selectedItem.height,
+        status: 'completed',
+        label: '画布快照',
+        zIndex: selectedItem.zIndex,
+        prompt: frameworkPrompt || '视觉逻辑生成',
+        originalPrompt: frameworkPrompt || '视觉逻辑生成',
+        layers: []
+      };
+      const persistedSnapshot = await ensureCanvasImageAsset(snapshotItem);
+      const workflowPrompt = [
+        '根据这张画布快照进行视觉逻辑生成。',
+        '请理解画布中的图片、文字、箭头、涂鸦和布局关系，输出一张干净、写实、高画质的最终图像。',
+        '严禁出现画布 UI、选中框、工具栏、边框或截图痕迹。',
+        frameworkPrompt ? `用户补充要求：${frameworkPrompt}` : ''
+      ].filter(Boolean).join('\n');
+      const agentRun = await createAgentRun({
+        prompt: workflowPrompt,
+        aspectRatio: 'auto',
+        contextImageId: persistedSnapshot.id,
+        images: [persistedSnapshot]
+      });
+      const job = agentRun.jobs[0];
+      if (!job) {
+        throw new Error('Agent 没有创建可执行的图片任务');
+      }
+      imageTaskStartedAt = Date.now();
+      onImageTaskStart(imageTaskStartedAt);
+      const imageResult = await waitForImageJob(job.jobId);
       const result = imageResult.image;
       
       const newId = Math.random().toString(36).substr(2, 9);
@@ -2022,6 +2081,9 @@ const Canvas: React.FC<CanvasProps> = ({
       console.error(error);
       onItemUpdate(selectedItem.id, { status: 'error' });
     } finally {
+      if (imageTaskStartedAt !== null) {
+        onImageTaskFinish(imageTaskStartedAt);
+      }
       setIsGenerating(false);
     }
   };
@@ -2057,11 +2119,41 @@ const Canvas: React.FC<CanvasProps> = ({
       : !isBackgroundRemovalMode && localRedrawItemId === targetItem.id ? 'local-redraw' : null;
     const useLocalMask = !!localMaskMode;
     const startedAt = Date.now();
+    let imageTaskStartedAt: number | null = null;
     let resultItemId: string | null = null;
+    let unsubscribeAgentRunEvents: () => void = () => {};
+    const agentRunClientId = createAgentRunClientId();
+    const inlineAgentMode: AgentPlan['mode'] = isBackgroundRemovalMode
+      ? 'background-removal'
+      : isRemoverMode ? 'remover' : 'edit';
+    const inlineAgentAspectRatio = isRemoverMode || isBackgroundRemovalMode ? 'auto' : inlineEditAspectRatio;
+    let inlineAgentPlan = buildAgentDraftPlan({
+      taskType: 'image-edit',
+      mode: inlineAgentMode,
+      aspectRatio: inlineAgentAspectRatio
+    });
     setInlineEditingForItem(targetItem.id, true);
     setInlineEditingStartedAt(prev => ({ ...prev, [targetItem.id]: startedAt }));
     clearInlineEditError(targetItem.id);
     onChatMessage(userMessage, 'user');
+    const planningMessageId = onChatDraftMessage('我先识别这次图片快捷编辑的意图。', 'assistant', {
+      agentPlan: inlineAgentPlan
+    });
+    const syncInlineAgentPlanMessage = (nextPlan: AgentPlan, nextText = nextPlan.summary) => {
+      inlineAgentPlan = nextPlan;
+      onChatMessageUpdate(planningMessageId, message => ({
+        ...message,
+        text: nextText,
+        agentPlan: nextPlan
+      }));
+    };
+    const collapseInlineAgentPlanMessage = (nextText: string) => {
+      onChatMessageUpdate(planningMessageId, message => ({
+        ...message,
+        text: nextText,
+        agentPlan: undefined
+      }));
+    };
 
     try {
       const currentMaskData = localMaskMode
@@ -2076,33 +2168,19 @@ const Canvas: React.FC<CanvasProps> = ({
         throw new Error(isRemoverMode ? '请先用画笔涂抹需要删除的物体' : '请先用画笔涂抹需要局部重绘的区域');
       }
 
-      const promptToOptimize = useLocalMask
+      const agentPrompt = useLocalMask
         ? isRemoverMode
           ? `${prompt}。只删除或修复用户用蒙版涂抹的局部区域，未被蒙版覆盖的区域必须保持原图不变。`
           : `${prompt}。只修改用户用蒙版涂抹的局部区域，未被蒙版覆盖的区域必须保持原图不变。`
         : prompt;
-      const editReferences = useLocalMask || isBackgroundRemovalMode
-        ? [
-          targetItem,
-          ...resolveMentionedImageReferences(prompt, items).filter(item => item.id !== targetItem.id)
-        ]
-        : await resolveEditReferencesWithAi(prompt, targetItem, items);
-      const editBaseItem = editReferences[0] || targetItem;
-      const referenceImages = editReferences.slice(1)
-        .filter(item => item.id !== editBaseItem.id);
-      const generationPrompt = referenceImages.length > 0
-        ? buildReferencedImageEditPrompt(promptToOptimize, editBaseItem, referenceImages, { hasLocalMask: useLocalMask, allItems: items })
-        : promptToOptimize;
-      const effectiveAspectRatio = isRemoverMode || isBackgroundRemovalMode || inlineEditAspectRatio === 'auto'
-        ? inferAspectRatioFromDimensions(editBaseItem.width, editBaseItem.height)
-        : inlineEditAspectRatio;
-
-      const persistentEditImages = await Promise.all(
-        [editBaseItem, ...referenceImages].map(item => ensureCanvasImageAsset(item))
+      const agentCandidateImages = [
+        targetItem,
+        ...resolveMentionedImageReferences(agentPrompt, items).filter(item => item.id !== targetItem.id)
+      ];
+      const persistentAgentImages = await Promise.all(
+        agentCandidateImages.map(item => ensureCanvasImageAsset(item))
       );
-      const persistentTargetItem = persistentEditImages[0];
-      const persistentReferenceImages = persistentEditImages.slice(1);
-      for (const item of persistentEditImages) {
+      for (const item of persistentAgentImages) {
         onItemUpdate(item.id, {
           content: item.content,
           assetId: item.assetId,
@@ -2110,46 +2188,13 @@ const Canvas: React.FC<CanvasProps> = ({
           thumbnailContent: item.thumbnailContent
         });
       }
-      const referenceContents = persistentReferenceImages.map(item => item.content);
-      const imageContext = buildImageReferenceRoleContext(
-        promptToOptimize,
-        persistentTargetItem,
-        persistentReferenceImages,
-        { hasLocalMask: useLocalMask, allItems: items }
-      );
-      const editImageContext = isBackgroundRemovalMode
-        ? [
-          '任务类型：background-removal / remove background。',
-          '用户点击了去背景快捷功能：这只是抠图并替换为白底，不是重新生成图片。',
-          '先识别图片中的主要主体：画面最主要的人物、商品、动物、车辆或成组前景对象；主体包含其穿戴、手持、贴附和与主体直接组成整体的部分。',
-          '只保留主体，把主体以外的一切背景和无关物体替换为纯白色背景（#FFFFFF）；不要透明背景，不要浅灰、米白或渐变；主体 RGB 像素、原有裁切、构图、主体位置、缩放比例、脸、表情、姿态、服装、颜色、纹理、发丝、边缘细节都不能变。',
-          '禁止把半张脸补成整张脸，禁止把半身/局部补成全身，禁止补出原图画面外被裁切掉的身体、头发、衣服或物品。',
-          '不要新增场景、新文字、logo、阴影或装饰；输出纯白背景图片。',
-          imageContext
-        ].join('\n')
-        : isRemoverMode
-        ? [
-          '任务类型：image-remover / object removal / inpainting。',
-          '这不是普通图生图，也不是 logo 强化；模型必须删除 mask 透明区域内的内容。',
-          'mask 透明区域就是用户圈选/涂抹的删除区域；区域内出现的英文、中文、logo、品牌字样、图标、水印都必须移除。',
-          '删除后要根据周围背景、材质、光影、透视自然补洞；未被 mask 覆盖的区域必须尽量保持原样。',
-          imageContext
-        ].join('\n')
-        : imageContext;
-      const editOptions = {
-        imageAssetId: getCanvasItemAssetId(persistentTargetItem),
-        referenceAssetIds: persistentReferenceImages.map(getCanvasItemAssetId).filter(Boolean),
-        imageContext: editImageContext,
-        promptOptimizationMode: isBackgroundRemovalMode
-          ? 'background-removal' as const
-          : isRemoverMode ? 'image-remover' as const : undefined
-      };
 
       let maskDataUrl: string | null | undefined;
       if (localMaskMode) {
+        const persistedTargetForMask = persistentAgentImages.find(item => item.id === targetItem.id) || targetItem;
         maskDataUrl = await createTransparentEditMask(
           currentMaskData!,
-          persistentTargetItem.content,
+          persistedTargetForMask.content,
           targetItem.width,
           targetItem.height,
           isRemoverMode
@@ -2162,15 +2207,56 @@ const Canvas: React.FC<CanvasProps> = ({
         onItemUpdate(targetItem.id, getImageMaskUpdateForMode(localMaskMode, currentMaskData!));
       }
 
+      unsubscribeAgentRunEvents = await connectAgentRunEvents(agentRunClientId, (event) => {
+        const nextPlan = applyAgentRunProgressEventToPlan(inlineAgentPlan, event);
+        syncInlineAgentPlanMessage(nextPlan, event.description ? `${event.title}：${event.description}` : nextPlan.summary);
+      });
+
+      const agentRun = await createAgentRun({
+        prompt: agentPrompt,
+        aspectRatio: inlineAgentAspectRatio,
+        contextImageId: targetItem.id,
+        requestedEditMode: localMaskMode || undefined,
+        images: persistentAgentImages,
+        maskDataUrl: maskDataUrl || undefined,
+        clientRunId: agentRunClientId
+      });
+      const job = agentRun.jobs[0];
+      if (!job) {
+        throw new Error('Agent 没有创建可执行的图片任务');
+      }
+      inlineAgentPlan = {
+        ...agentRun.plan,
+        steps: agentRun.plan.steps.length > 0 ? agentRun.plan.steps : inlineAgentPlan.steps
+      };
+      const waitPlan = applyAgentRunProgressEventToPlan(inlineAgentPlan, {
+        stepId: 'wait-image-job',
+        title: '等待生成',
+        description: '图片任务已提交，正在等待上游返回结果。',
+        stepType: 'edit',
+        status: 'running',
+        createdAt: Date.now()
+      });
+      syncInlineAgentPlanMessage(waitPlan, '等待生成：图片任务已提交，正在等待上游返回结果。');
+      imageTaskStartedAt = Date.now();
+      onImageTaskStart(imageTaskStartedAt);
+      const persistentById = new Map(persistentAgentImages.map(item => [item.id, item]));
+      const editBaseItem = persistentById.get(agentRun.baseImageId) || persistentById.get(targetItem.id) || targetItem;
+      const persistentReferenceImages = agentRun.referenceImageIds
+        .map(id => persistentById.get(id))
+        .filter((item): item is CanvasItem => !!item);
       const nextZIndex = Math.max(0, ...items.map(item => item.zIndex || 0)) + 1;
       const newId = Math.random().toString(36).substr(2, 9);
       const resultMaxLongSide = Math.max(editBaseItem.width, editBaseItem.height);
-      const resultFrame = getAspectRatioFrame(
-        effectiveAspectRatio,
-        editBaseItem.width,
-        editBaseItem.height,
-        resultMaxLongSide
-      );
+      const shouldPreserveSourceFrame = isRemoverMode || isBackgroundRemovalMode || inlineEditAspectRatio === 'auto';
+      const resultFrame = shouldPreserveSourceFrame
+        ? fitDimensionsToLongSide(editBaseItem.width, editBaseItem.height, resultMaxLongSide)
+        : getAspectRatioFrame(
+          inlineEditAspectRatio,
+          editBaseItem.width,
+          editBaseItem.height,
+          resultMaxLongSide
+        );
       const resultPosition = findRightSideCanvasPosition(items, editBaseItem, resultFrame.width, resultFrame.height);
       const resultItem: CanvasItem = {
         id: newId,
@@ -2184,54 +2270,37 @@ const Canvas: React.FC<CanvasProps> = ({
         label: isBackgroundRemovalMode ? 'AI 去背景中...' : isRemoverMode ? 'AI 删除中...' : 'AI 重绘中...',
         zIndex: nextZIndex,
         parentId: editBaseItem.id,
-        prompt: generationPrompt,
+        prompt: agentRun.requestPrompt || agentPrompt,
         originalPrompt: rawPrompt || prompt,
+        optimizedPrompt: job.optimizedPrompt || '',
+        imageJobId: job.jobId,
+        imageJobStartedAt: imageTaskStartedAt,
         layers: []
       };
 
       onItemAdd(resultItem);
       resultItemId = newId;
 
-      let imageResult: ImageGenerationResult;
-      let latestOptimizedPrompt = '';
-      const requestAspectRatio = isRemoverMode || isBackgroundRemovalMode ? 'auto' : effectiveAspectRatio;
-      if (canUseImageJobs()) {
-        const job = await submitImageEditJob(
-          generationPrompt,
-          persistentTargetItem.content,
-          maskDataUrl || undefined,
-          requestAspectRatio,
-          referenceContents,
-          editOptions
-        );
-        latestOptimizedPrompt = job.optimizedPrompt || '';
-        onItemUpdate(newId, {
-          imageJobId: job.jobId,
-          optimizedPrompt: job.optimizedPrompt
-            ? normalizeOptimizedPromptImageReferences(job.optimizedPrompt, persistentTargetItem, persistentReferenceImages, items)
-            : undefined
-        });
-        imageResult = await waitForImageJob(job.jobId);
-      } else {
-        imageResult = await editImage(
-          generationPrompt,
-          persistentTargetItem.content,
-          maskDataUrl || undefined,
-          requestAspectRatio,
-          referenceContents,
-          editOptions
-        );
-      }
+      const imageResult: ImageGenerationResult = await waitForImageJob(job.jobId);
+      const completedWaitPlan = applyAgentRunProgressEventToPlan(inlineAgentPlan, {
+        stepId: 'wait-image-job',
+        title: '等待生成',
+        description: '图片已经生成，正在保存到画布。',
+        stepType: 'edit',
+        status: 'completed',
+        createdAt: Date.now()
+      });
+      syncInlineAgentPlanMessage(completedWaitPlan, '等待生成：图片已经生成，正在保存到画布。');
       const result = imageResult.image;
-      const rawOptimizedPrompt = imageResult.optimizedPrompt || latestOptimizedPrompt || imageResult.originalPrompt || generationPrompt;
+      const rawOptimizedPrompt = imageResult.optimizedPrompt || job.optimizedPrompt || imageResult.originalPrompt || agentRun.requestPrompt || agentPrompt;
       const optimizedPrompt = normalizeOptimizedPromptImageReferences(
         rawOptimizedPrompt,
-        persistentTargetItem,
+        editBaseItem,
         persistentReferenceImages,
         items
       );
-      const resultTitle = generateImageTitleFromPrompt(
-        rawPrompt || prompt || optimizedPrompt || generationPrompt,
+      const resultTitle = agentRun.displayTitle || agentRun.plan.displayTitle || generateImageTitleFromPrompt(
+        rawPrompt || prompt || optimizedPrompt || agentRun.requestPrompt || agentPrompt,
         isBackgroundRemovalMode ? '去背景' : isRemoverMode ? '删除物体' : '编辑结果'
       );
       const resultDescription = buildImageResultDescription(resultTitle, 'edited');
@@ -2240,6 +2309,7 @@ const Canvas: React.FC<CanvasProps> = ({
         content: result,
         status: 'completed',
         imageJobId: undefined,
+        imageJobStartedAt: undefined,
         originalPrompt: rawPrompt || prompt,
         optimizedPrompt,
         label: resultTitle
@@ -2251,6 +2321,7 @@ const Canvas: React.FC<CanvasProps> = ({
         thumbnailContent: persistedResultItem.thumbnailContent,
         status: 'completed',
         imageJobId: undefined,
+        imageJobStartedAt: undefined,
         originalPrompt: rawPrompt || prompt,
         optimizedPrompt,
         label: resultTitle
@@ -2265,6 +2336,18 @@ const Canvas: React.FC<CanvasProps> = ({
         }],
         durationMs: Date.now() - startedAt
       });
+      const rawExecutionMessage = agentRun.displayMessage || agentRun.plan.displayMessage || '';
+      const executionTitle = ensureImageNoun(resultTitle);
+      const fallbackExecutionMessage = isBackgroundRemovalMode
+        ? `我将为您去除这张${executionTitle}的背景。`
+        : isRemoverMode
+          ? `我将为您删除圈选区域，并生成新的${executionTitle}。`
+          : `我将为您编辑这张${executionTitle}。`;
+      collapseInlineAgentPlanMessage(
+        rawExecutionMessage && !isProcessDisclosureMessage(rawExecutionMessage)
+          ? rawExecutionMessage
+          : fallbackExecutionMessage
+      );
       setInlineEditPromptForItem(targetItem.id, '');
       setQuickEditItemId(null);
       if (isBackgroundRemovalMode) {
@@ -2283,6 +2366,15 @@ const Canvas: React.FC<CanvasProps> = ({
     } catch (error) {
       const message = error instanceof Error ? error.message : '未知错误';
       console.error(error);
+      const errorPlan = applyAgentRunProgressEventToPlan(inlineAgentPlan, {
+        stepId: 'inline-edit-error',
+        title: '执行失败',
+        description: message,
+        stepType: 'edit',
+        status: 'error',
+        createdAt: Date.now()
+      });
+      syncInlineAgentPlanMessage(errorPlan, `执行失败：${message}`);
       if (resultItemId) {
         onItemDelete(resultItemId);
       }
@@ -2307,6 +2399,10 @@ const Canvas: React.FC<CanvasProps> = ({
         durationMs: Date.now() - startedAt
       });
     } finally {
+      unsubscribeAgentRunEvents();
+      if (imageTaskStartedAt !== null) {
+        onImageTaskFinish(imageTaskStartedAt);
+      }
       setInlineEditingForItem(targetItem.id, false);
       setInlineEditingStartedAt(prev => {
         const { [targetItem.id]: _removedStartedAt, ...nextStartedAt } = prev;
@@ -3105,9 +3201,8 @@ const Canvas: React.FC<CanvasProps> = ({
               top: selectedQuickEditInputPosition.top
             }}
           >
-            <form
-              onSubmit={(event) => handleInlineImageRedraw(event)}
-              className="flex items-center gap-2 rounded-[18px] border border-zinc-200 bg-white p-1.5 shadow-[0_16px_44px_-30px_rgba(0,0,0,0.45)] animate-in fade-in zoom-in-95"
+            <div
+              className="space-y-1.5 animate-in fade-in zoom-in-95"
               style={{
                 width: selectedQuickEditInputPosition.width,
                 transform: selectedQuickEditInputPosition.transform,
@@ -3115,37 +3210,42 @@ const Canvas: React.FC<CanvasProps> = ({
               }}
               onMouseDown={(event) => event.stopPropagation()}
             >
-              <div className="flex h-10 min-w-0 flex-1 items-center gap-2 rounded-[14px] bg-zinc-50 px-3">
-                <Sparkles size={15} className="shrink-0 text-zinc-400" />
-                <input
-                  ref={quickEditInputRef}
-                  value={inlineEditPrompt}
-                  onChange={(event) => setInlineEditPromptForItem(selectedItem.id, event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Escape') {
-                      event.preventDefault();
-                      setQuickEditItemId(null);
-                    }
-                  }}
-                  disabled={selectedItemIsInlineEditing}
-                  placeholder="输入一句话快捷编辑这张图..."
-                  className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-zinc-800 outline-none placeholder:text-zinc-400"
-                />
-                <span className="hidden shrink-0 text-[10px] font-black uppercase tracking-widest text-zinc-300 sm:block">
-                  {selectedItemIsInlineEditing && selectedInlineEditDurationText
-                    ? `已执行 ${selectedInlineEditDurationText}`
-                    : 'Esc 关闭'}
-                </span>
-              </div>
-              <button
-                type="submit"
-                disabled={!inlineEditPrompt.trim() || selectedItemIsInlineEditing}
-                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[14px] bg-zinc-900 text-white transition-all hover:bg-zinc-800 active:scale-95 disabled:cursor-not-allowed disabled:opacity-30"
-                title="提交快捷编辑"
+              <form
+                onSubmit={(event) => handleInlineImageRedraw(event)}
+                className="flex items-center gap-2 rounded-[18px] border border-zinc-200 bg-white p-1.5 shadow-[0_16px_44px_-30px_rgba(0,0,0,0.45)]"
               >
-                {selectedItemIsInlineEditing ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
-              </button>
-            </form>
+                <div className="flex h-10 min-w-0 flex-1 items-center gap-2 rounded-[14px] bg-zinc-50 px-3">
+                  <Sparkles size={15} className="shrink-0 text-zinc-400" />
+                  <input
+                    ref={quickEditInputRef}
+                    value={inlineEditPrompt}
+                    onChange={(event) => setInlineEditPromptForItem(selectedItem.id, event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Escape') {
+                        event.preventDefault();
+                        setQuickEditItemId(null);
+                      }
+                    }}
+                    disabled={selectedItemIsInlineEditing}
+                    placeholder="输入一句话快捷编辑这张图..."
+                    className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-zinc-800 outline-none placeholder:text-zinc-400"
+                  />
+                  <span className="hidden shrink-0 text-[10px] font-black uppercase tracking-widest text-zinc-300 sm:block">
+                    {selectedItemIsInlineEditing && selectedInlineEditDurationText
+                      ? `已执行 ${selectedInlineEditDurationText}`
+                      : 'Esc 关闭'}
+                  </span>
+                </div>
+                <button
+                  type="submit"
+                  disabled={!inlineEditPrompt.trim() || selectedItemIsInlineEditing}
+                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[14px] bg-zinc-900 text-white transition-all hover:bg-zinc-800 active:scale-95 disabled:cursor-not-allowed disabled:opacity-30"
+                  title="提交快捷编辑"
+                >
+                  {selectedItemIsInlineEditing ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
+                </button>
+              </form>
+            </div>
           </div>
         )}
       </div>

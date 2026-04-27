@@ -7,6 +7,9 @@ import { getImagePreviewFitStyle, getLargestCanvasImageSrc, getOriginalImageSrc,
 import { formatExecutionDuration } from '../services/taskTiming';
 import { getImageModelDisplayName } from '../services/config';
 import {
+  getAgentPlanCurrentProgressText
+} from '../services/agentPlanner';
+import {
   getImageReferenceDisplayText,
   insertImageMention,
   resolveMentionedImageReferences,
@@ -19,6 +22,11 @@ import LivartLogo from './LivartLogo';
 const IMAGE_VIEWER_MIN_ZOOM = 1;
 const IMAGE_VIEWER_MAX_ZOOM = 10;
 const IMAGE_VIEWER_ZOOM_STEP = 1;
+
+type AssistantAnswerBlock =
+  | { type: 'paragraph'; text: string }
+  | { type: 'numbered'; items: string[] }
+  | { type: 'bullets'; items: string[] };
 
 interface SidebarProps {
   messages: ChatMessage[];
@@ -313,13 +321,13 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
           onClick={() => onNavigateToImage(token.item)}
           className={`mx-1 inline-flex max-w-full translate-y-1 items-center gap-1.5 rounded-xl px-2 py-1 align-baseline text-xs font-black shadow-sm transition-all hover:scale-[1.02] active:scale-95 ${
             isUserMessage
-              ? 'bg-white/15 text-white ring-1 ring-white/25 hover:bg-white/25'
+              ? 'bg-white text-zinc-700 ring-1 ring-zinc-200 hover:bg-zinc-50 hover:text-zinc-950'
               : 'bg-indigo-50 text-indigo-700 ring-1 ring-indigo-100 hover:bg-indigo-100'
           }`}
         >
           <span
             className={`shrink-0 overflow-hidden rounded-md ${
-            isUserMessage ? 'bg-white/20' : 'bg-white'
+            isUserMessage ? 'bg-zinc-100' : 'bg-white'
           }`}
             style={previewStyle}
           >
@@ -329,6 +337,146 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
         </button>
       );
     });
+  };
+
+  const normalizeAssistantAnswerText = (text: string) => {
+    return text
+      .replace(/\r\n/g, '\n')
+      .trim()
+      .replace(/([：:。！？!?])\s+(?=\d{1,2}[.、)]\s+\S)/g, '$1\n')
+      .replace(/\s+(?=\d{1,2}[.、)]\s+\S)/g, '\n')
+      .replace(/([：:。！？!?])\s+(?=[-•·*]\s+\S)/g, '$1\n')
+      .replace(/\s+(?=[-•·*]\s+\S)/g, '\n');
+  };
+
+  const parseAssistantAnswerBlocks = (text: string): AssistantAnswerBlock[] => {
+    const lines = normalizeAssistantAnswerText(text)
+      .split('\n')
+      .map(line => line.trim())
+      .filter(Boolean);
+
+    const blocks: AssistantAnswerBlock[] = [];
+    const paragraphs: string[] = [];
+    const numberedItems: string[] = [];
+    const bulletItems: string[] = [];
+
+    const flushParagraphs = () => {
+      if (paragraphs.length === 0) return;
+      blocks.push({ type: 'paragraph', text: paragraphs.join('\n') });
+      paragraphs.length = 0;
+    };
+
+    const flushNumberedItems = () => {
+      if (numberedItems.length === 0) return;
+      blocks.push({ type: 'numbered', items: [...numberedItems] });
+      numberedItems.length = 0;
+    };
+
+    const flushBulletItems = () => {
+      if (bulletItems.length === 0) return;
+      blocks.push({ type: 'bullets', items: [...bulletItems] });
+      bulletItems.length = 0;
+    };
+
+    lines.forEach(line => {
+      const numberedMatch = line.match(/^(\d{1,2})[.、)]\s*(.+)$/);
+      if (numberedMatch) {
+        flushParagraphs();
+        flushBulletItems();
+        numberedItems.push(numberedMatch[2]);
+        return;
+      }
+
+      const bulletMatch = line.match(/^[-•·*]\s*(.+)$/);
+      if (bulletMatch) {
+        flushParagraphs();
+        flushNumberedItems();
+        bulletItems.push(bulletMatch[1]);
+        return;
+      }
+
+      flushNumberedItems();
+      flushBulletItems();
+      paragraphs.push(line);
+    });
+
+    flushParagraphs();
+    flushNumberedItems();
+    flushBulletItems();
+
+    return blocks;
+  };
+
+  const renderAssistantAnswer = (message: ChatMessage) => {
+    const blocks = parseAssistantAnswerBlocks(message.text);
+    const hasStructuredBlocks = blocks.some(block => block.type !== 'paragraph');
+    const isShortPlainReply = !hasStructuredBlocks && message.text.trim().length <= 90;
+
+    if (isShortPlainReply) {
+      return (
+        <>
+          {renderMessageText(message.text, message.role)}
+          {renderMessageImages(message)}
+        </>
+      );
+    }
+
+    return (
+      <div className="grid w-full gap-3">
+        {blocks.map((block, blockIndex) => {
+          if (block.type === 'paragraph') {
+            const isLeadParagraph = blockIndex === 0 && hasStructuredBlocks;
+            return (
+              <p
+                key={`assistant-paragraph-${blockIndex}`}
+                className={`text-[14px] leading-7 ${
+                  isLeadParagraph ? 'font-semibold text-zinc-900' : 'font-medium text-zinc-700'
+                }`}
+              >
+                {renderMessageText(block.text, message.role)}
+              </p>
+            );
+          }
+
+          if (block.type === 'numbered') {
+            return (
+              <ol key={`assistant-numbered-${blockIndex}`} className="grid gap-2">
+                {block.items.map((item, itemIndex) => (
+                  <li
+                    key={`assistant-numbered-${blockIndex}-${itemIndex}`}
+                    className="flex gap-3 rounded-[12px] border border-zinc-100 bg-zinc-50/80 px-3 py-2.5 text-[13px] font-medium leading-6 text-zinc-700"
+                  >
+                    <span className="mt-0.5 flex h-5 min-w-5 items-center justify-center rounded-full bg-zinc-900 text-[10px] font-black leading-none text-white">
+                      {itemIndex + 1}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      {renderMessageText(item, message.role)}
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            );
+          }
+
+          return (
+            <ul key={`assistant-bullets-${blockIndex}`} className="grid gap-2">
+              {block.items.map((item, itemIndex) => (
+                <li
+                  key={`assistant-bullets-${blockIndex}-${itemIndex}`}
+                  className="flex gap-2.5 rounded-[12px] border border-indigo-50 bg-indigo-50/50 px-3 py-2.5 text-[13px] font-medium leading-6 text-zinc-700"
+                >
+                  <span className="mt-[9px] h-1.5 w-1.5 shrink-0 rounded-full bg-indigo-500" />
+                  <span className="min-w-0 flex-1">
+                    {renderMessageText(item, message.role)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          );
+        })}
+        {renderMessageImages(message)}
+      </div>
+    );
   };
 
   const renderMessageImages = (message: ChatMessage) => {
@@ -453,6 +601,24 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
             </div>
           );
         })}
+      </div>
+    );
+  };
+
+  const renderAgentPlan = (message: ChatMessage) => {
+    const plan = message.agentPlan;
+    if (!plan || message.role !== 'assistant') return null;
+
+    const currentText = getAgentPlanCurrentProgressText(plan, message.text);
+    const isRunning = plan.steps.some(step => step.status === 'running');
+    return (
+      <div className="inline-flex max-w-full items-center gap-2 rounded-[9px] bg-transparent px-0 py-0 text-[13px] font-medium leading-6 text-zinc-700">
+        {isRunning ? (
+          <Loader2 size={14} className="shrink-0 animate-spin text-indigo-500" />
+        ) : (
+          <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-500" />
+        )}
+        <span className="min-w-0 flex-1 truncate">{currentText}</span>
       </div>
     );
   };
@@ -585,22 +751,27 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
           {messages.map((message) => {
             const resultCards = renderImageResultCards(message);
             const isImageResultMessage = !!resultCards;
+            const isAgentPlanMessage = message.role === 'assistant' && !!message.agentPlan && !isImageResultMessage;
 
             return (
               <div key={message.id} className={`flex flex-col ${message.role === 'user' ? 'items-end' : 'items-start'}`}>
-                <div className={isImageResultMessage
+                <div className={isImageResultMessage || isAgentPlanMessage
                   ? 'w-full bg-white text-sm leading-relaxed text-gray-800'
-                  : `max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
-                    message.role === 'user'
-                      ? 'bg-black text-white shadow-lg'
-                      : 'bg-gray-100 text-gray-800'
-                  }`
+                  : message.role === 'user'
+                    ? 'max-w-[85%] rounded-[9px] bg-[#f5f5f6] px-4 py-3 text-sm font-medium leading-relaxed text-zinc-900'
+                    : 'w-full bg-transparent px-0 py-0 text-sm leading-relaxed text-gray-800'
                 }>
                   {isImageResultMessage ? resultCards : (
-                    <>
-                      {renderMessageText(message.text, message.role)}
-                      {renderMessageImages(message)}
-                    </>
+                    isAgentPlanMessage
+                      ? renderAgentPlan(message)
+                      : message.role === 'assistant'
+                        ? renderAssistantAnswer(message)
+                        : (
+                        <>
+                          {renderMessageText(message.text, message.role)}
+                          {renderMessageImages(message)}
+                        </>
+                      )
                   )}
                 </div>
                 <span className="text-[10px] text-gray-400 mt-1 px-1 font-medium">
@@ -615,7 +786,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
             <div className="flex items-center gap-3 text-black text-sm font-bold animate-pulse">
               <Loader2 className="animate-spin" size={16} />
               <span>
-                livart 正在执行{activeTaskCount > 1 ? ` ${activeTaskCount} 个任务` : '中'}...
+                livart 正在生图{activeTaskCount > 1 ? `（${activeTaskCount} 个任务）` : '中'}...
                 {activeTaskDurationText && ` 最早任务已执行 ${activeTaskDurationText}`}
                 <span className="ml-1 text-gray-400">可继续提交新任务</span>
               </span>

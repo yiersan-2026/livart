@@ -8,6 +8,7 @@ import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 
 import java.io.IOException;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -52,6 +53,18 @@ public class ImageJobEventBroadcaster {
                 "type", "image-job",
                 "job", job
         ));
+    }
+
+    public void publishAgentRunEvent(UUID userId, String runId, Map<String, Object> event) {
+        if (runId == null || runId.isBlank()) {
+            return;
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", "agent-run-event");
+        payload.put("runId", runId);
+        payload.put("event", event);
+        sendToUser(userId, payload);
     }
 
     public void sendToSession(WebSocketSession session, Map<String, Object> payload) {

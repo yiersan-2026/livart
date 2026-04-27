@@ -31,7 +31,7 @@ export default defineConfig(({ mode }) => {
             target: backendApiBaseUrl,
             changeOrigin: true
           },
-          '/api/images': {
+          '/api/agent': {
             target: backendApiBaseUrl,
             changeOrigin: true
           },
@@ -61,11 +61,7 @@ export default defineConfig(({ mode }) => {
         'process.env.IMAGE_API_BASE_URL': JSON.stringify(env.IMAGE_API_BASE_URL),
         'process.env.IMAGE_API_MODEL': JSON.stringify(env.IMAGE_API_MODEL),
         'process.env.PROMPT_OPTIMIZER_MODEL': JSON.stringify(env.PROMPT_OPTIMIZER_MODEL),
-        'process.env.CHAT_API_MODEL': JSON.stringify(env.CHAT_API_MODEL),
-        'process.env.TEXT_TO_IMAGE_API_URL': JSON.stringify(env.TEXT_TO_IMAGE_API_URL || '/api/images/generations'),
-        'process.env.IMAGE_TO_IMAGE_API_URL': JSON.stringify(env.IMAGE_TO_IMAGE_API_URL || '/api/images/edits'),
-        'process.env.IMAGE_TEXT_TO_IMAGE_URL': JSON.stringify(env.IMAGE_TEXT_TO_IMAGE_URL),
-        'process.env.IMAGE_IMAGE_TO_IMAGE_URL': JSON.stringify(env.IMAGE_IMAGE_TO_IMAGE_URL)
+        'process.env.CHAT_API_MODEL': JSON.stringify(env.CHAT_API_MODEL)
       },
       resolve: {
         alias: {
