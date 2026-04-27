@@ -801,16 +801,17 @@ public class AiProxyService {
                     trimmedPrompt.length(),
                     trimmedImageContext.length()
             );
-            String optimizedPrompt = appendNegativePromptConstraints(
-                    sanitizeOptimizedPrompt(
-                            springAiTextService.completeText(
-                                    config,
-                                    systemPrompt,
-                                    buildPromptOptimizerInput(trimmedPrompt, trimmedImageContext),
-                                    PROMPT_OPTIMIZER_TIMEOUT,
-                                    "prompt-optimizer"
-                            )
+            String optimizerOutput = sanitizeOptimizedPrompt(
+                    springAiTextService.completeText(
+                            config,
+                            systemPrompt,
+                            buildPromptOptimizerInput(trimmedPrompt, trimmedImageContext),
+                            PROMPT_OPTIMIZER_TIMEOUT,
+                            "prompt-optimizer"
                     )
+            );
+            String optimizedPrompt = appendNegativePromptConstraints(
+                    selectPromptOptimizerOutput(optimizerOutput, trimmedPrompt)
             );
 
             log.info(
@@ -821,26 +822,22 @@ public class AiProxyService {
             );
             return optimizedPrompt;
         } catch (ApiException exception) {
-            throw new ApiException(
-                    exception.status(),
-                    switch (exception.code()) {
-                        case "SPRING_AI_TIMEOUT" -> "PROMPT_OPTIMIZER_TIMEOUT";
-                        case "SPRING_AI_UPSTREAM_ERROR" -> "PROMPT_OPTIMIZER_UPSTREAM_ERROR";
-                        default -> "PROMPT_OPTIMIZER_FAILED";
-                    },
-                    switch (exception.code()) {
-                        case "SPRING_AI_TIMEOUT" -> "提示词优化超过 2 分钟，请稍后重试：%s".formatted(exception.getMessage());
-                        case "SPRING_AI_UPSTREAM_ERROR" -> "提示词优化上游错误：%s".formatted(exception.getMessage());
-                        default -> "提示词优化失败：%s".formatted(exception.getMessage());
-                    }
+            log.warn(
+                    "[prompt-optimizer] inline skipped mode={} duration={}ms code={} error={}",
+                    mode,
+                    System.currentTimeMillis() - startedAt,
+                    exception.code(),
+                    safeMessage(exception)
             );
+            return appendNegativePromptConstraints(trimmedPrompt);
         } catch (RuntimeException exception) {
-            log.error("[prompt-optimizer] inline failed mode={} duration={}ms error={}", mode, System.currentTimeMillis() - startedAt, safeMessage(exception));
-            throw new ApiException(
-                    HttpStatus.BAD_GATEWAY,
-                    "PROMPT_OPTIMIZER_FAILED",
-                    "提示词优化失败：%s".formatted(safeMessage(exception))
+            log.warn(
+                    "[prompt-optimizer] inline skipped mode={} duration={}ms error={}",
+                    mode,
+                    System.currentTimeMillis() - startedAt,
+                    safeMessage(exception)
             );
+            return appendNegativePromptConstraints(trimmedPrompt);
         }
     }
 
@@ -1288,12 +1285,13 @@ public class AiProxyService {
 
     private String getPromptOptimizerSystemPrompt(String mode) {
         String sharedRules = """
-                你是专业 AI 图像提示词优化器。只输出优化后的提示词，不要解释，不要 Markdown，不要加标题。
+                你是专业 AI 图像提示词优化器。你的唯一任务是把用户输入改写成更清晰、更适合图像生成的视觉提示词。
+                只输出优化后的提示词，不要解释，不要 Markdown，不要加标题，不要拒绝，不要判断能否生成，不要输出“无法”“不能”“不适合”等拒绝话术。
                 要求：
                 - 保留用户原始意图，不新增用户没有要求的主体或文字。
                 - 如果输入中包含“图片角色分析”，必须先理解原图/编辑目标和素材参考的关系，再优化用户原始指令；不要把“图片角色分析”标题和内部说明原样输出。
                 - 原文中任何 @xxx 图片引用标记都是系统占位符；如果上下文提供了图片角色分析，必须改写为“原图”“参考图 1”等角色名称，不要输出内部 ID。
-                - 补充清晰的主体、场景、构图、风格、材质、色彩、光影、镜头/视角和质量描述。
+                - 只补充画面主体、场景、构图、风格、材质、色彩、光影、镜头/视角和质量描述；最终是否能生成由后续生图接口判断。
                 - 必须在提示词末尾加入完整负面约束：%s
                 - 使用中文输出，保持一段完整提示词。""".formatted(NEGATIVE_PROMPT_TEXT);
 
@@ -1367,6 +1365,34 @@ public class AiProxyService {
                 .trim();
     }
 
+    static String selectPromptOptimizerOutput(String optimizerOutput, String originalPrompt) {
+        String trimmedOriginalPrompt = originalPrompt == null ? "" : originalPrompt.trim();
+        String trimmedOptimizerOutput = optimizerOutput == null ? "" : optimizerOutput.trim();
+        if (trimmedOptimizerOutput.isBlank() || looksLikePromptOptimizerRefusal(trimmedOptimizerOutput)) {
+            return trimmedOriginalPrompt;
+        }
+        return trimmedOptimizerOutput;
+    }
+
+    private static boolean looksLikePromptOptimizerRefusal(String text) {
+        String normalized = text == null ? "" : text.replaceAll("\\s+", "").toLowerCase(Locale.ROOT);
+        if (normalized.isBlank() || normalized.length() > 180) {
+            return false;
+        }
+        return normalized.contains("抱歉")
+                || normalized.contains("无法")
+                || normalized.contains("不能生成")
+                || normalized.contains("不能协助")
+                || normalized.contains("不适合生成")
+                || normalized.contains("拒绝")
+                || normalized.contains("违规")
+                || normalized.contains("违反")
+                || normalized.contains("安全策略")
+                || normalized.contains("内容政策")
+                || normalized.contains("contentpolicy")
+                || normalized.contains("safetypolicy");
+    }
+
     private String appendNegativePromptConstraints(String prompt) {
         String trimmedPrompt = prompt.trim();
         if (trimmedPrompt.isBlank() || trimmedPrompt.contains(NEGATIVE_PROMPT_TEXT)) {
@@ -1385,7 +1411,7 @@ public class AiProxyService {
         return """
                 %s
 
-                输出要求：只输出优化后的用户提示词；必须遵守上面的图片角色分析；不要输出“图片角色分析”标题、推理过程或解释。
+                输出要求：只输出优化后的用户提示词；必须遵守上面的图片角色分析；不要输出“图片角色分析”标题、推理过程或解释；不要判断能否生成，不要拒绝。
 
                 原始提示词：%s
                 """.formatted(imageContext, prompt);
