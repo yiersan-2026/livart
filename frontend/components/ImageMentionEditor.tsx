@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Image as ImageIcon, Search, X } from 'lucide-react';
 import type { CanvasItem } from '../types';
-import { getImagePreviewFitStyle, getThumbnailImageSrc } from '../services/imageSources';
+import { getImagePreviewFitStyle, getThumbnailImageSrc, hasUsableImageSource } from '../services/imageSources';
 import {
   getImageReferenceDisplayText,
   getImageReferenceLabel,
@@ -126,7 +126,7 @@ const ImageMentionEditor: React.FC<ImageMentionEditorProps> = ({
 
     const normalizedQuery = searchQuery.trim().toLowerCase();
     const availableImages = (selectableImageItems || imageItems)
-      .filter(item => item.status === 'completed' && !!item.content)
+      .filter(item => item.status === 'completed' && hasUsableImageSource(item))
       .slice()
       .reverse();
 

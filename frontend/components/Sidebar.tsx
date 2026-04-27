@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import type { ChatMessage, CanvasItem, ImageAspectRatio } from '../types';
 import { Download, Eye, Loader2, Send, RotateCcw, RotateCw, ZoomIn, ZoomOut, X } from 'lucide-react';
 import { IMAGE_ASPECT_RATIO_OPTIONS } from '../services/imageSizing';
-import { getImagePreviewFitStyle, getLargestCanvasImageSrc, getOriginalImageSrc, getThumbnailImageSrc } from '../services/imageSources';
+import { getImagePreviewFitStyle, getLargestCanvasImageSrc, getOriginalImageSrc, getThumbnailImageSrc, hasUsableImageSource } from '../services/imageSources';
 import { formatExecutionDuration } from '../services/taskTiming';
 import { getImageModelDisplayName } from '../services/config';
 import {
@@ -64,7 +64,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
   } | null>(null);
 
   const completedImageItems = useMemo(
-    () => imageItems.filter(item => item.type === 'image' && item.status === 'completed' && !!item.content),
+    () => imageItems.filter(item => item.type === 'image' && item.status === 'completed' && hasUsableImageSource(item)),
     [imageItems]
   );
   const imageItemsById = useMemo(
@@ -510,7 +510,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
 
     const attachedImages = imageIds
       .map(imageId => imageItemsById.get(imageId))
-      .filter((item): item is CanvasItem => !!item && item.type === 'image' && item.status === 'completed' && !!item.content);
+      .filter((item): item is CanvasItem => !!item && item.type === 'image' && item.status === 'completed' && hasUsableImageSource(item));
 
     if (attachedImages.length === 0) return null;
 

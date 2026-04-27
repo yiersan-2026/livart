@@ -1,5 +1,6 @@
 import type { CanvasItem } from '../types';
 import { authHeaders } from './auth';
+import { hasUsableImageSource } from './imageSources';
 
 export const IMAGE_REFERENCE_TOKEN_PATTERN = /@([^\s@，。,.!?！？:：；;]+)/g;
 
@@ -87,7 +88,7 @@ export const insertImageMention = (value: string, item: CanvasItem, items: Canva
 };
 
 const getImageReferenceMap = (items: CanvasItem[]) => {
-  const imageItems = items.filter(item => item.type === 'image' && item.status === 'completed' && !!item.content);
+  const imageItems = items.filter(item => item.type === 'image' && item.status === 'completed' && hasUsableImageSource(item));
   const referenceMap = new Map<string, CanvasItem>();
 
   imageItems.forEach((item, index) => {
@@ -298,7 +299,7 @@ export const normalizeOptimizedPromptImageReferences = (
 };
 
 const getImageReferenceIndex = (item: CanvasItem, items: CanvasItem[]) => {
-  const imageItems = items.filter(candidate => candidate.type === 'image' && candidate.status === 'completed' && !!candidate.content);
+  const imageItems = items.filter(candidate => candidate.type === 'image' && candidate.status === 'completed' && hasUsableImageSource(candidate));
   const index = imageItems.findIndex(candidate => candidate.id === item.id);
   return index >= 0 ? index + 1 : undefined;
 };

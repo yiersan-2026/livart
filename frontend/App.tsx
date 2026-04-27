@@ -56,6 +56,7 @@ import { createTransparentEditMask } from './services/imageMask';
 import { buildImageResultDescription, generateImageTitleFromPrompt } from './services/imageTitle';
 import { loadSiteStatsOverview, type SiteStatsOverview } from './services/siteStats';
 import { importExternalImage, type ExternalImageCandidate } from './services/externalImages';
+import { hasUsableImageSource } from './services/imageSources';
 
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 5;
@@ -88,7 +89,7 @@ const formatSiteStatsCount = (value: number | undefined) => {
 };
 
 const collectAgentPlanCandidateImages = (text: string, contextImage: CanvasItem | null, items: CanvasItem[]) => {
-  const completedImages = items.filter(item => item.type === 'image' && item.status === 'completed' && !!item.content);
+  const completedImages = items.filter(item => item.type === 'image' && item.status === 'completed' && hasUsableImageSource(item));
   const candidates: CanvasItem[] = [];
   const seenIds = new Set<string>();
 
@@ -1345,6 +1346,9 @@ function App() {
       const insertedItems = importedImages.map(({ candidate, asset }, index) => {
         const sourceWidth = asset.width || candidate.width || fallbackFrame.width;
         const sourceHeight = asset.height || candidate.height || fallbackFrame.height;
+        const assetContent = asset.urlPath || (asset.assetId ? `/api/assets/${encodeURIComponent(asset.assetId)}/content` : candidate.url);
+        const assetPreview = asset.previewUrlPath || (asset.assetId ? `/api/assets/${encodeURIComponent(asset.assetId)}/preview` : assetContent);
+        const assetThumbnail = asset.thumbnailUrlPath || (asset.assetId ? `/api/assets/${encodeURIComponent(asset.assetId)}/thumbnail` : assetPreview);
         const frame = fitDimensionsToLongSide(sourceWidth, sourceHeight, 400);
         const position = findNextRootImageRowPosition(
           virtualItems,
@@ -1356,10 +1360,10 @@ function App() {
         const item: CanvasItem = {
           id: Math.random().toString(36).substr(2, 9),
           type: 'image',
-          content: asset.urlPath,
+          content: assetContent,
           assetId: asset.assetId,
-          previewContent: asset.previewUrlPath || asset.urlPath,
-          thumbnailContent: asset.thumbnailUrlPath || asset.previewUrlPath || asset.urlPath,
+          previewContent: assetPreview,
+          thumbnailContent: assetThumbnail,
           x: position.x,
           y: position.y,
           width: frame.width,
@@ -2276,7 +2280,7 @@ function App() {
           contextImage={contextImage}
           promptSeed={sidebarPromptSeed}
           inputResetKey={sidebarInputResetKey}
-          imageItems={items.filter(item => item.type === 'image' && !!item.content)}
+          imageItems={items.filter(item => item.type === 'image' && hasUsableImageSource(item))}
           onSelectContextImage={setContextImage}
           onClearContextImage={handleClearSidebarContextImage}
           onNavigateToImage={handleNavigateToImage}

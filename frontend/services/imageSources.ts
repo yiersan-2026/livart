@@ -8,6 +8,11 @@ const isDataImageUrl = (value: unknown): value is string => {
   return typeof value === 'string' && value.startsWith('data:image/');
 };
 
+export const hasUsableImageSource = (item: CanvasItem) => (
+  item.type === 'image' &&
+  !!(item.content || item.previewContent || item.thumbnailContent || item.assetId)
+);
+
 const getAssetVariantUrlFromValue = (value: unknown, variant: ImageVariant) => {
   if (typeof value !== 'string') return '';
   const match = value.match(/\/api\/assets\/([^/]+)\/(?:content|preview|thumbnail|view\/\d+)(?:[?#].*)?$/);

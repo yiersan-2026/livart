@@ -1,6 +1,7 @@
 import type { AgentPlan, AgentPlanStep, CanvasItem, ImageAspectRatio } from '../types';
 import { authHeaders, getStoredAuthSession } from './auth';
 import { getCanvasItemAssetId } from './canvasPersistence';
+import { hasUsableImageSource } from './imageSources';
 import { getImageReferenceLabel } from './imageReferences';
 
 const AGENT_RUN_URL = '/api/agent/runs';
@@ -506,7 +507,7 @@ export const connectAgentRunEvents = async (
 };
 
 const mapImageCandidates = (images: CanvasItem[]): AgentPlanImageCandidate[] => {
-  const completedImages = images.filter(item => item.type === 'image' && item.status === 'completed' && !!item.content);
+  const completedImages = images.filter(item => item.type === 'image' && item.status === 'completed' && hasUsableImageSource(item));
   return completedImages.map((item, index) => ({
     id: item.id,
     name: getImageReferenceLabel(item),
