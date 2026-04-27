@@ -121,15 +121,15 @@ const BACKGROUND_REMOVAL_PROMPT = '先识别图片中的主要主体：画面最
 const LAYER_SPLIT_SUBJECT_PROMPT = '图层拆分：请把这张图拆出“主体层”。先识别画面主要前景主体，主体包含其穿戴、手持、贴附和直接组成整体的部分；输出同画幅主体图层，主体以外区域必须是透明 alpha，不要生成新背景，不要改变主体身份、结构、比例、颜色、材质、边缘、光影和原有裁切。';
 const LAYER_SPLIT_BACKGROUND_PROMPT = '图层拆分：请把这张图拆出“背景层”。先识别画面主要前景主体，然后移除主体及其接触阴影、遮挡残影和边缘碎片；用周围背景的纹理、透视、光影、反射、噪点和景深自然补全，保持原图画幅、镜头视角和背景风格不变，不要新增主体或新场景。';
 const ENABLE_LAYER_SPLIT_TOOL = false;
-const MULTI_ANGLE_ROTATION_MIN = -360;
-const MULTI_ANGLE_ROTATION_MAX = 360;
-const MULTI_ANGLE_TILT_MIN = -75;
-const MULTI_ANGLE_TILT_MAX = 75;
-const MULTI_ANGLE_ORBIT_RADIUS = 74;
+const MULTI_ANGLE_ROTATION_MIN = -90;
+const MULTI_ANGLE_ROTATION_MAX = 90;
+const MULTI_ANGLE_TILT_MIN = -30;
+const MULTI_ANGLE_TILT_MAX = 60;
+const MULTI_ANGLE_ORBIT_RADIUS = 88;
 const DEFAULT_MULTI_ANGLE_VALUES = {
   mode: 'camera' as MultiAngleMode,
-  rotation: 35,
-  tilt: 12,
+  rotation: 0,
+  tilt: 15,
   zoom: 1
 };
 const MULTI_ANGLE_ZOOM_OPTIONS = [
@@ -248,7 +248,7 @@ const getMultiAngleOrbitProjection = (rotation: number, tilt: number) => {
     x,
     y,
     z,
-    scale: isFrontSide ? 1 + z * 0.08 : 0.78,
+    scale: isFrontSide ? 1 + z * 0.1 : 0.72,
     opacity: isFrontSide ? 1 : 0.42,
     zIndex: isFrontSide ? 8 : 1,
     isFrontSide
@@ -482,7 +482,7 @@ const buildMultiAnglePrompt = (item: CanvasItem, state: MultiAngleState) => {
     `目标图片：${getCanvasItemDisplayTitle(item)}`,
     `模式：${getMultiAngleModeLabel(state.mode)}`,
     `最终 3D 球面摄像机停留位置：方位角 ${state.rotation} 度，俯仰角 ${state.tilt} 度`,
-    `摄像机轨道范围：水平方向支持 720 度完整环绕，当前数值表示用户把摄像机拖到球面上的最终位置`,
+    `摄像机轨道范围：左右各 90 度，上方最高 60 度，下方最低 -30 度；当前数值表示用户把摄像机拖到受限球面上的最终位置`,
     `镜头缩放：${zoomLabel}`,
     state.mode === 'subject'
       ? '请理解为主体自身相对镜头转向，生成同一主体的新角度。'
@@ -3049,8 +3049,11 @@ const Canvas: React.FC<CanvasProps> = ({
     const previewCardSize = previewAspect >= 1
       ? { width: 108, height: Math.max(54, 108 / previewAspect) }
       : { width: Math.max(54, 108 * previewAspect), height: 108 };
+    const orbitDiameter = Math.round(Math.max(previewCardSize.width, previewCardSize.height) + 70);
+    const orbitInset = Math.round((orbitDiameter - 178) / 2);
     const orbitProjection = getMultiAngleOrbitProjection(multiAngleState.rotation, multiAngleState.tilt);
-    const cameraTransform = `translate3d(calc(-50% + ${orbitProjection.x}px), calc(-50% + ${orbitProjection.y}px), 0) scale(${orbitProjection.scale})`;
+    const sphereTransform = `rotateX(${-multiAngleState.tilt}deg) rotateY(${multiAngleState.rotation}deg)`;
+    const cameraModelTransform = `translate3d(-50%, -50%, ${MULTI_ANGLE_ORBIT_RADIUS}px) rotateY(180deg) rotateX(${multiAngleState.tilt * 0.12}deg) scale(${orbitProjection.scale})`;
     const updateMultiAngleState = (updates: Partial<MultiAngleState>) => {
       setMultiAngleState(previous => previous && previous.itemId === selectedItem.id
         ? { ...previous, ...updates }
@@ -3108,49 +3111,83 @@ const Canvas: React.FC<CanvasProps> = ({
         >
           <div className="absolute inset-0 opacity-80 [background-image:radial-gradient(circle_at_50%_26%,rgba(255,255,255,0.94),rgba(255,255,255,0)_34%),linear-gradient(180deg,rgba(255,255,255,0.5),rgba(214,208,193,0.62))]" />
           <div className="absolute bottom-8 h-9 w-48 rounded-[50%] bg-black/10 blur-md" />
-          <div className="relative flex h-44 w-44 items-center justify-center rounded-full border border-white/80 bg-[radial-gradient(circle_at_34%_24%,rgba(255,255,255,0.96),rgba(255,255,255,0.48)_38%,rgba(201,195,178,0.42)_72%,rgba(136,126,105,0.32))] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.65),inset_-18px_-24px_38px_rgba(85,75,54,0.12),0_18px_42px_-30px_rgba(0,0,0,0.68)]">
-            <div className="pointer-events-none absolute inset-4 rounded-full border border-zinc-500/12" />
-            <div className="pointer-events-none absolute left-4 right-4 top-1/2 h-px bg-zinc-500/16" />
-            <div className="pointer-events-none absolute left-1/2 top-4 h-[calc(100%-32px)] w-px bg-zinc-500/14" />
-            <div className="pointer-events-none absolute inset-x-5 top-1/2 h-20 -translate-y-1/2 rounded-[50%] border border-zinc-500/14" />
-            <div className="pointer-events-none absolute inset-y-5 left-1/2 w-20 -translate-x-1/2 rounded-[50%] border border-zinc-500/14" />
-            <div className="pointer-events-none absolute inset-x-7 top-1/2 h-28 -translate-y-1/2 rotate-45 rounded-[50%] border border-dashed border-zinc-500/12" />
-            <div className="pointer-events-none absolute inset-x-7 top-1/2 h-28 -translate-y-1/2 -rotate-45 rounded-[50%] border border-dashed border-zinc-500/12" />
+          <div
+            className="relative"
+            style={{
+              width: orbitDiameter,
+              height: orbitDiameter,
+              perspective: '760px',
+              perspectiveOrigin: '50% 50%'
+            }}
+          >
             <div
-              className="pointer-events-none relative z-[4] rounded-[16px] border border-white/85 bg-white/92 p-1.5 shadow-[0_14px_34px_-24px_rgba(0,0,0,0.65)]"
-              style={{
-                width: previewCardSize.width,
-                height: previewCardSize.height,
-                transform: `scale(${zoomOption.scale})`
-              }}
-            >
-              {previewSrc ? (
-                <img src={previewSrc} className="h-full w-full rounded-[10px] object-contain pointer-events-none" />
-              ) : (
-                <Box size={24} className="m-auto h-full text-zinc-400" />
-              )}
-            </div>
+              className="pointer-events-none absolute inset-0 rounded-full border border-white/70 bg-[radial-gradient(circle_at_35%_25%,rgba(255,255,255,0.66),rgba(238,234,222,0.18)_42%,rgba(148,137,112,0.1)_76%,rgba(85,73,52,0.16))] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.54),inset_-20px_-28px_40px_rgba(85,75,54,0.12),0_18px_42px_-30px_rgba(0,0,0,0.68)]"
+            />
             <div
               className="pointer-events-none absolute left-1/2 top-1/2"
               style={{
-                transform: cameraTransform,
-                opacity: orbitProjection.opacity,
-                zIndex: orbitProjection.zIndex
+                width: previewCardSize.width,
+                height: previewCardSize.height,
+                transform: `translate3d(-50%, -50%, 8px) scale(${zoomOption.scale})`
               }}
             >
-              <div className="flex h-11 min-w-11 items-center justify-center gap-1.5 rounded-full border border-white/90 bg-zinc-950 px-2.5 text-[10px] font-black text-white shadow-[0_12px_28px_-16px_rgba(0,0,0,0.85)]">
-                <Camera size={15} />
-                <span>相机</span>
+              <div className="h-full w-full rounded-[16px] border border-white/85 bg-white/92 p-1.5 shadow-[0_14px_34px_-24px_rgba(0,0,0,0.65)]">
+                {previewSrc ? (
+                  <img src={previewSrc} className="h-full w-full rounded-[10px] object-contain pointer-events-none" />
+                ) : (
+                  <Box size={24} className="m-auto h-full text-zinc-400" />
+                )}
               </div>
             </div>
-            <div className={`pointer-events-none absolute bottom-3 rounded-full px-2 py-0.5 text-[10px] font-black ${
-              orbitProjection.isFrontSide ? 'bg-white/80 text-zinc-600' : 'bg-zinc-900/75 text-white'
-            }`}>
-              {orbitProjection.isFrontSide ? '前半球' : '后半球'}
+            <div
+              className="pointer-events-none absolute"
+              style={{
+                inset: orbitInset,
+                transform: sphereTransform,
+                transformStyle: 'preserve-3d',
+                transition: multiAngleDragState ? 'none' : 'transform 160ms cubic-bezier(0.2, 0.8, 0.2, 1)'
+              }}
+            >
+              <div className="absolute inset-0 rounded-full border border-zinc-600/18" style={{ transform: 'translateZ(0px)' }} />
+              <div className="absolute inset-0 rounded-full border border-zinc-600/12" style={{ transform: 'rotateY(90deg)' }} />
+              <div className="absolute inset-0 rounded-full border border-zinc-600/12" style={{ transform: 'rotateX(90deg)' }} />
+              <div className="absolute inset-x-3 top-1/2 h-16 -translate-y-1/2 rounded-[50%] border border-zinc-600/14" style={{ transform: 'translateY(-50%) translateZ(1px)' }} />
+              <div className="absolute inset-x-3 top-1/2 h-16 -translate-y-1/2 rounded-[50%] border border-zinc-600/10" style={{ transform: 'translateY(-50%) rotateX(32deg) translateZ(1px)' }} />
+              <div className="absolute inset-x-3 top-1/2 h-16 -translate-y-1/2 rounded-[50%] border border-zinc-600/10" style={{ transform: 'translateY(-50%) rotateX(-32deg) translateZ(1px)' }} />
+              <div className="absolute inset-y-3 left-1/2 w-16 -translate-x-1/2 rounded-[50%] border border-zinc-600/12" style={{ transform: 'translateX(-50%) rotateY(32deg) translateZ(1px)' }} />
+              <div className="absolute inset-y-3 left-1/2 w-16 -translate-x-1/2 rounded-[50%] border border-zinc-600/12" style={{ transform: 'translateX(-50%) rotateY(-32deg) translateZ(1px)' }} />
+              <div
+                className="absolute left-1/2 top-1/2"
+                style={{
+                  transform: cameraModelTransform,
+                  transformStyle: 'preserve-3d',
+                  opacity: orbitProjection.opacity,
+                  zIndex: orbitProjection.zIndex
+                }}
+              >
+                <div
+                  className="relative h-12 w-16"
+                  style={{
+                    transformStyle: 'preserve-3d',
+                    filter: orbitProjection.isFrontSide ? 'drop-shadow(0 16px 18px rgba(39, 39, 42, 0.28))' : 'drop-shadow(0 8px 12px rgba(39, 39, 42, 0.18))'
+                  }}
+                >
+                  <div className="absolute left-2 top-3 h-8 w-11 rounded-[10px] border border-zinc-700 bg-[linear-gradient(135deg,#3f3f46,#18181b_58%,#09090b)] shadow-[inset_0_1px_0_rgba(255,255,255,0.22)]" style={{ transform: 'translateZ(8px)' }} />
+                  <div className="absolute left-[46px] top-[17px] h-[22px] w-[12px] rounded-r-[7px] border border-zinc-700 bg-[linear-gradient(90deg,#27272a,#52525b)]" style={{ transform: 'rotateY(58deg) translateZ(5px)', transformOrigin: 'left center' }} />
+                  <div className="absolute left-[24px] top-[16px] h-[24px] w-[24px] rounded-full border border-zinc-800 bg-[radial-gradient(circle_at_35%_35%,#f4f4f5_0,#71717a_18%,#27272a_44%,#09090b_72%)] shadow-[inset_0_0_0_3px_rgba(255,255,255,0.08)]" style={{ transform: 'translateZ(18px)' }} />
+                  <div className="absolute left-[31px] top-[23px] h-[10px] w-[10px] rounded-full bg-[radial-gradient(circle_at_35%_35%,#d4d4d8,#18181b_72%)]" style={{ transform: 'translateZ(24px)' }} />
+                  <div className="absolute left-[12px] top-[5px] h-[12px] w-[25px] rounded-t-[8px] border border-zinc-700 bg-[linear-gradient(180deg,#52525b,#18181b)]" style={{ transform: 'translateZ(7px) rotateX(-9deg)' }} />
+                  <div className="absolute left-[7px] top-[14px] h-6 w-[9px] rounded-l-[6px] border border-zinc-700 bg-[linear-gradient(90deg,#09090b,#3f3f46)]" style={{ transform: 'rotateY(-62deg) translateZ(5px)', transformOrigin: 'right center' }} />
+                  <div className="absolute left-[46px] top-[9px] h-4 w-5 rounded-[5px] border border-zinc-700 bg-[linear-gradient(135deg,#52525b,#18181b)]" style={{ transform: 'translateZ(4px) rotateY(20deg)' }} />
+                </div>
+              </div>
+            </div>
+            <div className="pointer-events-none absolute bottom-1 left-1/2 -translate-x-1/2 rounded-full bg-white/80 px-2 py-0.5 text-[10px] font-black text-zinc-600">
+              ±90° / -30°~60°
             </div>
           </div>
           <div className="absolute bottom-3 rounded-full bg-white/75 px-3 py-1 text-[11px] font-black text-zinc-500 backdrop-blur">
-            拖动球面，相机停在哪就按哪个角度生成
+            图片固定，拖动外层 3D 球体改变摄像机位置
           </div>
         </div>
 
