@@ -35,6 +35,10 @@ export default defineConfig(({ mode }) => {
             target: backendApiBaseUrl,
             changeOrigin: true
           },
+          '/api/external': {
+            target: backendApiBaseUrl,
+            changeOrigin: true
+          },
           '/api/auth': {
             target: backendApiBaseUrl,
             changeOrigin: true

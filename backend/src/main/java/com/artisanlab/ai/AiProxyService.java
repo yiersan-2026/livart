@@ -649,7 +649,8 @@ public class AiProxyService {
         if ("image-remover".equals(normalizedValue)
                 || "background-removal".equals(normalizedValue)
                 || "layer-split-subject".equals(normalizedValue)
-                || "layer-split-background".equals(normalizedValue)) {
+                || "layer-split-background".equals(normalizedValue)
+                || "view-change".equals(normalizedValue)) {
             return normalizedValue;
         }
         return fallbackMode;
@@ -1339,6 +1340,16 @@ public class AiProxyService {
                     - 不要改变主体身份、五官、表情、动作、镜头角度、画幅比例，不要新增文字、logo、水印、阴影杂物或新背景。
                     - 使用中文输出一段可直接用于图片编辑接口的完整提示词。
                     - 必须在提示词末尾加入完整负面约束：%s""".formatted(NEGATIVE_PROMPT_TEXT);
+        }
+
+        if ("view-change".equals(mode)) {
+            return """
+                    %s
+                    - 当前任务是多角度/改视角图片编辑，不是重新生成一张无关图片。
+                    - 必须保留原图主体身份、结构比例、材质、颜色、服装/外观、核心特征、背景风格和画幅比例。
+                    - 根据用户给出的“主体/摄像头模式、旋转、倾斜、缩放”生成新的拍摄视角：主体模式偏向主体自身转向，摄像头模式偏向镜头绕主体移动。
+                    - 允许为了新视角合理补全被遮挡侧面和透视细节，但不要改变主体类别、身份、品牌、服装、表情、材质和色彩。
+                    - 不要添加白边、相框、说明文字、坐标轴、3D 控制器或无关新物体。""".formatted(sharedRules);
         }
 
         return """

@@ -8,7 +8,8 @@ import {
   MessageSquarePlus, Pencil,
   Copy, Layers, Scissors, Check, X,
   Palette, Maximize2, Wand2,
-  Download, Send, AlignLeft, AlignCenter, AlignRight, SlidersHorizontal
+  Download, Send, AlignLeft, AlignCenter, AlignRight, SlidersHorizontal,
+  Box, Camera, RefreshCw, Rotate3D
 } from 'lucide-react';
 import { getImageJobQueueMessage, type ImageGenerationResult, type ImageJobStatus, waitForImageJob } from '../services/gemini';
 import {
@@ -79,6 +80,20 @@ type ResizeDirection = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
 type MaskPoint = { x: number; y: number };
 type ImageMaskMode = 'local-redraw' | 'remover';
 type LayerSplitRole = 'subject' | 'background';
+type MultiAngleMode = 'subject' | 'camera';
+type MultiAngleState = {
+  itemId: string;
+  mode: MultiAngleMode;
+  rotation: number;
+  tilt: number;
+  zoom: number;
+};
+type MultiAngleDragState = {
+  startX: number;
+  startY: number;
+  startRotation: number;
+  startTilt: number;
+};
 type CropRect = { x: number; y: number; width: number; height: number };
 type CropDragState = {
   mode: 'move' | ResizeDirection;
@@ -105,6 +120,18 @@ const REMOVER_PROMPT = '把圈起来的地方删除掉。';
 const BACKGROUND_REMOVAL_PROMPT = '先识别图片中的主要主体：画面最主要的人物、商品、动物、车辆或成组前景对象；主体包含其穿戴、手持、贴附和与主体直接组成整体的部分。只保留主体，把主体以外的一切背景和无关物体替换为纯白色背景（#FFFFFF），不要透明背景，不要浅灰、米白或渐变。不要改变主体 RGB 像素，不要重绘、修复、补全、美化、移动或缩放主体；严格保留原图中已经可见的主体像素、裁切范围、构图、脸、表情、姿态、服装、颜色、纹理、发丝和边缘细节；原图里被裁切到画面外的身体、头发、衣服不要补出来。输出白底图片。';
 const LAYER_SPLIT_SUBJECT_PROMPT = '图层拆分：请把这张图拆出“主体层”。先识别画面主要前景主体，主体包含其穿戴、手持、贴附和直接组成整体的部分；输出同画幅主体图层，主体以外区域必须是透明 alpha，不要生成新背景，不要改变主体身份、结构、比例、颜色、材质、边缘、光影和原有裁切。';
 const LAYER_SPLIT_BACKGROUND_PROMPT = '图层拆分：请把这张图拆出“背景层”。先识别画面主要前景主体，然后移除主体及其接触阴影、遮挡残影和边缘碎片；用周围背景的纹理、透视、光影、反射、噪点和景深自然补全，保持原图画幅、镜头视角和背景风格不变，不要新增主体或新场景。';
+const ENABLE_LAYER_SPLIT_TOOL = false;
+const DEFAULT_MULTI_ANGLE_VALUES = {
+  mode: 'subject' as MultiAngleMode,
+  rotation: 30,
+  tilt: 0,
+  zoom: 1
+};
+const MULTI_ANGLE_ZOOM_OPTIONS = [
+  { value: 0, label: '远景', scale: 0.86 },
+  { value: 1, label: '标准', scale: 1 },
+  { value: 2, label: '特写', scale: 1.16 }
+];
 
 const getCanvasDimension = (value: number) => Math.max(1, Math.round(value));
 
@@ -410,6 +437,35 @@ const getLayerSplitLabel = (role: LayerSplitRole) => (
 const getLayerSplitLoadingLabel = (role: LayerSplitRole) => (
   role === 'subject' ? 'AI 提取主体层中...' : 'AI 生成背景层中...'
 );
+
+const getMultiAngleZoomOption = (value: number) => (
+  MULTI_ANGLE_ZOOM_OPTIONS.find(option => option.value === value) || MULTI_ANGLE_ZOOM_OPTIONS[1]
+);
+
+const getMultiAngleModeLabel = (mode: MultiAngleMode) => (
+  mode === 'subject' ? '主体旋转' : '摄像头移动'
+);
+
+const getMultiAngleSummary = (state: MultiAngleState) => {
+  const zoomLabel = getMultiAngleZoomOption(state.zoom).label;
+  return `${getMultiAngleModeLabel(state.mode)} ${state.rotation}°，倾斜 ${state.tilt}°，${zoomLabel}`;
+};
+
+const buildMultiAnglePrompt = (item: CanvasItem, state: MultiAngleState) => {
+  const zoomLabel = getMultiAngleZoomOption(state.zoom).label;
+  return [
+    '多角度改视角：',
+    `目标图片：${getCanvasItemDisplayTitle(item)}`,
+    `模式：${getMultiAngleModeLabel(state.mode)}`,
+    `水平旋转：${state.rotation} 度`,
+    `垂直倾斜：${state.tilt} 度`,
+    `镜头缩放：${zoomLabel}`,
+    state.mode === 'subject'
+      ? '请理解为主体自身相对镜头转向，生成同一主体的新角度。'
+      : '请理解为摄像机围绕主体移动，生成同一主体的新拍摄机位。',
+    '保持原图主体身份、结构比例、材质、颜色、服装/外观、背景风格、光影和画幅比例一致；只改变视角和透视，不要添加白边、相框、说明文字或无关新物体。'
+  ].join('\n');
+};
 
 const buildLayerSplitDraftSteps = (): AgentPlanStep[] => [
   {
@@ -924,6 +980,8 @@ const Canvas: React.FC<CanvasProps> = ({
   const [localRedrawItemId, setLocalRedrawItemId] = useState<string | null>(null);
   const [localRemoverItemId, setLocalRemoverItemId] = useState<string | null>(null);
   const [quickEditItemId, setQuickEditItemId] = useState<string | null>(null);
+  const [multiAngleState, setMultiAngleState] = useState<MultiAngleState | null>(null);
+  const [multiAngleDragState, setMultiAngleDragState] = useState<MultiAngleDragState | null>(null);
   const [editingTextItemId, setEditingTextItemId] = useState<string | null>(null);
   const [cropItemId, setCropItemId] = useState<string | null>(null);
   const [cropRect, setCropRect] = useState<CropRect | null>(null);
@@ -951,6 +1009,7 @@ const Canvas: React.FC<CanvasProps> = ({
   const selectedItemIsRemover = selectedItem?.type === 'image' && selectedItem.id === localRemoverItemId;
   const selectedItemCanQuickEdit = selectedItem?.type === 'image' && selectedItem.status === 'completed' && !!selectedItem.content;
   const selectedItemIsQuickEditing = !!selectedItemCanQuickEdit && selectedItem?.id === quickEditItemId;
+  const selectedItemIsMultiAngleEditing = selectedItem?.type === 'image' && selectedItem.id === multiAngleState?.itemId;
   const selectedItemIsCrop = selectedItem?.type === 'image' && selectedItem.id === cropItemId;
   const selectedItemHasImageMaskTool = selectedItemIsLocalRedraw || selectedItemIsRemover;
   const selectedImageMaskMode: ImageMaskMode | null = selectedItemIsRemover
@@ -1227,9 +1286,17 @@ const Canvas: React.FC<CanvasProps> = ({
   }, [quickEditItemId, selectedIds]);
 
   useEffect(() => {
+    if (!multiAngleState || selectedIds.includes(multiAngleState.itemId)) return;
+    setMultiAngleState(null);
+    setMultiAngleDragState(null);
+  }, [multiAngleState, selectedIds]);
+
+  useEffect(() => {
     if (canvasTool !== 'text') return;
 
     setQuickEditItemId(null);
+    setMultiAngleState(null);
+    setMultiAngleDragState(null);
     setLocalRedrawItemId(null);
     setLocalRemoverItemId(null);
     setCropItemId(null);
@@ -1262,6 +1329,39 @@ const Canvas: React.FC<CanvasProps> = ({
       editor.setSelectionRange(textLength, textLength);
     });
   }, [selectedTextIsEditing, selectedItem?.id]);
+
+  useEffect(() => {
+    if (!multiAngleDragState) return;
+
+    const handleMultiAngleDragMove = (event: MouseEvent) => {
+      setMultiAngleState(previous => {
+        if (!previous) return previous;
+        const nextRotation = clampValue(
+          Math.round(multiAngleDragState.startRotation + (event.clientX - multiAngleDragState.startX) * 0.8),
+          -180,
+          180
+        );
+        const nextTilt = clampValue(
+          Math.round(multiAngleDragState.startTilt - (event.clientY - multiAngleDragState.startY) * 0.45),
+          -45,
+          45
+        );
+        return {
+          ...previous,
+          rotation: nextRotation,
+          tilt: nextTilt
+        };
+      });
+    };
+
+    const handleMultiAngleDragEnd = () => setMultiAngleDragState(null);
+    window.addEventListener('mousemove', handleMultiAngleDragMove);
+    window.addEventListener('mouseup', handleMultiAngleDragEnd);
+    return () => {
+      window.removeEventListener('mousemove', handleMultiAngleDragMove);
+      window.removeEventListener('mouseup', handleMultiAngleDragEnd);
+    };
+  }, [multiAngleDragState]);
 
   useEffect(() => {
     if (inlineEditingIds.size === 0) return;
@@ -1428,6 +1528,8 @@ const Canvas: React.FC<CanvasProps> = ({
     onCanvasToolChange('select');
     setLocalRedrawItemId(null);
     setLocalRemoverItemId(null);
+    setMultiAngleState(null);
+    setMultiAngleDragState(null);
     setCropItemId(null);
     setCropRect(null);
     setCropDragState(null);
@@ -1522,6 +1624,8 @@ const Canvas: React.FC<CanvasProps> = ({
 
   const toggleCropMode = (item: CanvasItem) => {
     setQuickEditItemId(null);
+    setMultiAngleState(null);
+    setMultiAngleDragState(null);
     if (cropItemId === item.id) {
       resetImageToolModes();
       return;
@@ -1538,6 +1642,8 @@ const Canvas: React.FC<CanvasProps> = ({
 
   const toggleLocalRedrawMode = (item: CanvasItem) => {
     setQuickEditItemId(null);
+    setMultiAngleState(null);
+    setMultiAngleDragState(null);
     onCanvasToolChange('select');
     setCropItemId(null);
     setCropRect(null);
@@ -1551,6 +1657,8 @@ const Canvas: React.FC<CanvasProps> = ({
 
   const toggleRemoverMode = (item: CanvasItem) => {
     setQuickEditItemId(null);
+    setMultiAngleState(null);
+    setMultiAngleDragState(null);
     onCanvasToolChange('select');
     setCropItemId(null);
     setCropRect(null);
@@ -1582,6 +1690,32 @@ const Canvas: React.FC<CanvasProps> = ({
       item,
       prompt: BACKGROUND_REMOVAL_PROMPT,
       mode: 'background-removal'
+    });
+  };
+
+  const toggleMultiAnglePanel = (item: CanvasItem) => {
+    if (item.type !== 'image' || item.status !== 'completed' || !item.content) return;
+
+    const isOpening = multiAngleState?.itemId !== item.id;
+    resetImageToolModes();
+    setQuickEditItemId(null);
+    clearInlineEditError(item.id);
+    if (!isOpening) return;
+
+    setMultiAngleState({
+      itemId: item.id,
+      ...DEFAULT_MULTI_ANGLE_VALUES
+    });
+  };
+
+  const handleApplyMultiAngle = (item: CanvasItem) => {
+    if (!multiAngleState || multiAngleState.itemId !== item.id) return;
+    const prompt = buildMultiAnglePrompt(item, multiAngleState);
+    void handleInlineImageRedraw(undefined, {
+      item,
+      prompt,
+      mode: 'view-change',
+      userMessage: `多角度 @${item.id}：${getMultiAngleSummary(multiAngleState)}`
     });
   };
 
@@ -2400,13 +2534,14 @@ const Canvas: React.FC<CanvasProps> = ({
 
   const handleInlineImageRedraw = async (
     event?: React.FormEvent,
-    options?: { item?: CanvasItem; prompt?: string; mode?: 'background-removal' }
+    options?: { item?: CanvasItem; prompt?: string; mode?: 'background-removal' | 'view-change'; userMessage?: string }
   ) => {
     event?.preventDefault();
     const targetCandidate = options?.item || selectedItem;
     const rawPrompt = (options?.prompt ?? inlineEditPrompt).trim();
     const isBackgroundRemovalMode = options?.mode === 'background-removal';
-    const isRemoverMode = !isBackgroundRemovalMode && targetCandidate?.type === 'image' && localRemoverItemId === targetCandidate.id;
+    const isViewChangeMode = options?.mode === 'view-change';
+    const isRemoverMode = !isBackgroundRemovalMode && !isViewChangeMode && targetCandidate?.type === 'image' && localRemoverItemId === targetCandidate.id;
     if ((!rawPrompt && !isRemoverMode && !isBackgroundRemovalMode) || !targetCandidate || targetCandidate.type !== 'image' || inlineEditingIdsRef.current.has(targetCandidate.id)) return;
 
     const targetItem = targetCandidate;
@@ -2417,16 +2552,18 @@ const Canvas: React.FC<CanvasProps> = ({
       : isBackgroundRemovalMode
         ? rawPrompt || BACKGROUND_REMOVAL_PROMPT
       : rawPrompt;
-    const userMessage = isBackgroundRemovalMode
+    const userMessage = options?.userMessage || (isBackgroundRemovalMode
       ? `去背景 @${targetItem.id}`
+      : isViewChangeMode
+      ? `多角度 @${targetItem.id}`
       : isRemoverMode
       ? rawPrompt
         ? `删除 @${targetItem.id} 圈选区域：${rawPrompt}`
         : `删除 @${targetItem.id} 圈选区域`
-      : `编辑 @${targetItem.id}：${rawPrompt}`;
-    const localMaskMode: ImageMaskMode | null = !isBackgroundRemovalMode && localRemoverItemId === targetItem.id
+      : `编辑 @${targetItem.id}：${rawPrompt}`);
+    const localMaskMode: ImageMaskMode | null = !isBackgroundRemovalMode && !isViewChangeMode && localRemoverItemId === targetItem.id
       ? 'remover'
-      : !isBackgroundRemovalMode && localRedrawItemId === targetItem.id ? 'local-redraw' : null;
+      : !isBackgroundRemovalMode && !isViewChangeMode && localRedrawItemId === targetItem.id ? 'local-redraw' : null;
     const useLocalMask = !!localMaskMode;
     const startedAt = Date.now();
     let imageTaskStartedAt: number | null = null;
@@ -2435,8 +2572,10 @@ const Canvas: React.FC<CanvasProps> = ({
     const agentRunClientId = createAgentRunClientId();
     const inlineAgentMode: AgentPlan['mode'] = isBackgroundRemovalMode
       ? 'background-removal'
-      : isRemoverMode ? 'remover' : 'edit';
-    const inlineAgentAspectRatio = isRemoverMode || isBackgroundRemovalMode ? 'auto' : inlineEditAspectRatio;
+      : isViewChangeMode
+        ? 'view-change'
+        : isRemoverMode ? 'remover' : 'edit';
+    const inlineAgentAspectRatio = isRemoverMode || isBackgroundRemovalMode || isViewChangeMode ? 'auto' : inlineEditAspectRatio;
     let inlineAgentPlan = buildAgentDraftPlan({
       taskType: 'image-edit',
       mode: inlineAgentMode,
@@ -2526,7 +2665,7 @@ const Canvas: React.FC<CanvasProps> = ({
         prompt: agentPrompt,
         aspectRatio: inlineAgentAspectRatio,
         contextImageId: targetItem.id,
-        requestedEditMode: localMaskMode || undefined,
+        requestedEditMode: localMaskMode || (isViewChangeMode ? 'view-change' : undefined),
         images: persistentAgentImages,
         maskDataUrl: maskDataUrl || undefined,
         clientRunId: agentRunClientId
@@ -2558,7 +2697,7 @@ const Canvas: React.FC<CanvasProps> = ({
       const nextZIndex = Math.max(0, ...items.map(item => item.zIndex || 0)) + 1;
       const newId = Math.random().toString(36).substr(2, 9);
       const resultMaxLongSide = Math.max(editBaseItem.width, editBaseItem.height);
-      const shouldPreserveSourceFrame = isRemoverMode || isBackgroundRemovalMode || inlineEditAspectRatio === 'auto';
+      const shouldPreserveSourceFrame = isRemoverMode || isBackgroundRemovalMode || isViewChangeMode || inlineEditAspectRatio === 'auto';
       const resultFrame = shouldPreserveSourceFrame
         ? fitDimensionsToLongSide(editBaseItem.width, editBaseItem.height, resultMaxLongSide)
         : getAspectRatioFrame(
@@ -2577,7 +2716,7 @@ const Canvas: React.FC<CanvasProps> = ({
         width: resultFrame.width,
         height: resultFrame.height,
         status: 'loading',
-        label: isBackgroundRemovalMode ? 'AI 去背景中...' : isRemoverMode ? 'AI 删除中...' : 'AI 重绘中...',
+        label: isViewChangeMode ? 'AI 改视角中...' : isBackgroundRemovalMode ? 'AI 去背景中...' : isRemoverMode ? 'AI 删除中...' : 'AI 重绘中...',
         zIndex: nextZIndex,
         parentId: editBaseItem.id,
         prompt: agentRun.requestPrompt || agentPrompt,
@@ -2604,7 +2743,7 @@ const Canvas: React.FC<CanvasProps> = ({
 
           if (jobStatus.status === 'running' && queuedInlineJob) {
             syncInlineAgentPlanMessage(inlineAgentPlan, '等待生成：图片编辑已开始执行。');
-            onItemUpdate(newId, { label: isBackgroundRemovalMode ? 'AI 去背景中...' : isRemoverMode ? 'AI 删除中...' : 'AI 重绘中...' });
+            onItemUpdate(newId, { label: isViewChangeMode ? 'AI 改视角中...' : isBackgroundRemovalMode ? 'AI 去背景中...' : isRemoverMode ? 'AI 删除中...' : 'AI 重绘中...' });
           }
         }
       });
@@ -2627,7 +2766,7 @@ const Canvas: React.FC<CanvasProps> = ({
       );
       const resultTitle = agentRun.displayTitle || agentRun.plan.displayTitle || generateImageTitleFromPrompt(
         rawPrompt || prompt || optimizedPrompt || agentRun.requestPrompt || agentPrompt,
-        isBackgroundRemovalMode ? '去背景' : isRemoverMode ? '删除物体' : '编辑结果'
+        isViewChangeMode ? '多角度视图' : isBackgroundRemovalMode ? '去背景' : isRemoverMode ? '删除物体' : '编辑结果'
       );
       const resultDescription = buildImageResultDescription(resultTitle, 'edited');
       const persistedResultItem = await ensureCanvasImageAsset({
@@ -2666,6 +2805,8 @@ const Canvas: React.FC<CanvasProps> = ({
       const executionTitle = ensureImageNoun(resultTitle);
       const fallbackExecutionMessage = isBackgroundRemovalMode
         ? `我将为您去除这张${executionTitle}的背景。`
+        : isViewChangeMode
+          ? `我将为您生成这张${executionTitle}的新视角。`
         : isRemoverMode
           ? `我将为您删除圈选区域，并生成新的${executionTitle}。`
           : `我将为您编辑这张${executionTitle}。`;
@@ -2676,6 +2817,10 @@ const Canvas: React.FC<CanvasProps> = ({
       );
       setInlineEditPromptForItem(targetItem.id, '');
       setQuickEditItemId(null);
+      if (isViewChangeMode) {
+        setMultiAngleState(null);
+        setMultiAngleDragState(null);
+      }
       if (isBackgroundRemovalMode) {
         setLocalRedrawItemId(null);
         setLocalRemoverItemId(null);
@@ -2721,7 +2866,7 @@ const Canvas: React.FC<CanvasProps> = ({
         setActiveTool('brush');
       }
       setInlineEditErrors(prev => ({ ...prev, [targetItem.id]: message }));
-      onChatMessage(`出错了，没能完成单图编辑：${message}`, 'assistant', {
+      onChatMessage(`出错了，没能完成${isViewChangeMode ? '多角度' : '单图编辑'}：${message}`, 'assistant', {
         durationMs: Date.now() - startedAt
       });
     } finally {
@@ -2866,6 +3011,159 @@ const Canvas: React.FC<CanvasProps> = ({
               aria-label={`调整裁剪框 ${direction}`}
             />
           ))}
+        </div>
+      </div>
+    );
+  };
+
+  const renderMultiAnglePanel = () => {
+    if (!selectedItem || selectedItem.type !== 'image' || !multiAngleState || multiAngleState.itemId !== selectedItem.id) return null;
+
+    const zoomOption = getMultiAngleZoomOption(multiAngleState.zoom);
+    const previewSrc = getCanvasImageSrc(selectedItem, zoom) || selectedItem.content;
+    const previewAspect = clampValue(selectedItem.width / Math.max(1, selectedItem.height), 0.35, 2.8);
+    const previewCardSize = previewAspect >= 1
+      ? { width: 148, height: Math.max(72, 148 / previewAspect) }
+      : { width: Math.max(72, 148 * previewAspect), height: 148 };
+    const updateMultiAngleState = (updates: Partial<MultiAngleState>) => {
+      setMultiAngleState(previous => previous && previous.itemId === selectedItem.id
+        ? { ...previous, ...updates }
+        : previous
+      );
+    };
+    const sliderClass = 'h-1.5 w-full accent-zinc-900';
+
+    return (
+      <div
+        className="w-[360px] overflow-hidden rounded-[24px] border border-zinc-200 bg-[#f7f5ef] p-3 text-zinc-900 shadow-[0_22px_70px_-42px_rgba(0,0,0,0.58)]"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="mb-3 flex items-center justify-between">
+          <div className="text-sm font-black tracking-tight">多角度</div>
+          <button
+            type="button"
+            onClick={() => updateMultiAngleState(DEFAULT_MULTI_ANGLE_VALUES)}
+            className="flex h-8 w-8 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-white hover:text-zinc-950"
+            title="重置角度"
+          >
+            <RefreshCw size={15} />
+          </button>
+        </div>
+
+        <div className="mb-3 grid grid-cols-2 rounded-full bg-white/70 p-1 text-xs font-black">
+          {(['subject', 'camera'] as MultiAngleMode[]).map(mode => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => updateMultiAngleState({ mode })}
+              className={`flex h-9 items-center justify-center gap-1.5 rounded-full transition-all ${
+                multiAngleState.mode === mode ? 'bg-zinc-950 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-950'
+              }`}
+            >
+              {mode === 'subject' ? <Box size={14} /> : <Camera size={14} />}
+              {mode === 'subject' ? '主体' : '摄像头'}
+            </button>
+          ))}
+        </div>
+
+        <div
+          className="relative mb-4 flex h-48 cursor-grab items-center justify-center overflow-hidden rounded-[22px] bg-[#ebe7dc] active:cursor-grabbing"
+          onMouseDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            setMultiAngleDragState({
+              startX: event.clientX,
+              startY: event.clientY,
+              startRotation: multiAngleState.rotation,
+              startTilt: multiAngleState.tilt
+            });
+          }}
+          title="拖动预览调整旋转和倾斜"
+        >
+          <div className="absolute inset-0 opacity-70 [background-image:radial-gradient(circle_at_50%_28%,rgba(255,255,255,0.9),rgba(255,255,255,0)_34%),linear-gradient(180deg,rgba(255,255,255,0.48),rgba(214,208,193,0.55))]" />
+          <div className="absolute bottom-9 h-10 w-44 rounded-[50%] bg-black/10 blur-md" />
+          <div
+            className="relative rounded-[18px] border border-white/75 bg-white p-1.5 shadow-[0_18px_42px_-24px_rgba(0,0,0,0.6)] transition-transform duration-150"
+            style={{
+              width: previewCardSize.width,
+              height: previewCardSize.height,
+              transform: `perspective(820px) rotateX(${-multiAngleState.tilt}deg) rotateY(${multiAngleState.rotation}deg) scale(${zoomOption.scale})`,
+              transformStyle: 'preserve-3d'
+            }}
+          >
+            {previewSrc && (
+              <img src={previewSrc} className="h-full w-full rounded-[12px] object-contain pointer-events-none" />
+            )}
+            <div className="pointer-events-none absolute -right-2 top-3 h-[calc(100%-24px)] w-2 rounded-r-md bg-zinc-300/70" style={{ transform: 'translateZ(-10px)' }} />
+          </div>
+          <div className="absolute bottom-3 rounded-full bg-white/75 px-3 py-1 text-[11px] font-black text-zinc-500 backdrop-blur">
+            拖动预览可调整角度
+          </div>
+        </div>
+
+        <div className="space-y-3 rounded-[18px] bg-white/70 p-3">
+          <label className="block">
+            <div className="mb-1.5 flex items-center justify-between text-xs font-black">
+              <span>旋转</span>
+              <span>{multiAngleState.rotation}</span>
+            </div>
+            <input
+              type="range"
+              min={-180}
+              max={180}
+              value={multiAngleState.rotation}
+              onChange={(event) => updateMultiAngleState({ rotation: Number(event.target.value) })}
+              className={sliderClass}
+            />
+          </label>
+          <label className="block">
+            <div className="mb-1.5 flex items-center justify-between text-xs font-black">
+              <span>倾斜</span>
+              <span>{multiAngleState.tilt}</span>
+            </div>
+            <input
+              type="range"
+              min={-45}
+              max={45}
+              value={multiAngleState.tilt}
+              onChange={(event) => updateMultiAngleState({ tilt: Number(event.target.value) })}
+              className={sliderClass}
+            />
+          </label>
+          <label className="block">
+            <div className="mb-1.5 flex items-center justify-between text-xs font-black">
+              <span>缩放</span>
+              <span>{zoomOption.label}</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={2}
+              step={1}
+              value={multiAngleState.zoom}
+              onChange={(event) => updateMultiAngleState({ zoom: Number(event.target.value) })}
+              className={sliderClass}
+            />
+          </label>
+        </div>
+
+        <div className="mt-3 grid grid-cols-[1fr_1.4fr] gap-2">
+          <button
+            type="button"
+            onClick={() => setMultiAngleState(null)}
+            className="h-10 rounded-full bg-white text-sm font-black text-zinc-600 transition-colors hover:bg-zinc-100"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            onClick={() => handleApplyMultiAngle(selectedItem)}
+            disabled={selectedItemIsInlineEditing}
+            className="flex h-10 items-center justify-center gap-2 rounded-full bg-zinc-950 text-sm font-black text-white transition-all hover:bg-zinc-800 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-35"
+          >
+            {selectedItemIsInlineEditing ? <Loader2 size={15} className="animate-spin" /> : <Rotate3D size={15} />}
+            立即使用 #1
+          </button>
         </div>
       </div>
     );
@@ -3420,13 +3718,28 @@ const Canvas: React.FC<CanvasProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => handleImageLayerSplit(selectedItem)}
+                  onClick={() => toggleMultiAnglePanel(selectedItem)}
                   disabled={selectedItemIsInlineEditing || selectedItem.status === 'loading'}
-                  className="flex h-11 shrink-0 items-center gap-1.5 border-r border-zinc-100 px-3 text-xs font-bold text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 disabled:opacity-35"
-                  title="拆分为主体层和背景层两个独立图片节点"
+                  className={`flex h-11 shrink-0 items-center gap-1.5 border-r border-zinc-100 px-3 text-xs font-bold transition-colors ${
+                    selectedItemIsMultiAngleEditing
+                      ? 'bg-zinc-100 text-zinc-950'
+                      : 'text-zinc-700 hover:bg-zinc-50 hover:text-zinc-950'
+                  } disabled:opacity-35`}
+                  title="打开多角度面板，按旋转、倾斜和缩放生成新视角"
                 >
-                  <Copy size={15} />分层
+                  <Rotate3D size={15} />多角度
                 </button>
+                {ENABLE_LAYER_SPLIT_TOOL && (
+                  <button
+                    type="button"
+                    onClick={() => handleImageLayerSplit(selectedItem)}
+                    disabled={selectedItemIsInlineEditing || selectedItem.status === 'loading'}
+                    className="flex h-11 shrink-0 items-center gap-1.5 border-r border-zinc-100 px-3 text-xs font-bold text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 disabled:opacity-35"
+                    title="拆分为主体层和背景层两个独立图片节点"
+                  >
+                    <Copy size={15} />分层
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => applyQuickEditPrompt(selectedItem, '修改指定物体颜色，保持材质、纹理、光影和其他内容不变。请在这里补充对象和颜色：')}
@@ -3519,6 +3832,7 @@ const Canvas: React.FC<CanvasProps> = ({
                 {downloadingImageId === selectedItem.id ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
               </button>
             </div>
+            {renderMultiAnglePanel()}
             {selectedInlineEditError && (
               <div className="max-w-[520px] rounded-xl bg-red-50 border border-red-100 px-3 py-2 text-[11px] font-bold text-red-500 shadow-lg">
                 {selectedInlineEditError}

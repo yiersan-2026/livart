@@ -39,6 +39,10 @@ mybatis-plus:
 artisan:
   canvas:
     default-canvas-id: ${CANVAS_ID:00000000-0000-0000-0000-000000000001}
+  external-images:
+    endpoint: ${LIVART_EXTERNAL_IMAGES_ENDPOINT:https://gogotool.top/api/v1/external/images}
+    api-key: ${LIVART_EXTERNAL_IMAGES_API_KEY:}
+    timeout-seconds: ${LIVART_EXTERNAL_IMAGES_TIMEOUT_SECONDS:45}
   ai:
     default-base-url: ${LIVART_DEFAULT_API_BASE_URL:}
     default-api-key: ${LIVART_DEFAULT_API_KEY:}

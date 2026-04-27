@@ -325,11 +325,12 @@ public class AgentPlannerService {
                 - 删除物体
                 - 去背景 / 抠图
                 - 图层拆分 / 提取主体层 / 生成背景层
+                - 多角度 / 改视角 / 主体旋转 / 摄像头视角变化
                 - 画布、项目、导出、下载、画幅比例、参考图、提示词优化等 livart 功能说明
 
                 如果用户的问题不属于以上范围，比如天气、新闻、通用百科、编程、翻译、写作、数学题、情感建议等，必须拒答。
                 只输出严格 JSON，不要 Markdown，不要解释，不要额外字段：
-                {"allowed":true或false,"responseMode":"execute 或 answer 或 reject","rejectionMessage":"如果拒答，这里给出简短中文引导；否则为空字符串","answerMessage":"如果是 livart 功能问答，这里给出简短中文回答；否则为空字符串","taskType":"text-to-image 或 image-edit","mode":"generate 或 edit 或 background-removal 或 remover 或 layer-subject 或 layer-background","count":1到4的整数,"baseImageId":"候选图片 id，没有就空字符串","referenceImageIds":["其他候选图片 id"],"displayTitle":"给这次图片任务生成的简短中文标题","displayMessage":"展示给用户的一句自然回复","thinkingSteps":["步骤1","步骤2","步骤3"]}
+                {"allowed":true或false,"responseMode":"execute 或 answer 或 reject","rejectionMessage":"如果拒答，这里给出简短中文引导；否则为空字符串","answerMessage":"如果是 livart 功能问答，这里给出简短中文回答；否则为空字符串","taskType":"text-to-image 或 image-edit","mode":"generate 或 edit 或 background-removal 或 remover 或 layer-subject 或 layer-background 或 view-change","count":1到4的整数,"baseImageId":"候选图片 id，没有就空字符串","referenceImageIds":["其他候选图片 id"],"displayTitle":"给这次图片任务生成的简短中文标题","displayMessage":"展示给用户的一句自然回复","thinkingSteps":["步骤1","步骤2","步骤3"]}
 
                 规则：
                 - 如果请求超出 livart 范围，allowed=false，responseMode=reject，rejectionMessage 必填，其余字段留空或默认。
@@ -341,6 +342,7 @@ public class AgentPlannerService {
                 - 如果有候选图片，taskType 优先是 image-edit。
                 - mode=background-removal 表示去背景/抠图并保留主体；mode=remover 表示删除涂抹区域内的物体；mode=edit 表示普通单图编辑。
                 - mode=layer-subject 表示从原图提取主体图层；mode=layer-background 表示从原图生成移除主体后的背景层。
+                - mode=view-change 表示基于原图生成新的拍摄角度、主体旋转角度或摄像头视角变化。
                 - baseImageId 必须是最终要被编辑、承载变化或放置物体的那张图。
                 - referenceImageIds 只放素材参考图，不要包含 baseImageId。
                 - “把图1的拖鞋穿到图2的人物脚上”中，图2是 baseImageId，图1进入 referenceImageIds。
@@ -365,8 +367,8 @@ public class AgentPlannerService {
                 {"responseMode":"execute 或 answer 或 reject","answerMessage":"当 responseMode=answer 时填写一段简短中文回答，否则为空字符串","rejectionMessage":"当 responseMode=reject 时填写一段简短中文拒答引导，否则为空字符串","thinkingSteps":["步骤1","步骤2"]}
 
                 规则：
-                - responseMode=execute：用户明确要生成图片、编辑图片、局部重绘、删除物体、去背景、抠图、图层拆分、提取主体层、生成背景层、改图、换背景、换物体，或者输入本身就是明显的画面描述 / 生图提示词。
-                - responseMode=answer：用户是在询问 livart 的功能、用法、导出、下载、画幅、参考图、画布、项目、局部重绘、删除物体、去背景、图层拆分，或询问你是谁/你叫什么/你好等站内助手身份问题。
+                - responseMode=execute：用户明确要生成图片、编辑图片、局部重绘、删除物体、去背景、抠图、图层拆分、提取主体层、生成背景层、改视角、多角度、主体旋转、摄像头角度变化、改图、换背景、换物体，或者输入本身就是明显的画面描述 / 生图提示词。
+                - responseMode=answer：用户是在询问 livart 的功能、用法、导出、下载、画幅、参考图、画布、项目、局部重绘、删除物体、去背景、图层拆分、多角度，或询问你是谁/你叫什么/你好等站内助手身份问题。
                 - responseMode=reject：用户在闲聊，或提问天气、新闻、编程、翻译、数学、通用百科、情感建议等与 livart 无关的内容。
                 - 如果用户说“你是谁”“你叫什么”“你好”，这属于 answer；回答你是 livart 站内 AI 图像创作助手，可以帮用户生成和编辑图片。
                 - 对于很短但明显像画面描述的输入，比如“小猫在雨夜街头”“赛博朋克少女”，判为 execute。
@@ -466,6 +468,14 @@ public class AgentPlannerService {
             );
         }
 
+        if ("view-change".equals(mode)) {
+            return List.of(
+                    new AiProxyDtos.AgentPlanStep("identify-view-change", "识别视角", "确认原图主体与目标旋转、倾斜和缩放参数。", "analysis"),
+                    new AiProxyDtos.AgentPlanStep("optimize-view-change", "规划视角", "生成保持主体一致的新视角编辑指令。", "prompt"),
+                    new AiProxyDtos.AgentPlanStep("run-view-change", "执行多角度", "调用图片编辑接口输出新角度结果。", "edit")
+            );
+        }
+
         return List.of(
                 new AiProxyDtos.AgentPlanStep("identify-images", "识别主图与参考图", "判断哪张图负责承载修改，哪些图只做参考。", "analysis"),
                 new AiProxyDtos.AgentPlanStep("optimize-edit-prompt", "规划编辑指令", "整理位置关系、参考约束和局部修改要求。", "prompt"),
@@ -498,6 +508,7 @@ public class AgentPlannerService {
             case "remover" -> "局部删除结果";
             case "layer-subject" -> "主体图层";
             case "layer-background" -> "背景图层";
+            case "view-change" -> "多角度视图";
             default -> "text-to-image".equals(taskType) ? "创意图片" : "图片编辑结果";
         } : fallback;
     }
@@ -539,6 +550,9 @@ public class AgentPlannerService {
         }
         if ("layer-background".equals(mode)) {
             return "我将为您拆分出这张%s的背景层。".formatted(title);
+        }
+        if ("view-change".equals(mode)) {
+            return "我将为您生成这张%s的新视角。".formatted(title);
         }
         if ("image-edit".equals(taskType)) {
             return "我将为您编辑这张%s。".formatted(title);
@@ -597,6 +611,9 @@ public class AgentPlannerService {
         }
         if ("layer-background".equals(mode)) {
             return "背景图层";
+        }
+        if ("view-change".equals(mode)) {
+            return "多角度视图";
         }
         if ("image-edit".equals(taskType)) {
             return "图片编辑结果";
@@ -667,6 +684,9 @@ public class AgentPlannerService {
         }
         if ("layer-background".equals(mode)) {
             return "背景图层";
+        }
+        if ("view-change".equals(mode)) {
+            return "多角度视图";
         }
         if ("image-edit".equals(taskType)) {
             if (normalized.contains("鞋")) {
@@ -759,6 +779,9 @@ public class AgentPlannerService {
         if ("layer-background".equals(mode)) {
             return List.of("识别主图主体", "准备生成背景层", "开始拆分图层");
         }
+        if ("view-change".equals(mode)) {
+            return List.of("识别主图视角", "规划角度参数", "准备生成新视角");
+        }
         if (referenceImageIds != null && !referenceImageIds.isEmpty()) {
             return List.of("识别主图和参考图", "整理位置与约束", "准备执行图片编辑");
         }
@@ -793,7 +816,7 @@ public class AgentPlannerService {
             return "generate";
         }
 
-        if ("layer-subject".equals(requestedMode) || "layer-background".equals(requestedMode)) {
+        if ("layer-subject".equals(requestedMode) || "layer-background".equals(requestedMode) || "view-change".equals(requestedMode)) {
             return requestedMode;
         }
 
@@ -803,6 +826,7 @@ public class AgentPlannerService {
             case "remover", "image-remover", "objectremoval", "object-removal" -> "remover";
             case "layersubject", "layer-subject", "subjectlayer", "subject-layer" -> "layer-subject";
             case "layerbackground", "layer-background", "backgroundlayer", "background-layer" -> "layer-background";
+            case "viewchange", "view-change", "multiangle", "multi-angle", "anglechange", "angle-change", "perspectivechange", "perspective-change" -> "view-change";
             case "generate" -> "generate";
             case "edit", "imageedit", "image-edit" -> requestedMode;
             default -> requestedMode;
@@ -820,7 +844,13 @@ public class AgentPlannerService {
         if ("layerbackground".equals(normalized) || "layer-background".equals(normalized) || "backgroundlayer".equals(normalized) || "background-layer".equals(normalized)) {
             return "layer-background";
         }
+        if ("viewchange".equals(normalized) || "view-change".equals(normalized) || "multiangle".equals(normalized) || "multi-angle".equals(normalized) || "anglechange".equals(normalized) || "angle-change".equals(normalized)) {
+            return "view-change";
+        }
         String promptText = prompt == null ? "" : prompt.toLowerCase(Locale.ROOT);
+        if (promptText.contains("多角度") || promptText.contains("改视角") || promptText.contains("新视角") || promptText.contains("旋转角度") || promptText.contains("摄像头角度")) {
+            return "view-change";
+        }
         if (promptText.contains("去背景") || promptText.contains("抠图") || promptText.contains("移除背景") || promptText.contains("纯白背景")) {
             return "background-removal";
         }

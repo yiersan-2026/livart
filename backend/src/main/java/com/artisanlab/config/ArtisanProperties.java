@@ -15,7 +15,8 @@ public record ArtisanProperties(
         @Valid @NotNull Canvas canvas,
         @Valid @NotNull Cors cors,
         @Valid @NotNull Minio minio,
-        @Valid @NotNull Rabbitmq rabbitmq
+        @Valid @NotNull Rabbitmq rabbitmq,
+        @Valid @NotNull ExternalImages externalImages
 ) {
     public record Auth(
             @NotBlank String jwtSecret,
@@ -44,6 +45,13 @@ public record ArtisanProperties(
     public record Rabbitmq(
             @NotBlank String canvasSaveQueue,
             @NotBlank String canvasSaveDeadLetterQueue
+    ) {
+    }
+
+    public record ExternalImages(
+            @NotBlank String endpoint,
+            String apiKey,
+            long timeoutSeconds
     ) {
     }
 }

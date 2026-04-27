@@ -1,6 +1,6 @@
 
 import React, { useRef } from 'react';
-import { MousePointer2, Hand, Image as ImageIcon, Type, ZoomIn, ZoomOut, Maximize, Undo2, Redo2, LayoutGrid } from 'lucide-react';
+import { MousePointer2, Hand, Image as ImageIcon, Type, ZoomIn, ZoomOut, Maximize, Undo2, Redo2, LayoutGrid, DownloadCloud } from 'lucide-react';
 import type { CanvasTool } from '../types';
 
 interface ToolbarProps {
@@ -8,6 +8,7 @@ interface ToolbarProps {
   onZoomChange: (newZoom: number) => void;
   onResetView: () => void;
   onAddImage: (file: File) => void;
+  onOpenExternalImageImport: () => void;
   onAddText: () => void;
   activeTool: CanvasTool;
   onToolChange: (tool: CanvasTool) => void;
@@ -19,7 +20,7 @@ interface ToolbarProps {
   onAutoArrangeImages: () => void;
 }
 
-const Toolbar: React.FC<ToolbarProps> = ({ zoom, onZoomChange, onResetView, onAddImage, onAddText, activeTool, onToolChange, canUndo, canRedo, onUndo, onRedo, canAutoArrangeImages, onAutoArrangeImages }) => {
+const Toolbar: React.FC<ToolbarProps> = ({ zoom, onZoomChange, onResetView, onAddImage, onOpenExternalImageImport, onAddText, activeTool, onToolChange, canUndo, canRedo, onUndo, onRedo, canAutoArrangeImages, onAutoArrangeImages }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleImageClick = () => {
@@ -97,6 +98,15 @@ const Toolbar: React.FC<ToolbarProps> = ({ zoom, onZoomChange, onResetView, onAd
             accept="image/*" 
             onChange={handleFileChange} 
           />
+        </button>
+
+        <button
+          onClick={onOpenExternalImageImport}
+          className={iconButtonClass}
+          aria-label="从社交媒体导入图片"
+        >
+          <DownloadCloud size={18} />
+          {renderTooltip('社媒图片')}
         </button>
 
         <button 

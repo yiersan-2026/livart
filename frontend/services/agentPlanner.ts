@@ -52,7 +52,7 @@ export interface AgentPlanRequest {
   prompt: string;
   aspectRatio?: ImageAspectRatio;
   contextImageId?: string;
-  requestedEditMode?: 'local-redraw' | 'remover' | 'layer-subject' | 'layer-background';
+  requestedEditMode?: 'local-redraw' | 'remover' | 'layer-subject' | 'layer-background' | 'view-change';
   images: CanvasItem[];
 }
 
@@ -307,6 +307,7 @@ export const getAgentPlanModeLabel = (plan: AgentPlan) => {
   if (plan.mode === 'background-removal') return '去背景';
   if (plan.mode === 'remover') return '局部删除';
   if (plan.mode === 'layer-subject' || plan.mode === 'layer-background') return '图层拆分';
+  if (plan.mode === 'view-change') return '多角度';
   if (plan.taskType === 'text-to-image') return '文生图';
   return '单图编辑';
 };
@@ -361,14 +362,16 @@ const getAgentPlanStatusLine = ({
     || stepId === 'identify-base'
     || stepId === 'identify-removal-target'
     || stepId === 'identify-layer-subject'
-    || stepId === 'identify-layer-background') {
+    || stepId === 'identify-layer-background'
+    || stepId === 'identify-view-change') {
     return '正在规划图片任务...';
   }
   if (stepId === 'optimize-prompt'
     || stepId === 'optimize-edit-prompt'
     || stepId === 'optimize-background-removal'
     || stepId === 'optimize-remover'
-    || stepId === 'optimize-layer-split') {
+    || stepId === 'optimize-layer-split'
+    || stepId === 'optimize-view-change') {
     return '正在优化提示词...';
   }
   if (stepId === 'create-image-job'
@@ -376,7 +379,8 @@ const getAgentPlanStatusLine = ({
     || stepId === 'run-image-edit'
     || stepId === 'run-background-removal'
     || stepId === 'run-remover'
-    || stepId === 'run-layer-split') {
+    || stepId === 'run-layer-split'
+    || stepId === 'run-view-change') {
     return taskType === 'image-edit' || mode !== 'generate'
       ? '正在提交图片编辑任务...'
       : '正在提交生图任务...';

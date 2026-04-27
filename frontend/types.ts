@@ -77,7 +77,7 @@ export interface AgentPlan {
   rejectionMessage?: string;
   answerMessage?: string;
   taskType: 'text-to-image' | 'image-edit';
-  mode: 'generate' | 'edit' | 'background-removal' | 'remover' | 'layer-subject' | 'layer-background';
+  mode: 'generate' | 'edit' | 'background-removal' | 'remover' | 'layer-subject' | 'layer-background' | 'view-change';
   count: number;
   baseImageId?: string;
   referenceImageIds: string[];

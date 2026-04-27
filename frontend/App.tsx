@@ -9,6 +9,7 @@ import Toolbar from './components/Toolbar';
 import ConfigModal from './components/ConfigModal';
 import CanvasUtilityDock from './components/CanvasUtilityDock';
 import ProjectLinks from './components/ProjectLinks';
+import ExternalImageImportModal from './components/ExternalImageImportModal';
 import {
   getImageJobQueueMessage,
   type ImageGenerationResult,
@@ -54,6 +55,7 @@ import {
 import { createTransparentEditMask } from './services/imageMask';
 import { buildImageResultDescription, generateImageTitleFromPrompt } from './services/imageTitle';
 import { loadSiteStatsOverview, type SiteStatsOverview } from './services/siteStats';
+import { importExternalImage, type ExternalImageCandidate } from './services/externalImages';
 
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 5;
@@ -128,6 +130,10 @@ const buildExecutionAnnouncement = (plan: AgentPlan) => {
 
   if (plan.mode === 'layer-subject' || plan.mode === 'layer-background') {
     return `我将为您拆分这张${title}的图层。`;
+  }
+
+  if (plan.mode === 'view-change') {
+    return `我将为您生成这张${title}的新视角。`;
   }
 
   if (plan.taskType === 'image-edit') {
@@ -654,6 +660,8 @@ function App() {
   const [isExportingProjectImage, setIsExportingProjectImage] = useState(false);
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
   const [exportProjectImageError, setExportProjectImageError] = useState('');
+  const [isExternalImageModalOpen, setIsExternalImageModalOpen] = useState(false);
+  const [isImportingExternalImages, setIsImportingExternalImages] = useState(false);
   const saveTimerRef = useRef<number | null>(null);
   const pendingSaveRef = useRef<PendingCanvasSave | null>(null);
   const isSavingCanvasRef = useRef(false);
@@ -1319,6 +1327,65 @@ function App() {
     reader.readAsDataURL(file);
   };
 
+  const handleImportExternalImages = async (candidates: ExternalImageCandidate[]) => {
+    if (isImportingExternalImages || candidates.length === 0) return;
+
+    setIsImportingExternalImages(true);
+    try {
+      const importedImages = await Promise.all(candidates.map(candidate => (
+        importExternalImage(candidate, { canvasId: currentProjectId || undefined })
+          .then(asset => ({ candidate, asset }))
+      )));
+      const visibleCanvasRect = getVisibleCanvasRect(pan, zoom, showSidebar);
+      const canvasCenterX = visibleCanvasRect.x + visibleCanvasRect.width / 2;
+      const canvasCenterY = visibleCanvasRect.y + visibleCanvasRect.height / 2;
+      const maxZIndex = Math.max(60, ...items.map(item => item.zIndex || 0));
+      const fallbackFrame = { width: 400, height: 400 };
+      let virtualItems = [...items];
+      const insertedItems = importedImages.map(({ candidate, asset }, index) => {
+        const sourceWidth = asset.width || candidate.width || fallbackFrame.width;
+        const sourceHeight = asset.height || candidate.height || fallbackFrame.height;
+        const frame = fitDimensionsToLongSide(sourceWidth, sourceHeight, 400);
+        const position = findNextRootImageRowPosition(
+          virtualItems,
+          canvasCenterX - frame.width / 2,
+          canvasCenterY - frame.height / 2,
+          frame.width,
+          frame.height
+        );
+        const item: CanvasItem = {
+          id: Math.random().toString(36).substr(2, 9),
+          type: 'image',
+          content: asset.urlPath,
+          assetId: asset.assetId,
+          previewContent: asset.previewUrlPath || asset.urlPath,
+          thumbnailContent: asset.thumbnailUrlPath || asset.previewUrlPath || asset.urlPath,
+          x: position.x,
+          y: position.y,
+          width: frame.width,
+          height: frame.height,
+          status: 'completed',
+          label: candidate.formatLabel || candidate.title || asset.originalFilename || '社交媒体图片',
+          zIndex: maxZIndex + index + 1,
+          layers: []
+        };
+        virtualItems = [...virtualItems, item];
+        return item;
+      });
+
+      flushCanvasHistory();
+      setItems(prev => [...prev, ...insertedItems]);
+
+      setSelectedIds(insertedItems.map(item => item.id));
+      if (insertedItems.length === 1) {
+        focusImageInSidebarInput(insertedItems[0]);
+      }
+      setIsExternalImageModalOpen(false);
+    } finally {
+      setIsImportingExternalImages(false);
+    }
+  };
+
   const addTextItem = (x?: number, y?: number) => {
     const newId = Math.random().toString(36).substr(2, 9);
     const width = 2;
@@ -1703,9 +1770,11 @@ function App() {
           ? '局部删除'
           : plannerMode === 'layer-subject' || plannerMode === 'layer-background'
             ? '图层拆分'
-          : editBaseImage
-            ? '单图编辑'
-            : '生成';
+            : plannerMode === 'view-change'
+              ? '多角度'
+              : editBaseImage
+                ? '单图编辑'
+                : '生成';
 
       if (initialPlan.steps.length > 1) {
         markAgentPlanStep(initialPlan.steps[1].id);
@@ -2196,6 +2265,7 @@ function App() {
           onZoomChange={handleZoomChange}
           onResetView={() => { setZoom(1); setPan({ x: window.innerWidth / 4, y: window.innerHeight / 4 }); }}
           onAddImage={addImageItem}
+          onOpenExternalImageImport={() => setIsExternalImageModalOpen(true)}
           onAddText={() => setCanvasTool(currentTool => currentTool === 'text' ? 'select' : 'text')}
           activeTool={canvasTool}
           onToolChange={setCanvasTool}
@@ -2245,6 +2315,17 @@ function App() {
           }
         }}
         onSubmit={handleCreateProject}
+      />
+
+      <ExternalImageImportModal
+        isOpen={isExternalImageModalOpen}
+        isImporting={isImportingExternalImages}
+        onClose={() => {
+          if (!isImportingExternalImages) {
+            setIsExternalImageModalOpen(false);
+          }
+        }}
+        onImport={handleImportExternalImages}
       />
     </div>
   );

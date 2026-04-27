@@ -82,10 +82,6 @@ public class AssetService {
     @Transactional
     public AssetDtos.AssetResponse upload(UUID userId, UUID canvasId, MultipartFile file) {
         validateImage(file);
-        if (canvasId != null && canvasMapper.findByIdAndUserIdWithJson(canvasId, userId) == null) {
-            throw new ApiException(HttpStatus.NOT_FOUND, "CANVAS_NOT_FOUND", "项目画布不存在");
-        }
-
         byte[] fileBytes;
         try {
             fileBytes = file.getBytes();
@@ -93,16 +89,40 @@ public class AssetService {
             throw new ApiException(HttpStatus.BAD_REQUEST, "ASSET_READ_FAILED", "读取上传图片失败");
         }
 
+        return uploadBytes(userId, canvasId, file.getOriginalFilename(), file.getContentType(), fileBytes);
+    }
+
+    @Transactional
+    public AssetDtos.AssetResponse uploadBytes(
+            UUID userId,
+            UUID canvasId,
+            String originalFilename,
+            String contentType,
+            byte[] fileBytes
+    ) {
+        if (fileBytes == null || fileBytes.length == 0) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "EMPTY_FILE", "请上传图片文件");
+        }
+        if (canvasId != null && canvasMapper.findByIdAndUserIdWithJson(canvasId, userId) == null) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "CANVAS_NOT_FOUND", "项目画布不存在");
+        }
+
         UUID assetId = UUID.randomUUID();
-        String mimeType = normalizeMimeType(file.getContentType());
-        String filename = normalizeFilename(file.getOriginalFilename());
+        String mimeType = normalizeMimeType(contentType);
+        String filename = normalizeFilename(originalFilename);
+        BufferedImage image = readImage(fileBytes);
+        if (!mimeType.startsWith("image/")) {
+            if (image == null) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "UNSUPPORTED_FILE_TYPE", "只支持图片文件");
+            }
+            mimeType = "image/png";
+        }
         String objectKey = "canvases/%s/%s%s".formatted(
                 canvasId == null ? "default" : canvasId,
                 assetId,
                 extensionFor(filename, mimeType)
         );
 
-        BufferedImage image = readImage(fileBytes);
         ImageSize imageSize = image == null
                 ? new ImageSize(null, null)
                 : new ImageSize(image.getWidth(), image.getHeight());

@@ -253,6 +253,7 @@ public class AgentRunService {
             case "remover" -> "执行要求：只删除 mask 区域内的内容并自然补全背景，未被 mask 覆盖的区域必须保持原图不变。";
             case "layer-subject" -> "执行要求：执行图层拆分的主体层提取。识别原图主要前景主体，只输出同画幅主体图层；主体以外区域必须是透明 alpha，不要生成新背景；主体身份、结构、比例、边缘、颜色、纹理、光影和原有裁切尽量保持原图一致。";
             case "layer-background" -> "执行要求：执行图层拆分的背景层生成。识别并移除原图主要前景主体及其接触阴影、遮挡残影和边缘碎片，用周围背景的纹理、透视、光影和噪点自然补全；保持原图画幅、视角和背景风格不变，不要生成新主体。";
+            case "view-change" -> "执行要求：执行多角度/改视角编辑。根据用户给出的主体旋转、摄像头旋转、倾斜和缩放参数生成同一主体的新视角；尽量保持原图主体身份、结构比例、材质、颜色、服装/外观、背景风格、光影方向和画幅比例一致；不要添加白边、相框、说明文字或无关新物体。";
             default -> "执行要求：严格按用户指令编辑原图；如果用户说“把 A 换成某张参考图”，就替换原图中的 A；如果用户说“把参考图里的 A 放在/摆在原图某处”，就执行放置合成，不要替换原图已有物体；保持原图未被指定修改的主体、背景、构图、光影和画幅不变。";
         });
         return String.join("\n", lines);
@@ -380,6 +381,7 @@ public class AgentRunService {
             case "remover" -> "image-remover";
             case "layer-subject" -> "layer-split-subject";
             case "layer-background" -> "layer-split-background";
+            case "view-change" -> "view-change";
             default -> "image-to-image";
         };
     }
@@ -390,6 +392,7 @@ public class AgentRunService {
             case "remover" -> "把圈起来的地方删除掉";
             case "layer-subject" -> "提取主体图层，主体以外透明";
             case "layer-background" -> "移除主体并自然补全背景层";
+            case "view-change" -> "基于原图生成新的拍摄视角";
             default -> "按用户要求编辑图片";
         };
     }
