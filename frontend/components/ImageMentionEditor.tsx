@@ -117,6 +117,8 @@ const ImageMentionEditor: React.FC<ImageMentionEditorProps> = ({
   const wrapperRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLDivElement>(null);
+  const mentionListRef = useRef<HTMLDivElement>(null);
+  const mentionItemRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const lastEditorValueRef = useRef(value);
 
   const mentionImageItems = useMemo(() => {
@@ -162,6 +164,27 @@ const ImageMentionEditor: React.FC<ImageMentionEditorProps> = ({
         : mentionImageItems[0].id
     );
   }, [mentionImageItems, mentionQuery]);
+
+  useEffect(() => {
+    if (mentionQuery === null || !activePreviewId) return;
+
+    const list = mentionListRef.current;
+    const activeItem = mentionItemRefs.current[activePreviewId];
+    if (!list || !activeItem) return;
+
+    const listRect = list.getBoundingClientRect();
+    const itemRect = activeItem.getBoundingClientRect();
+    const padding = 8;
+
+    if (itemRect.top < listRect.top + padding) {
+      list.scrollTop -= (listRect.top + padding) - itemRect.top;
+      return;
+    }
+
+    if (itemRect.bottom > listRect.bottom - padding) {
+      list.scrollTop += itemRect.bottom - (listRect.bottom - padding);
+    }
+  }, [activePreviewId, mentionQuery]);
 
   const closeMentionPicker = () => {
     setMentionQuery(null);
@@ -427,7 +450,7 @@ const ImageMentionEditor: React.FC<ImageMentionEditorProps> = ({
       </div>
 
       <div className="grid min-h-0 flex-1 grid-cols-[260px_minmax(0,1fr)] gap-4 overflow-hidden">
-        <div className="min-h-0 min-w-0 space-y-1 overflow-y-auto overflow-x-hidden pr-1 scrollbar-thin scrollbar-thumb-gray-200 scrollbar-track-transparent">
+        <div ref={mentionListRef} className="min-h-0 min-w-0 space-y-1 overflow-y-auto overflow-x-hidden pr-1 scrollbar-thin scrollbar-thumb-gray-200 scrollbar-track-transparent">
           {mentionImageItems.length > 0 ? (
             mentionImageItems.map((item) => {
               const listPreviewStyle = getImagePreviewFitStyle(item, 46, 42);
@@ -436,6 +459,9 @@ const ImageMentionEditor: React.FC<ImageMentionEditorProps> = ({
               return (
                 <button
                   key={item.id}
+                  ref={(element) => {
+                    mentionItemRefs.current[item.id] = element;
+                  }}
                   type="button"
                   title={itemHint?.(item) || `点击后插入稳定引用 ${getImageReferenceMentionLabel(item)}`}
                   aria-selected={isActive}
