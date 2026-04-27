@@ -121,10 +121,15 @@ const BACKGROUND_REMOVAL_PROMPT = '先识别图片中的主要主体：画面最
 const LAYER_SPLIT_SUBJECT_PROMPT = '图层拆分：请把这张图拆出“主体层”。先识别画面主要前景主体，主体包含其穿戴、手持、贴附和直接组成整体的部分；输出同画幅主体图层，主体以外区域必须是透明 alpha，不要生成新背景，不要改变主体身份、结构、比例、颜色、材质、边缘、光影和原有裁切。';
 const LAYER_SPLIT_BACKGROUND_PROMPT = '图层拆分：请把这张图拆出“背景层”。先识别画面主要前景主体，然后移除主体及其接触阴影、遮挡残影和边缘碎片；用周围背景的纹理、透视、光影、反射、噪点和景深自然补全，保持原图画幅、镜头视角和背景风格不变，不要新增主体或新场景。';
 const ENABLE_LAYER_SPLIT_TOOL = false;
+const MULTI_ANGLE_ROTATION_MIN = -360;
+const MULTI_ANGLE_ROTATION_MAX = 360;
+const MULTI_ANGLE_TILT_MIN = -75;
+const MULTI_ANGLE_TILT_MAX = 75;
+const MULTI_ANGLE_ORBIT_RADIUS = 74;
 const DEFAULT_MULTI_ANGLE_VALUES = {
-  mode: 'subject' as MultiAngleMode,
-  rotation: 30,
-  tilt: 0,
+  mode: 'camera' as MultiAngleMode,
+  rotation: 35,
+  tilt: 12,
   zoom: 1
 };
 const MULTI_ANGLE_ZOOM_OPTIONS = [
@@ -230,6 +235,25 @@ const TEXT_COLOR_PALETTE = [
 ];
 
 const clampValue = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+
+const getMultiAngleOrbitProjection = (rotation: number, tilt: number) => {
+  const yawRadians = ((rotation % 360) * Math.PI) / 180;
+  const tiltRadians = (tilt * Math.PI) / 180;
+  const x = Math.sin(yawRadians) * Math.cos(tiltRadians) * MULTI_ANGLE_ORBIT_RADIUS;
+  const y = -Math.sin(tiltRadians) * MULTI_ANGLE_ORBIT_RADIUS;
+  const z = Math.cos(yawRadians) * Math.cos(tiltRadians);
+  const isFrontSide = z >= 0;
+
+  return {
+    x,
+    y,
+    z,
+    scale: isFrontSide ? 1 + z * 0.08 : 0.78,
+    opacity: isFrontSide ? 1 : 0.42,
+    zIndex: isFrontSide ? 8 : 1,
+    isFrontSide
+  };
+};
 
 const getCanvasTextStyle = (item: CanvasItem): Required<CanvasTextStyle> => ({
   ...DEFAULT_TEXT_STYLE,
@@ -443,12 +467,12 @@ const getMultiAngleZoomOption = (value: number) => (
 );
 
 const getMultiAngleModeLabel = (mode: MultiAngleMode) => (
-  mode === 'subject' ? '主体旋转' : '摄像头移动'
+  mode === 'subject' ? '主体旋转' : '轨道摄像机'
 );
 
 const getMultiAngleSummary = (state: MultiAngleState) => {
   const zoomLabel = getMultiAngleZoomOption(state.zoom).label;
-  return `${getMultiAngleModeLabel(state.mode)} ${state.rotation}°，倾斜 ${state.tilt}°，${zoomLabel}`;
+  return `${getMultiAngleModeLabel(state.mode)} 方位 ${state.rotation}°，俯仰 ${state.tilt}°，${zoomLabel}`;
 };
 
 const buildMultiAnglePrompt = (item: CanvasItem, state: MultiAngleState) => {
@@ -457,12 +481,12 @@ const buildMultiAnglePrompt = (item: CanvasItem, state: MultiAngleState) => {
     '多角度改视角：',
     `目标图片：${getCanvasItemDisplayTitle(item)}`,
     `模式：${getMultiAngleModeLabel(state.mode)}`,
-    `水平旋转：${state.rotation} 度`,
-    `垂直倾斜：${state.tilt} 度`,
+    `最终 3D 球面摄像机停留位置：方位角 ${state.rotation} 度，俯仰角 ${state.tilt} 度`,
+    `摄像机轨道范围：水平方向支持 720 度完整环绕，当前数值表示用户把摄像机拖到球面上的最终位置`,
     `镜头缩放：${zoomLabel}`,
     state.mode === 'subject'
       ? '请理解为主体自身相对镜头转向，生成同一主体的新角度。'
-      : '请理解为摄像机围绕主体移动，生成同一主体的新拍摄机位。',
+      : '请理解为摄像机沿包围主体的球面轨道移动，摄像机停在当前球面坐标后拍摄主体，生成同一主体的新拍摄机位。',
     '保持原图主体身份、结构比例、材质、颜色、服装/外观、背景风格、光影和画幅比例一致；只改变视角和透视，不要添加白边、相框、说明文字或无关新物体。'
   ].join('\n');
 };
@@ -1337,14 +1361,14 @@ const Canvas: React.FC<CanvasProps> = ({
       setMultiAngleState(previous => {
         if (!previous) return previous;
         const nextRotation = clampValue(
-          Math.round(multiAngleDragState.startRotation + (event.clientX - multiAngleDragState.startX) * 0.8),
-          -180,
-          180
+          Math.round(multiAngleDragState.startRotation + (event.clientX - multiAngleDragState.startX) * 1.15),
+          MULTI_ANGLE_ROTATION_MIN,
+          MULTI_ANGLE_ROTATION_MAX
         );
         const nextTilt = clampValue(
-          Math.round(multiAngleDragState.startTilt - (event.clientY - multiAngleDragState.startY) * 0.45),
-          -45,
-          45
+          Math.round(multiAngleDragState.startTilt - (event.clientY - multiAngleDragState.startY) * 0.62),
+          MULTI_ANGLE_TILT_MIN,
+          MULTI_ANGLE_TILT_MAX
         );
         return {
           ...previous,
@@ -3023,8 +3047,10 @@ const Canvas: React.FC<CanvasProps> = ({
     const previewSrc = getCanvasImageSrc(selectedItem, zoom) || selectedItem.content;
     const previewAspect = clampValue(selectedItem.width / Math.max(1, selectedItem.height), 0.35, 2.8);
     const previewCardSize = previewAspect >= 1
-      ? { width: 148, height: Math.max(72, 148 / previewAspect) }
-      : { width: Math.max(72, 148 * previewAspect), height: 148 };
+      ? { width: 108, height: Math.max(54, 108 / previewAspect) }
+      : { width: Math.max(54, 108 * previewAspect), height: 108 };
+    const orbitProjection = getMultiAngleOrbitProjection(multiAngleState.rotation, multiAngleState.tilt);
+    const cameraTransform = `translate3d(calc(-50% + ${orbitProjection.x}px), calc(-50% + ${orbitProjection.y}px), 0) scale(${orbitProjection.scale})`;
     const updateMultiAngleState = (updates: Partial<MultiAngleState>) => {
       setMultiAngleState(previous => previous && previous.itemId === selectedItem.id
         ? { ...previous, ...updates }
@@ -3067,7 +3093,7 @@ const Canvas: React.FC<CanvasProps> = ({
         </div>
 
         <div
-          className="relative mb-4 flex h-48 cursor-grab items-center justify-center overflow-hidden rounded-[22px] bg-[#ebe7dc] active:cursor-grabbing"
+          className="relative mb-4 flex h-56 cursor-grab items-center justify-center overflow-hidden rounded-[22px] bg-[#ebe7dc] active:cursor-grabbing"
           onMouseDown={(event) => {
             event.preventDefault();
             event.stopPropagation();
@@ -3078,39 +3104,66 @@ const Canvas: React.FC<CanvasProps> = ({
               startTilt: multiAngleState.tilt
             });
           }}
-          title="拖动预览调整旋转和倾斜"
+          title="拖动球面摄像机调整最终机位"
         >
-          <div className="absolute inset-0 opacity-70 [background-image:radial-gradient(circle_at_50%_28%,rgba(255,255,255,0.9),rgba(255,255,255,0)_34%),linear-gradient(180deg,rgba(255,255,255,0.48),rgba(214,208,193,0.55))]" />
-          <div className="absolute bottom-9 h-10 w-44 rounded-[50%] bg-black/10 blur-md" />
-          <div
-            className="relative rounded-[18px] border border-white/75 bg-white p-1.5 shadow-[0_18px_42px_-24px_rgba(0,0,0,0.6)] transition-transform duration-150"
-            style={{
-              width: previewCardSize.width,
-              height: previewCardSize.height,
-              transform: `perspective(820px) rotateX(${-multiAngleState.tilt}deg) rotateY(${multiAngleState.rotation}deg) scale(${zoomOption.scale})`,
-              transformStyle: 'preserve-3d'
-            }}
-          >
-            {previewSrc && (
-              <img src={previewSrc} className="h-full w-full rounded-[12px] object-contain pointer-events-none" />
-            )}
-            <div className="pointer-events-none absolute -right-2 top-3 h-[calc(100%-24px)] w-2 rounded-r-md bg-zinc-300/70" style={{ transform: 'translateZ(-10px)' }} />
+          <div className="absolute inset-0 opacity-80 [background-image:radial-gradient(circle_at_50%_26%,rgba(255,255,255,0.94),rgba(255,255,255,0)_34%),linear-gradient(180deg,rgba(255,255,255,0.5),rgba(214,208,193,0.62))]" />
+          <div className="absolute bottom-8 h-9 w-48 rounded-[50%] bg-black/10 blur-md" />
+          <div className="relative flex h-44 w-44 items-center justify-center rounded-full border border-white/80 bg-[radial-gradient(circle_at_34%_24%,rgba(255,255,255,0.96),rgba(255,255,255,0.48)_38%,rgba(201,195,178,0.42)_72%,rgba(136,126,105,0.32))] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.65),inset_-18px_-24px_38px_rgba(85,75,54,0.12),0_18px_42px_-30px_rgba(0,0,0,0.68)]">
+            <div className="pointer-events-none absolute inset-4 rounded-full border border-zinc-500/12" />
+            <div className="pointer-events-none absolute left-4 right-4 top-1/2 h-px bg-zinc-500/16" />
+            <div className="pointer-events-none absolute left-1/2 top-4 h-[calc(100%-32px)] w-px bg-zinc-500/14" />
+            <div className="pointer-events-none absolute inset-x-5 top-1/2 h-20 -translate-y-1/2 rounded-[50%] border border-zinc-500/14" />
+            <div className="pointer-events-none absolute inset-y-5 left-1/2 w-20 -translate-x-1/2 rounded-[50%] border border-zinc-500/14" />
+            <div className="pointer-events-none absolute inset-x-7 top-1/2 h-28 -translate-y-1/2 rotate-45 rounded-[50%] border border-dashed border-zinc-500/12" />
+            <div className="pointer-events-none absolute inset-x-7 top-1/2 h-28 -translate-y-1/2 -rotate-45 rounded-[50%] border border-dashed border-zinc-500/12" />
+            <div
+              className="pointer-events-none relative z-[4] rounded-[16px] border border-white/85 bg-white/92 p-1.5 shadow-[0_14px_34px_-24px_rgba(0,0,0,0.65)]"
+              style={{
+                width: previewCardSize.width,
+                height: previewCardSize.height,
+                transform: `scale(${zoomOption.scale})`
+              }}
+            >
+              {previewSrc ? (
+                <img src={previewSrc} className="h-full w-full rounded-[10px] object-contain pointer-events-none" />
+              ) : (
+                <Box size={24} className="m-auto h-full text-zinc-400" />
+              )}
+            </div>
+            <div
+              className="pointer-events-none absolute left-1/2 top-1/2"
+              style={{
+                transform: cameraTransform,
+                opacity: orbitProjection.opacity,
+                zIndex: orbitProjection.zIndex
+              }}
+            >
+              <div className="flex h-11 min-w-11 items-center justify-center gap-1.5 rounded-full border border-white/90 bg-zinc-950 px-2.5 text-[10px] font-black text-white shadow-[0_12px_28px_-16px_rgba(0,0,0,0.85)]">
+                <Camera size={15} />
+                <span>相机</span>
+              </div>
+            </div>
+            <div className={`pointer-events-none absolute bottom-3 rounded-full px-2 py-0.5 text-[10px] font-black ${
+              orbitProjection.isFrontSide ? 'bg-white/80 text-zinc-600' : 'bg-zinc-900/75 text-white'
+            }`}>
+              {orbitProjection.isFrontSide ? '前半球' : '后半球'}
+            </div>
           </div>
           <div className="absolute bottom-3 rounded-full bg-white/75 px-3 py-1 text-[11px] font-black text-zinc-500 backdrop-blur">
-            拖动预览可调整角度
+            拖动球面，相机停在哪就按哪个角度生成
           </div>
         </div>
 
         <div className="space-y-3 rounded-[18px] bg-white/70 p-3">
           <label className="block">
             <div className="mb-1.5 flex items-center justify-between text-xs font-black">
-              <span>旋转</span>
-              <span>{multiAngleState.rotation}</span>
+              <span>方位角</span>
+              <span>{multiAngleState.rotation}°</span>
             </div>
             <input
               type="range"
-              min={-180}
-              max={180}
+              min={MULTI_ANGLE_ROTATION_MIN}
+              max={MULTI_ANGLE_ROTATION_MAX}
               value={multiAngleState.rotation}
               onChange={(event) => updateMultiAngleState({ rotation: Number(event.target.value) })}
               className={sliderClass}
@@ -3118,13 +3171,13 @@ const Canvas: React.FC<CanvasProps> = ({
           </label>
           <label className="block">
             <div className="mb-1.5 flex items-center justify-between text-xs font-black">
-              <span>倾斜</span>
-              <span>{multiAngleState.tilt}</span>
+              <span>俯仰角</span>
+              <span>{multiAngleState.tilt}°</span>
             </div>
             <input
               type="range"
-              min={-45}
-              max={45}
+              min={MULTI_ANGLE_TILT_MIN}
+              max={MULTI_ANGLE_TILT_MAX}
               value={multiAngleState.tilt}
               onChange={(event) => updateMultiAngleState({ tilt: Number(event.target.value) })}
               className={sliderClass}
