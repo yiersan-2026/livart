@@ -28,6 +28,8 @@ export interface CanvasItem {
   prompt?: string;
   originalPrompt?: string;
   optimizedPrompt?: string;
+  layerGroupId?: string;
+  layerRole?: 'subject' | 'background';
   textStyle?: CanvasTextStyle;
   imageJobId?: string;
   imageJobStartedAt?: number;
@@ -75,7 +77,7 @@ export interface AgentPlan {
   rejectionMessage?: string;
   answerMessage?: string;
   taskType: 'text-to-image' | 'image-edit';
-  mode: 'generate' | 'edit' | 'background-removal' | 'remover';
+  mode: 'generate' | 'edit' | 'background-removal' | 'remover' | 'layer-subject' | 'layer-background';
   count: number;
   baseImageId?: string;
   referenceImageIds: string[];

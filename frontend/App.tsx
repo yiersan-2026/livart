@@ -1,6 +1,6 @@
 
 import React, { useEffect, useRef, useState } from 'react';
-import { PanelRightClose, PanelRight, Settings, FolderPlus, LogOut, Loader2, X, Download, ChevronDown } from 'lucide-react';
+import { PanelRightClose, PanelRight, Settings, FolderPlus, LogOut, Loader2, X, Download, ChevronDown, Users, Images } from 'lucide-react';
 import type { AgentPlan, CanvasItem, CanvasTool, ChatMessage, ImageAspectRatio } from './types';
 import AuthPanel from './components/AuthPanel';
 import Canvas from './components/Canvas';
@@ -53,6 +53,7 @@ import {
 } from './services/imageReferences';
 import { createTransparentEditMask } from './services/imageMask';
 import { buildImageResultDescription, generateImageTitleFromPrompt } from './services/imageTitle';
+import { loadSiteStatsOverview, type SiteStatsOverview } from './services/siteStats';
 
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 5;
@@ -77,6 +78,12 @@ const getImageEditMaskData = (item: CanvasItem, mode: ImageEditMode) => (
     ? item.removerMaskData || item.maskData
     : item.redrawMaskData || item.maskData
 );
+
+const formatSiteStatsCount = (value: number | undefined) => {
+  if (value === undefined || !Number.isFinite(value)) return '--';
+  if (value >= 10000) return `${(value / 10000).toFixed(value >= 100000 ? 0 : 1)}万`;
+  return Math.max(0, value).toLocaleString('zh-CN');
+};
 
 const collectAgentPlanCandidateImages = (text: string, contextImage: CanvasItem | null, items: CanvasItem[]) => {
   const completedImages = items.filter(item => item.type === 'image' && item.status === 'completed' && !!item.content);
@@ -117,6 +124,10 @@ const buildExecutionAnnouncement = (plan: AgentPlan) => {
 
   if (plan.mode === 'remover') {
     return `我将为您删除圈选区域，并生成新的${title}。`;
+  }
+
+  if (plan.mode === 'layer-subject' || plan.mode === 'layer-background') {
+    return `我将为您拆分这张${title}的图层。`;
   }
 
   if (plan.taskType === 'image-edit') {
@@ -634,6 +645,8 @@ function App() {
   const [projects, setProjects] = useState<CanvasProject[]>([]);
   const [currentProjectId, setCurrentProjectId] = useState('');
   const [currentProjectTitle, setCurrentProjectTitle] = useState('默认画布');
+  const [siteStats, setSiteStats] = useState<SiteStatsOverview | null>(null);
+  const [siteStatsError, setSiteStatsError] = useState('');
   const [isCreateProjectModalOpen, setIsCreateProjectModalOpen] = useState(false);
   const [newProjectTitle, setNewProjectTitle] = useState('');
   const [isCreatingProject, setIsCreatingProject] = useState(false);
@@ -892,7 +905,33 @@ function App() {
     if (!isAuthReady || authSession) return;
     resetApiConfigSession();
     setShowConfigModal(false);
+    setSiteStats(null);
+    setSiteStatsError('');
   }, [isAuthReady, authSession]);
+
+  useEffect(() => {
+    if (!isAuthReady || !authSession) return;
+
+    let isMounted = true;
+    setSiteStatsError('');
+
+    loadSiteStatsOverview()
+      .then((overview) => {
+        if (isMounted) {
+          setSiteStats(overview);
+        }
+      })
+      .catch((error) => {
+        console.warn('[site-stats] load failed', error);
+        if (isMounted) {
+          setSiteStatsError(error instanceof Error ? error.message : '统计数据加载失败');
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isAuthReady, authSession?.token]);
 
   useEffect(() => {
     if (!isAuthReady) return;
@@ -1662,6 +1701,8 @@ function App() {
         ? '去背景'
         : plannerMode === 'remover'
           ? '局部删除'
+          : plannerMode === 'layer-subject' || plannerMode === 'layer-background'
+            ? '图层拆分'
           : editBaseImage
             ? '单图编辑'
             : '生成';
@@ -1996,6 +2037,20 @@ function App() {
               }`}
               title={canvasSyncText}
             />
+          </div>
+          <div
+            className="flex h-11 items-center gap-3 rounded-2xl border border-gray-100 bg-white/90 px-3 text-[11px] font-black text-gray-500 shadow-[0_18px_48px_-28px_rgba(0,0,0,0.35)] backdrop-blur-2xl"
+            title={siteStatsError || '站点实时统计，每次进入/刷新页面时重新查询'}
+          >
+            <span className="flex items-center gap-1.5">
+              <Users size={14} className="text-gray-300" />
+              用户 {formatSiteStatsCount(siteStats?.userCount)}
+            </span>
+            <span className="h-3 w-px bg-gray-100" />
+            <span className="flex items-center gap-1.5">
+              <Images size={14} className="text-gray-300" />
+              生成 {formatSiteStatsCount(siteStats?.generatedImageCount)}
+            </span>
           </div>
         </div>
 

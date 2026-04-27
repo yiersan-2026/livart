@@ -646,7 +646,10 @@ public class AiProxyService {
 
     private String normalizePromptOptimizationMode(String value, String fallbackMode) {
         String normalizedValue = value == null ? "" : value.trim();
-        if ("image-remover".equals(normalizedValue) || "background-removal".equals(normalizedValue)) {
+        if ("image-remover".equals(normalizedValue)
+                || "background-removal".equals(normalizedValue)
+                || "layer-split-subject".equals(normalizedValue)
+                || "layer-split-background".equals(normalizedValue)) {
             return normalizedValue;
         }
         return fallbackMode;
@@ -788,6 +791,12 @@ public class AiProxyService {
         }
         if ("background-removal".equals(mode)) {
             return buildDeterministicBackgroundRemovalPrompt(trimmedPrompt);
+        }
+        if ("layer-split-subject".equals(mode)) {
+            return buildDeterministicLayerSubjectPrompt(trimmedPrompt);
+        }
+        if ("layer-split-background".equals(mode)) {
+            return buildDeterministicLayerBackgroundPrompt(trimmedPrompt);
         }
 
         String trimmedImageContext = imageContext == null ? "" : imageContext.trim();
@@ -1355,6 +1364,33 @@ public class AiProxyService {
                 userPrompt.isBlank() ? "" : "用户补充要求：" + userPrompt,
                 "负面约束：避免透明背景、浅灰背景、米白背景、渐变背景、主体重绘、人物重绘、五官变化、表情变化、姿态变化、服装变化、颜色变化、画面扩展、主体居中重排、主体缩放变化、补全脸部、补全身体、补全衣服、全身化、换成新场景、阴影杂物、锯齿边、残留背景、抠图边缘脏污。"
         ).trim();
+    }
+
+    private String buildDeterministicLayerSubjectPrompt(String prompt) {
+        String userPrompt = prompt == null ? "" : prompt.trim();
+        return """
+                执行图层拆分：输出“主体层”。
+                先识别原图中的主要前景主体：人物、商品、动物、车辆，或多个共同构成前景的对象；主体包含其穿戴、手持、贴附和与主体直接组成整体的部分。
+                最终图片必须保持原图相同画幅、方向、尺寸比例和主体原始位置，只保留主要主体及其必要边缘细节；主体以外的背景、天空、地面、墙面、杂物、其他无关元素必须变成透明 alpha 区域。
+                不要生成纯白、浅灰、棋盘格、渐变或任何新背景；不要添加投影、相框、描边或发光边。
+                主体像素、身份、五官、表情、姿态、服装、材质、颜色、纹理、光影、清晰度、原有裁切和边缘细节尽量保持原图一致，尤其保护发丝、毛发、玻璃、纱、反光边缘、手指、饰品和半透明材质。
+                禁止补全原图画面外被裁切掉的内容，不要把局部主体补成完整主体，不要改变构图或缩放主体。
+                %s
+                负面约束：避免新背景、白底、灰底、棋盘格背景、主体重绘、换脸、五官变化、姿态变化、服装变化、颜色变化、画面扩展、主体居中重排、主体缩放变化、补全脸部、补全身体、锯齿边、残留背景、抠图边缘脏污、阴影杂物、文字、logo、水印。
+                """.formatted(userPrompt.isBlank() ? "" : "用户补充要求：" + userPrompt).trim();
+    }
+
+    private String buildDeterministicLayerBackgroundPrompt(String prompt) {
+        String userPrompt = prompt == null ? "" : prompt.trim();
+        return """
+                执行图层拆分：输出“背景层”。
+                先识别原图中的主要前景主体：人物、商品、动物、车辆，或多个共同构成前景的对象；然后移除这些主体以及主体产生的接触阴影、遮挡残影、边缘碎片和与主体直接相关的小物件。
+                最终图片必须保持原图相同画幅、方向、尺寸比例、镜头视角、透视关系和背景构图；被移除区域要根据周围背景的纹理、材质、光影、反射、噪点、景深和透视自然补全。
+                只生成干净的背景层，不要保留主体轮廓、影子、残影、边缘脏污或半透明碎片；不要新增人物、动物、商品、车辆、文字、logo、水印或用户没有要求的新物体。
+                保持背景原有风格和真实感，不要把背景改成新场景，不要扩图，不要改变画幅。
+                %s
+                负面约束：避免主体残留、人物残影、商品残影、边缘碎片、遮挡痕迹、补丁感、涂抹感、重复纹理、错乱透视、背景变形、新主体、新物体、新文字、logo、水印、相框、白边、画幅变化。
+                """.formatted(userPrompt.isBlank() ? "" : "用户补充要求：" + userPrompt).trim();
     }
 
     private String sanitizeOptimizedPrompt(String text) {

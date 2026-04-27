@@ -1,6 +1,6 @@
 
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import type { AgentPlan, CanvasItem, CanvasTool, CanvasTextStyle, ChatMessage, ImageAspectRatio } from '../types';
+import type { AgentPlan, AgentPlanStep, CanvasItem, CanvasTool, CanvasTextStyle, ChatMessage, ImageAspectRatio } from '../types';
 import { 
   Loader2, Trash2, Type, 
   Sparkles, ChevronUp, ChevronDown, 
@@ -78,6 +78,7 @@ const buildInlineImageJobQueueNotice = (job: ImageJobStatus) => (
 type ResizeDirection = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
 type MaskPoint = { x: number; y: number };
 type ImageMaskMode = 'local-redraw' | 'remover';
+type LayerSplitRole = 'subject' | 'background';
 type CropRect = { x: number; y: number; width: number; height: number };
 type CropDragState = {
   mode: 'move' | ResizeDirection;
@@ -102,6 +103,8 @@ type SnapCandidate = {
 
 const REMOVER_PROMPT = '把圈起来的地方删除掉。';
 const BACKGROUND_REMOVAL_PROMPT = '先识别图片中的主要主体：画面最主要的人物、商品、动物、车辆或成组前景对象；主体包含其穿戴、手持、贴附和与主体直接组成整体的部分。只保留主体，把主体以外的一切背景和无关物体替换为纯白色背景（#FFFFFF），不要透明背景，不要浅灰、米白或渐变。不要改变主体 RGB 像素，不要重绘、修复、补全、美化、移动或缩放主体；严格保留原图中已经可见的主体像素、裁切范围、构图、脸、表情、姿态、服装、颜色、纹理、发丝和边缘细节；原图里被裁切到画面外的身体、头发、衣服不要补出来。输出白底图片。';
+const LAYER_SPLIT_SUBJECT_PROMPT = '图层拆分：请把这张图拆出“主体层”。先识别画面主要前景主体，主体包含其穿戴、手持、贴附和直接组成整体的部分；输出同画幅主体图层，主体以外区域必须是透明 alpha，不要生成新背景，不要改变主体身份、结构、比例、颜色、材质、边缘、光影和原有裁切。';
+const LAYER_SPLIT_BACKGROUND_PROMPT = '图层拆分：请把这张图拆出“背景层”。先识别画面主要前景主体，然后移除主体及其接触阴影、遮挡残影和边缘碎片；用周围背景的纹理、透视、光影、反射、噪点和景深自然补全，保持原图画幅、镜头视角和背景风格不变，不要新增主体或新场景。';
 
 const getCanvasDimension = (value: number) => Math.max(1, Math.round(value));
 
@@ -395,6 +398,49 @@ const findRightSideCanvasPosition = (
 
   return { x: desiredX, y: desiredY };
 };
+
+const getLayerSplitPrompt = (role: LayerSplitRole) => (
+  role === 'subject' ? LAYER_SPLIT_SUBJECT_PROMPT : LAYER_SPLIT_BACKGROUND_PROMPT
+);
+
+const getLayerSplitLabel = (role: LayerSplitRole) => (
+  role === 'subject' ? '主体层' : '背景层'
+);
+
+const getLayerSplitLoadingLabel = (role: LayerSplitRole) => (
+  role === 'subject' ? 'AI 提取主体层中...' : 'AI 生成背景层中...'
+);
+
+const buildLayerSplitDraftSteps = (): AgentPlanStep[] => [
+  {
+    id: 'identify-layer-subject',
+    title: '识别主体',
+    description: '识别图片中的主要前景主体。',
+    type: 'analysis',
+    status: 'running'
+  },
+  {
+    id: 'optimize-layer-split',
+    title: '规划拆层',
+    description: '分别准备主体层和背景层的编辑指令。',
+    type: 'prompt',
+    status: 'pending'
+  },
+  {
+    id: 'run-layer-split',
+    title: '执行拆层',
+    description: '并行创建主体层和背景层图片任务。',
+    type: 'edit',
+    status: 'pending'
+  },
+  {
+    id: 'wait-image-job',
+    title: '等待生成',
+    description: '等待两个图层生成完成。',
+    type: 'edit',
+    status: 'pending'
+  }
+];
 
 const clampCropRect = (rect: CropRect, itemWidth: number, itemHeight: number): CropRect => {
   const width = Math.min(Math.max(MIN_CROP_SIZE, rect.width), itemWidth);
@@ -1537,6 +1583,260 @@ const Canvas: React.FC<CanvasProps> = ({
       prompt: BACKGROUND_REMOVAL_PROMPT,
       mode: 'background-removal'
     });
+  };
+
+  const handleImageLayerSplit = async (item: CanvasItem) => {
+    if (item.type !== 'image' || item.status !== 'completed' || !item.content || inlineEditingIdsRef.current.has(item.id)) return;
+
+    const startedAt = Date.now();
+    const sourceTitle = getCanvasItemDisplayTitle(item);
+    const layerGroupId = `layers-${Math.random().toString(36).slice(2, 10)}`;
+    const layerRoles: LayerSplitRole[] = ['subject', 'background'];
+    const createdItemIds: string[] = [];
+    const unsubscribeAgentRunEvents: Array<() => void> = [];
+    let imageTaskStartedAt: number | null = null;
+    let planningMessageId = '';
+    let splitAgentPlan = buildAgentDraftPlan({
+      taskType: 'image-edit',
+      mode: 'layer-subject',
+      aspectRatio: 'auto',
+      summary: '正在拆分图片图层...',
+      displayTitle: `${sourceTitle}图层拆分`,
+      displayMessage: `我将为您拆分这张${ensureImageNoun(sourceTitle)}的主体层和背景层。`,
+      steps: buildLayerSplitDraftSteps()
+    });
+
+    const updateSplitPlan = (stepId: string, title: string, description: string, status: AgentPlanStep['status'], text?: string) => {
+      splitAgentPlan = applyAgentRunProgressEventToPlan(splitAgentPlan, {
+        stepId,
+        title,
+        description,
+        stepType: stepId === 'identify-layer-subject' ? 'analysis' : stepId === 'optimize-layer-split' ? 'prompt' : 'edit',
+        status,
+        createdAt: Date.now()
+      });
+      onChatMessageUpdate(planningMessageId, message => ({
+        ...message,
+        text: text || `${title}：${description}`,
+        agentPlan: splitAgentPlan
+      }));
+    };
+
+    resetImageToolModes();
+    clearInlineEditError(item.id);
+    setInlineEditingForItem(item.id, true);
+    setInlineEditingStartedAt(prev => ({ ...prev, [item.id]: startedAt }));
+    onBeforeCanvasMutation();
+    onChatMessage(`图层拆分 @${item.id}`, 'user');
+    planningMessageId = onChatDraftMessage('识别主体：正在分析图片主要前景。', 'assistant', {
+      agentPlan: splitAgentPlan
+    });
+
+    try {
+      const persistedSource = await ensureCanvasImageAsset(item);
+      onItemUpdate(item.id, {
+        content: persistedSource.content,
+        assetId: persistedSource.assetId,
+        previewContent: persistedSource.previewContent,
+        thumbnailContent: persistedSource.thumbnailContent
+      });
+
+      updateSplitPlan('identify-layer-subject', '识别主体', '已锁定原图并准备拆分主体层与背景层。', 'completed');
+      updateSplitPlan('optimize-layer-split', '规划拆层', '正在准备主体层和背景层的编辑指令。', 'running');
+
+      const resultMaxLongSide = Math.max(persistedSource.width, persistedSource.height);
+      const resultFrame = fitDimensionsToLongSide(persistedSource.width, persistedSource.height, resultMaxLongSide);
+      const nextZIndex = Math.max(0, ...items.map(item => item.zIndex || 0)) + 1;
+      let virtualItems = [...items, persistedSource];
+      const placeholders = layerRoles.map((role, index) => {
+        const position = findRightSideCanvasPosition(virtualItems, persistedSource, resultFrame.width, resultFrame.height);
+        const placeholder: CanvasItem = {
+          id: Math.random().toString(36).substr(2, 9),
+          type: 'image',
+          content: '',
+          x: position.x,
+          y: position.y,
+          width: resultFrame.width,
+          height: resultFrame.height,
+          status: 'loading',
+          label: getLayerSplitLoadingLabel(role),
+          zIndex: nextZIndex + index,
+          parentId: persistedSource.id,
+          layerGroupId,
+          layerRole: role,
+          prompt: getLayerSplitPrompt(role),
+          originalPrompt: getLayerSplitPrompt(role),
+          optimizedPrompt: '',
+          layers: []
+        };
+        virtualItems = [...virtualItems, placeholder];
+        return placeholder;
+      });
+
+      placeholders.forEach(placeholder => {
+        createdItemIds.push(placeholder.id);
+        onItemAdd(placeholder);
+      });
+
+      updateSplitPlan('optimize-layer-split', '规划拆层', '主体层和背景层指令已准备完成。', 'completed');
+      updateSplitPlan('run-layer-split', '执行拆层', '正在并行提交两个图片编辑任务。', 'running');
+      imageTaskStartedAt = Date.now();
+      onImageTaskStart(imageTaskStartedAt);
+
+      const runLayerSplitJob = async (placeholder: CanvasItem) => {
+        const role = placeholder.layerRole === 'background' ? 'background' : 'subject';
+        const prompt = getLayerSplitPrompt(role);
+        const clientRunId = createAgentRunClientId();
+        const unsubscribe = await connectAgentRunEvents(clientRunId, (event) => {
+          if (event.status === 'running') {
+            onChatMessageUpdate(planningMessageId, message => ({
+              ...message,
+              text: `${getLayerSplitLabel(role)}：${event.description || event.title}`,
+              agentPlan: splitAgentPlan
+            }));
+          }
+        });
+        unsubscribeAgentRunEvents.push(unsubscribe);
+
+        const agentRun = await createAgentRun({
+          prompt,
+          aspectRatio: 'auto',
+          contextImageId: persistedSource.id,
+          requestedEditMode: role === 'subject' ? 'layer-subject' : 'layer-background',
+          images: [persistedSource],
+          clientRunId
+        });
+        const job = agentRun.jobs[0];
+        if (!job) {
+          throw new Error(`${getLayerSplitLabel(role)}任务创建失败`);
+        }
+
+        onItemUpdate(placeholder.id, {
+          imageJobId: job.jobId,
+          imageJobStartedAt: imageTaskStartedAt || Date.now(),
+          prompt: agentRun.requestPrompt || prompt,
+          optimizedPrompt: job.optimizedPrompt || ''
+        });
+
+        const imageResult = await waitForImageJob(job.jobId, {
+          onStatus: (jobStatus) => {
+            const queueNotice = getImageJobQueueMessage(jobStatus, `${getLayerSplitLabel(role)}任务`);
+            if (queueNotice) {
+              onChatMessageUpdate(planningMessageId, message => ({
+                ...message,
+                text: queueNotice,
+                agentPlan: splitAgentPlan
+              }));
+              onItemUpdate(placeholder.id, { label: '排队中...' });
+              return;
+            }
+
+            if (jobStatus.status === 'running') {
+              onItemUpdate(placeholder.id, { label: getLayerSplitLoadingLabel(role) });
+            }
+          }
+        });
+        const resultTitle = `${sourceTitle}${getLayerSplitLabel(role)}`;
+        const resultDescription = buildImageResultDescription(resultTitle, 'edited');
+        const optimizedPrompt = imageResult.optimizedPrompt || job.optimizedPrompt || agentRun.requestPrompt || prompt;
+        const persistedResultItem = await ensureCanvasImageAsset({
+          ...placeholder,
+          content: imageResult.image,
+          status: 'completed',
+          imageJobId: undefined,
+          imageJobStartedAt: undefined,
+          prompt: agentRun.requestPrompt || prompt,
+          originalPrompt: prompt,
+          optimizedPrompt,
+          label: resultTitle
+        });
+
+        onItemUpdate(placeholder.id, {
+          content: persistedResultItem.content,
+          assetId: persistedResultItem.assetId,
+          previewContent: persistedResultItem.previewContent,
+          thumbnailContent: persistedResultItem.thumbnailContent,
+          status: 'completed',
+          imageJobId: undefined,
+          imageJobStartedAt: undefined,
+          prompt: agentRun.requestPrompt || prompt,
+          originalPrompt: prompt,
+          optimizedPrompt,
+          label: resultTitle
+        });
+
+        return {
+          imageId: placeholder.id,
+          modelName: getImageModelDisplayName(getApiConfig().model),
+          title: resultTitle,
+          description: resultDescription
+        };
+      };
+
+      const settledResults = await Promise.allSettled(placeholders.map(runLayerSplitJob));
+      const resultCards = settledResults
+        .filter((result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof runLayerSplitJob>>> => result.status === 'fulfilled')
+        .map(result => result.value);
+      const failedResults = settledResults.filter(result => result.status === 'rejected') as PromiseRejectedResult[];
+
+      settledResults.forEach((result, index) => {
+        if (result.status === 'rejected') {
+          onItemDelete(placeholders[index].id);
+        }
+      });
+
+      if (resultCards.length === 0) {
+        throw new Error(failedResults[0]?.reason instanceof Error ? failedResults[0].reason.message : '图层拆分失败');
+      }
+
+      updateSplitPlan('run-layer-split', '执行拆层', '图片任务已经返回，正在保存到画布。', 'completed');
+      updateSplitPlan('wait-image-job', '等待生成', '图层已经生成并保存到画布。', 'completed');
+      const finalText = failedResults.length > 0
+        ? `已拆分出 ${resultCards.length} 个图层，另有 ${failedResults.length} 个图层生成失败。`
+        : '已为您拆分出主体层和背景层。';
+      onChatMessageUpdate(planningMessageId, message => ({
+        ...message,
+        text: `我将为您拆分这张${ensureImageNoun(sourceTitle)}的主体层和背景层。`,
+        agentPlan: undefined,
+        durationMs: Date.now() - startedAt
+      }));
+      onChatMessage(finalText, 'assistant', {
+        imageIds: resultCards.map(card => card.imageId),
+        imageResultCards: resultCards,
+        durationMs: Date.now() - startedAt
+      });
+      if (failedResults.length > 0) {
+        const message = failedResults[0]?.reason instanceof Error ? failedResults[0].reason.message : '部分图层拆分失败';
+        setInlineEditErrors(prev => ({ ...prev, [item.id]: message }));
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '图层拆分失败';
+      console.error(error);
+      createdItemIds.forEach(id => onItemDelete(id));
+      setInlineEditErrors(prev => ({ ...prev, [item.id]: message }));
+      onChatMessageUpdate(planningMessageId, currentMessage => ({
+        ...currentMessage,
+        text: `图层拆分失败：${message}`,
+        agentPlan: undefined,
+        durationMs: Date.now() - startedAt
+      }));
+      onChatMessage(`出错了，没能完成图层拆分：${message}`, 'assistant', {
+        durationMs: Date.now() - startedAt
+      });
+    } finally {
+      unsubscribeAgentRunEvents.forEach(unsubscribe => unsubscribe());
+      if (imageTaskStartedAt !== null) {
+        onImageTaskFinish(imageTaskStartedAt);
+      }
+      setInlineEditingForItem(item.id, false);
+      setInlineEditingStartedAt(prev => {
+        const { [item.id]: _removedStartedAt, ...nextStartedAt } = prev;
+        return nextStartedAt;
+      });
+      setLocalRedrawItemId(null);
+      setLocalRemoverItemId(null);
+      setActiveTool('select');
+    }
   };
 
   const handleDownloadSelectedImage = async (item: CanvasItem) => {
@@ -3117,6 +3417,15 @@ const Canvas: React.FC<CanvasProps> = ({
                   title="一键去除背景并保留主体"
                 >
                   <Eraser size={15} />去背景
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleImageLayerSplit(selectedItem)}
+                  disabled={selectedItemIsInlineEditing || selectedItem.status === 'loading'}
+                  className="flex h-11 shrink-0 items-center gap-1.5 border-r border-zinc-100 px-3 text-xs font-bold text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 disabled:opacity-35"
+                  title="拆分为主体层和背景层两个独立图片节点"
+                >
+                  <Copy size={15} />分层
                 </button>
                 <button
                   type="button"
