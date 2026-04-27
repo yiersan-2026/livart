@@ -1562,18 +1562,6 @@ function App() {
     setSelectedImageEditMode(prev => (
       prev && ids.length === 1 && ids[0] === prev.imageId ? prev : null
     ));
-
-    if (ids.length !== 1) return;
-
-    const selectedImage = items.find(item => (
-      item.id === ids[0] &&
-      item.type === 'image' &&
-      item.status === 'completed' &&
-      !!item.content
-    ));
-    if (selectedImage) {
-      focusImageInSidebarInput(selectedImage);
-    }
   };
 
   const handleClearSidebarContextImage = () => {
