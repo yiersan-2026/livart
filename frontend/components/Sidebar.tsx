@@ -345,8 +345,38 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
       .trim()
       .replace(/([：:。！？!?])\s+(?=\d{1,2}[.、)]\s+\S)/g, '$1\n')
       .replace(/\s+(?=\d{1,2}[.、)]\s+\S)/g, '\n')
+      .replace(/([：:。！？!?])\s+(?=[一二三四五六七八九十]{1,3}[、.．]\s*\S)/g, '$1\n')
+      .replace(/\s+(?=[一二三四五六七八九十]{1,3}[、.．]\s*\S)/g, '\n')
       .replace(/([：:。！？!?])\s+(?=[-•·*]\s+\S)/g, '$1\n')
       .replace(/\s+(?=[-•·*]\s+\S)/g, '\n');
+  };
+
+  const splitAssistantParagraphLine = (line: string) => {
+    const normalized = line.trim();
+    if (normalized.length <= 86 || normalized.includes('http://') || normalized.includes('https://')) {
+      return [normalized];
+    }
+
+    const sentences = normalized.match(/[^。！？!?；;]+[。！？!?；;]?/g) || [normalized];
+    const paragraphs: string[] = [];
+    let current = '';
+
+    sentences.forEach(sentence => {
+      const nextSentence = sentence.trim();
+      if (!nextSentence) return;
+      if (current && `${current}${nextSentence}`.length > 74) {
+        paragraphs.push(current);
+        current = nextSentence;
+        return;
+      }
+      current += nextSentence;
+    });
+
+    if (current) {
+      paragraphs.push(current);
+    }
+
+    return paragraphs.length > 0 ? paragraphs : [normalized];
   };
 
   const parseAssistantAnswerBlocks = (text: string): AssistantAnswerBlock[] => {
@@ -362,7 +392,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
 
     const flushParagraphs = () => {
       if (paragraphs.length === 0) return;
-      blocks.push({ type: 'paragraph', text: paragraphs.join('\n') });
+      paragraphs.forEach(paragraph => blocks.push({ type: 'paragraph', text: paragraph }));
       paragraphs.length = 0;
     };
 
@@ -379,7 +409,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
     };
 
     lines.forEach(line => {
-      const numberedMatch = line.match(/^(\d{1,2})[.、)]\s*(.+)$/);
+      const numberedMatch = line.match(/^(\d{1,2}|[一二三四五六七八九十]{1,3})[.、)）．]\s*(.+)$/);
       if (numberedMatch) {
         flushParagraphs();
         flushBulletItems();
@@ -397,7 +427,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
 
       flushNumberedItems();
       flushBulletItems();
-      paragraphs.push(line);
+      paragraphs.push(...splitAssistantParagraphLine(line));
     });
 
     flushParagraphs();
@@ -410,71 +440,84 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
   const renderAssistantAnswer = (message: ChatMessage) => {
     const blocks = parseAssistantAnswerBlocks(message.text);
     const hasStructuredBlocks = blocks.some(block => block.type !== 'paragraph');
-    const isShortPlainReply = !hasStructuredBlocks && message.text.trim().length <= 90;
-
-    if (isShortPlainReply) {
-      return (
-        <>
-          {renderMessageText(message.text, message.role)}
-          {renderMessageImages(message)}
-        </>
-      );
-    }
+    const isErrorAnswer = /失败|出错|错误|无法|不能|请先|超时|断开/.test(message.text);
+    const answerCardClass = isErrorAnswer
+      ? 'border-rose-100 bg-gradient-to-b from-rose-50/70 to-white'
+      : 'border-zinc-100 bg-gradient-to-b from-white to-zinc-50/70';
+    const assistantDotClass = isErrorAnswer ? 'bg-rose-500' : 'bg-indigo-500';
+    const assistantBadgeClass = isErrorAnswer
+      ? 'bg-rose-50 text-rose-600 ring-1 ring-rose-100'
+      : 'bg-indigo-50 text-indigo-600 ring-1 ring-indigo-100';
 
     return (
-      <div className="grid w-full gap-3">
-        {blocks.map((block, blockIndex) => {
-          if (block.type === 'paragraph') {
-            const isLeadParagraph = blockIndex === 0 && hasStructuredBlocks;
-            return (
-              <p
-                key={`assistant-paragraph-${blockIndex}`}
-                className={`text-[14px] leading-7 ${
-                  isLeadParagraph ? 'font-semibold text-zinc-900' : 'font-medium text-zinc-700'
-                }`}
-              >
-                {renderMessageText(block.text, message.role)}
-              </p>
-            );
-          }
+      <div className={`w-full rounded-[18px] border px-3.5 py-3.5 ${answerCardClass}`}>
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className={`h-2 w-2 shrink-0 rounded-full ${assistantDotClass}`} />
+            <span className="truncate text-[12px] font-black tracking-tight text-zinc-800">livart</span>
+          </div>
+          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-black ${assistantBadgeClass}`}>
+            {isErrorAnswer ? '提醒' : hasStructuredBlocks ? '整理好了' : '回答'}
+          </span>
+        </div>
+        <div className="grid w-full gap-2.5">
+          {blocks.map((block, blockIndex) => {
+            if (block.type === 'paragraph') {
+              const isLeadParagraph = blockIndex === 0 && hasStructuredBlocks;
+              return (
+                <p
+                  key={`assistant-paragraph-${blockIndex}`}
+                  className={`rounded-[13px] border px-3 py-2.5 text-[14px] leading-7 ${
+                    isErrorAnswer
+                      ? 'border-rose-100 bg-white/80 font-semibold text-rose-700'
+                      : isLeadParagraph
+                        ? 'border-zinc-100 bg-white/90 font-semibold text-zinc-900'
+                        : 'border-zinc-100 bg-white/70 font-medium text-zinc-700'
+                  }`}
+                >
+                  {renderMessageText(block.text, message.role)}
+                </p>
+              );
+            }
 
-          if (block.type === 'numbered') {
+            if (block.type === 'numbered') {
+              return (
+                <ol key={`assistant-numbered-${blockIndex}`} className="grid gap-2">
+                  {block.items.map((item, itemIndex) => (
+                    <li
+                      key={`assistant-numbered-${blockIndex}-${itemIndex}`}
+                      className="flex gap-3 rounded-[13px] border border-zinc-100 bg-white/85 px-3 py-2.5 text-[13px] font-medium leading-6 text-zinc-700"
+                    >
+                      <span className="mt-0.5 flex h-5 min-w-5 items-center justify-center rounded-full bg-zinc-900 text-[10px] font-black leading-none text-white">
+                        {itemIndex + 1}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        {renderMessageText(item, message.role)}
+                      </span>
+                    </li>
+                  ))}
+                </ol>
+              );
+            }
+
             return (
-              <ol key={`assistant-numbered-${blockIndex}`} className="grid gap-2">
+              <ul key={`assistant-bullets-${blockIndex}`} className="grid gap-2">
                 {block.items.map((item, itemIndex) => (
                   <li
-                    key={`assistant-numbered-${blockIndex}-${itemIndex}`}
-                    className="flex gap-3 rounded-[12px] border border-zinc-100 bg-zinc-50/80 px-3 py-2.5 text-[13px] font-medium leading-6 text-zinc-700"
+                    key={`assistant-bullets-${blockIndex}-${itemIndex}`}
+                    className="flex gap-2.5 rounded-[13px] border border-indigo-50 bg-white/85 px-3 py-2.5 text-[13px] font-medium leading-6 text-zinc-700"
                   >
-                    <span className="mt-0.5 flex h-5 min-w-5 items-center justify-center rounded-full bg-zinc-900 text-[10px] font-black leading-none text-white">
-                      {itemIndex + 1}
-                    </span>
+                    <span className="mt-[9px] h-1.5 w-1.5 shrink-0 rounded-full bg-indigo-500" />
                     <span className="min-w-0 flex-1">
                       {renderMessageText(item, message.role)}
                     </span>
                   </li>
                 ))}
-              </ol>
+              </ul>
             );
-          }
-
-          return (
-            <ul key={`assistant-bullets-${blockIndex}`} className="grid gap-2">
-              {block.items.map((item, itemIndex) => (
-                <li
-                  key={`assistant-bullets-${blockIndex}-${itemIndex}`}
-                  className="flex gap-2.5 rounded-[12px] border border-indigo-50 bg-indigo-50/50 px-3 py-2.5 text-[13px] font-medium leading-6 text-zinc-700"
-                >
-                  <span className="mt-[9px] h-1.5 w-1.5 shrink-0 rounded-full bg-indigo-500" />
-                  <span className="min-w-0 flex-1">
-                    {renderMessageText(item, message.role)}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          );
-        })}
-        {renderMessageImages(message)}
+          })}
+          {renderMessageImages(message)}
+        </div>
       </div>
     );
   };
