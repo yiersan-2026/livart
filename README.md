@@ -262,6 +262,33 @@ npm run dev
 
 脚本会停止当前监听 `3000` 和 `8080` 的 livart 开发进程，然后启动后端 `mvn spring-boot:run -Dspring-boot.run.profiles=dev` 与前端 Vite dev server。配置读取顺序为 `.env`、`backend/.env`、`frontend/.env.local`，如果本机有 Codex 本地记忆文件，也会作为开发环境兜底；日志写入 `.codex-run/dev/backend.log` 和 `.codex-run/dev/frontend.log`。该脚本只处理前端 `3000` 与后端 `8080`，不会触碰其他项目端口。
 
+### Jenkins 生产部署
+
+官方生产环境通过 Jenkins 从 Gitee `main` 分支拉取代码、构建前后端并重启服务。仓库提供了复用脚本：
+
+```bash
+./scripts/deploy-jenkins.sh
+```
+
+脚本会触发 Jenkins job、等待构建结果，并在成功后访问生产健康检查地址。默认值适配官方生产环境：
+
+- `JENKINS_URL=https://jenkins.ai987654321.com`
+- `JENKINS_JOB=livart-deploy`
+- `JENKINS_USER=admin`
+- `LIVART_HEALTH_URL=https://livart.suntools.pro/api/health`
+
+开源用户可以把自己的 Jenkins 配置写入不提交仓库的 `.env.deploy`：
+
+```bash
+JENKINS_URL=https://jenkins.example.com
+JENKINS_JOB=livart-deploy
+JENKINS_USER=admin
+JENKINS_TOKEN=your-jenkins-api-token
+LIVART_HEALTH_URL=https://your-domain.example/api/health
+```
+
+也可以通过 `JENKINS_TOKEN_FILE` 或 `JENKINS_TOKEN_REMOTE_HOST` 让脚本从本机/远端文件读取 token。不要把真实 Jenkins token、SSH 密码或 `.env.deploy` 提交到 Git 仓库。
+
 ### API 配置
 
 如果服务端没有配置默认 AI 网关，首次登录后会自动弹出中转站配置；如果服务端已经配置 `LIVART_DEFAULT_API_BASE_URL` 和 `LIVART_DEFAULT_API_KEY`，新用户会直接使用服务器默认配置。之后也可以点击界面左上角的设置图标修改。个人配置会保存到后端数据库，并按登录用户隔离，不同用户可以使用不同的中转站和模型。只需要填入：
