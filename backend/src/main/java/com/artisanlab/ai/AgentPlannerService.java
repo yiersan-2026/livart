@@ -402,7 +402,7 @@ public class AgentPlannerService {
                 - 删除物体
                 - 去背景 / 抠图
                 - 图层拆分 / 提取主体层 / 生成背景层
-                - 多角度 / 改视角 / 主体旋转 / 摄像头视角变化
+                - 多角度 / 改视角 / 整图视角变化 / 摄像头视角变化
                 - 画布、项目、导出、下载、画幅比例、参考图、提示词优化等 livart 功能说明
 
                 你现在只会收到已经被上一步判定为“生图”的请求。不要执行内容安全审核，不要拒绝，不要判断是否能生成；只负责把请求规划成图片任务，最终能否生成由后续生图接口判断。
@@ -420,7 +420,7 @@ public class AgentPlannerService {
                 - 如果有候选图片，taskType 优先是 image-edit。
                 - mode=background-removal 表示去背景/抠图并保留主体；mode=remover 表示删除涂抹区域内的物体；mode=edit 表示普通单图编辑。
                 - mode=layer-subject 表示从原图提取主体图层；mode=layer-background 表示从原图生成移除主体后的背景层。
-                - mode=view-change 表示基于原图生成新的拍摄角度、主体旋转角度或摄像头视角变化。
+                - mode=view-change 表示基于原图完整画面生成新的拍摄角度、整图转向或摄像头视角变化，不是只旋转单个主体。
                 - baseImageId 必须是最终要被编辑、承载变化或放置物体的那张图。
                 - referenceImageIds 只放素材参考图，不要包含 baseImageId。
                 - “把图1的拖鞋穿到图2的人物脚上”中，图2是 baseImageId，图1进入 referenceImageIds。
@@ -548,8 +548,8 @@ public class AgentPlannerService {
 
         if ("view-change".equals(mode)) {
             return List.of(
-                    new AiProxyDtos.AgentPlanStep("identify-view-change", "识别视角", "确认原图主体与目标旋转、倾斜和缩放参数。", "analysis"),
-                    new AiProxyDtos.AgentPlanStep("optimize-view-change", "规划视角", "生成保持主体一致的新视角编辑指令。", "prompt"),
+                    new AiProxyDtos.AgentPlanStep("identify-view-change", "识别视角", "确认原图完整场景与目标旋转、倾斜和缩放参数。", "analysis"),
+                    new AiProxyDtos.AgentPlanStep("optimize-view-change", "规划视角", "生成保持整张图内容一致的新视角编辑指令。", "prompt"),
                     new AiProxyDtos.AgentPlanStep("run-view-change", "执行多角度", "调用图片编辑接口输出新角度结果。", "edit")
             );
         }
@@ -858,7 +858,7 @@ public class AgentPlannerService {
             return List.of("识别主图主体", "准备生成背景层", "开始拆分图层");
         }
         if ("view-change".equals(mode)) {
-            return List.of("识别主图视角", "规划角度参数", "准备生成新视角");
+            return List.of("识别整张图视角", "规划角度参数", "准备生成整图新视角");
         }
         if (referenceImageIds != null && !referenceImageIds.isEmpty()) {
             return List.of("识别主图和参考图", "整理位置与约束", "准备执行图片编辑");

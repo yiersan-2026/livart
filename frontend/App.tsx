@@ -209,6 +209,34 @@ const createChatMessage = (
   ...options
 });
 
+const getChatMessageResultImageIds = (message: Pick<ChatMessage, 'imageIds' | 'imageResultCards'>) => {
+  const ids = new Set<string>();
+  message.imageIds?.forEach(id => {
+    if (id) ids.add(id);
+  });
+  message.imageResultCards?.forEach(card => {
+    if (card.imageId) ids.add(card.imageId);
+  });
+  return ids;
+};
+
+const hasAssistantImageResultMessage = (
+  messages: ChatMessage[],
+  imageIds: Iterable<string>
+) => {
+  const imageIdSet = new Set(imageIds);
+  if (imageIdSet.size === 0) return false;
+
+  return messages.some(message => {
+    if (message.role !== 'assistant') return false;
+    const messageImageIds = getChatMessageResultImageIds(message);
+    for (const imageId of imageIdSet) {
+      if (messageImageIds.has(imageId)) return true;
+    }
+    return false;
+  });
+};
+
 const hasRunningAgentPlan = (message: ChatMessage) => (
   message.role === 'assistant' &&
   (
@@ -250,11 +278,7 @@ const appendImageCompletionMessage = (
   imageId: string,
   isEdit: boolean
 ) => {
-  const alreadyExists = messages.some(message => (
-    message.role === 'assistant' &&
-    (message.imageIds?.includes(imageId) || message.text.includes(`@${imageId}`))
-  ));
-  if (alreadyExists) return messages;
+  if (hasAssistantImageResultMessage(messages, [imageId])) return messages;
 
   return [
     ...messages,
@@ -757,6 +781,7 @@ function App() {
   const saveRevisionRef = useRef(Date.now());
   const resumedImageJobIdsRef = useRef<Set<string>>(new Set());
   const resumedAgentRunIdsRef = useRef<Set<string>>(new Set());
+  const activeAgentRunIdsRef = useRef<Set<string>>(new Set());
   const canvasHistoryPastRef = useRef<CanvasHistorySnapshot[]>([]);
   const canvasHistoryFutureRef = useRef<CanvasHistorySnapshot[]>([]);
   const canvasHistoryTimerRef = useRef<number | null>(null);
@@ -954,6 +979,7 @@ function App() {
     resetCanvasHistory(createCanvasHistorySnapshot(state.items, state.viewport.pan, state.viewport.zoom, [], state.settings.backgroundColor || DEFAULT_CANVAS_BACKGROUND_COLOR));
     resumedImageJobIdsRef.current = new Set();
     resumedAgentRunIdsRef.current = new Set();
+    activeAgentRunIdsRef.current = new Set();
   };
 
   const loadProjectById = async (projectId: string) => {
@@ -1400,6 +1426,7 @@ function App() {
     reconnectMessages.forEach((message) => {
       const runId = message.agentRunId;
       if (!runId || resumedAgentRunIdsRef.current.has(runId)) return;
+      if (activeAgentRunIdsRef.current.has(runId)) return;
       resumedAgentRunIdsRef.current.add(runId);
 
       let finished = false;
@@ -1809,7 +1836,13 @@ function App() {
   };
 
   const addMessage = (text: string, role: 'user' | 'assistant', options: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan' | 'agentRunId' | 'agentRunStatus'> = {}) => {
-    setMessages(prev => [...prev, createChatMessage(text, role, options)]);
+    setMessages(prev => {
+      const resultImageIds = getChatMessageResultImageIds(options);
+      if (role === 'assistant' && hasAssistantImageResultMessage(prev, resultImageIds)) {
+        return prev;
+      }
+      return [...prev, createChatMessage(text, role, options)];
+    });
   };
 
   const appendDraftMessage = (
@@ -1987,6 +2020,7 @@ function App() {
     let showAgentPlan = true;
     let collapsedPlanText = '';
     let unsubscribeAgentRunEvents: () => void = () => {};
+    activeAgentRunIdsRef.current.add(agentRunClientId);
 
     const syncAgentPlanMessage = (nextPlan: AgentPlan, nextText = nextPlan.summary) => {
       agentPlan = nextPlan;
@@ -2364,6 +2398,7 @@ function App() {
         durationMs: Date.now() - startedAt
       });
     } finally {
+      activeAgentRunIdsRef.current.delete(agentRunClientId);
       unsubscribeAgentRunEvents();
       if (imageTaskStartedAt !== null && isImageTaskTimerActive) {
         imageTaskTimerKeys.forEach(timerKey => finishTaskTimer(imageTaskStartedAt as number, timerKey));
