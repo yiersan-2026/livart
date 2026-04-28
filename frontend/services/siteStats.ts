@@ -3,6 +3,7 @@ import { authHeaders } from './auth';
 export interface SiteStatsOverview {
   userCount: number;
   generatedImageCount: number;
+  activeImageJobCount: number;
 }
 
 interface ApiResponse<T> {

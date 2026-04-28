@@ -249,6 +249,13 @@ public class AiProxyService {
         return toJobResponse(job);
     }
 
+    public long countActiveImageJobs() {
+        cleanupImageJobs();
+        return imageJobs.values().stream()
+                .filter(job -> "queued".equals(job.status()) || "running".equals(job.status()))
+                .count();
+    }
+
     public AiProxyDtos.ImageReferenceAnalysisResponse analyzeImageReferences(
             UUID userId,
             AiProxyDtos.ImageReferenceAnalysisRequest request

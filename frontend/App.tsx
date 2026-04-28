@@ -972,7 +972,7 @@ function App() {
     return () => {
       isMounted = false;
     };
-  }, [isAuthReady, authSession?.token]);
+  }, [isAuthReady, authSession?.token, activeTaskStartedAts.length]);
 
   useEffect(() => {
     if (!isAuthReady) return;
@@ -2145,6 +2145,14 @@ function App() {
             <span className="flex items-center gap-1.5">
               <Images size={14} className="text-gray-300" />
               生成 {formatSiteStatsCount(siteStats?.generatedImageCount)}
+            </span>
+            <span className="h-3 w-px bg-gray-100" />
+            <span className="flex items-center gap-1.5">
+              <Loader2
+                size={14}
+                className={`${(siteStats?.activeImageJobCount || 0) > 0 ? 'animate-spin text-indigo-400' : 'text-gray-300'}`}
+              />
+              进行中 {formatSiteStatsCount(siteStats?.activeImageJobCount)}
             </span>
           </div>
         </div>

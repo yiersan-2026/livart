@@ -6,7 +6,8 @@ public final class SiteStatsDtos {
 
     public record Overview(
             long userCount,
-            long generatedImageCount
+            long generatedImageCount,
+            long activeImageJobCount
     ) {
     }
 }
