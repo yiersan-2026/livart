@@ -50,7 +50,7 @@ optional_memory_field() {
 
 json_value() {
   local expression="$1"
-  python3 - "$expression" <<'PY'
+  python3 -c '
 import json
 import sys
 
@@ -71,7 +71,7 @@ elif isinstance(value, bool):
     print("true" if value else "false")
 else:
     print(value)
-PY
+' "$expression"
 }
 
 require_command() {
