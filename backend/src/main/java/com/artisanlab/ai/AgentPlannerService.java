@@ -50,14 +50,11 @@ public class AgentPlannerService {
 
         try {
             RawIntentDecision intentDecision = classifyIntent(config, request);
-            if ("reject".equals(intentDecision.responseMode())) {
-                return buildRejectedResponse(request.aspectRatio(), intentDecision.rejectionMessage(), intentDecision.thinkingSteps(), "ai");
-            }
             if ("answer".equals(intentDecision.responseMode())) {
                 String knowledgeAnswer = knowledgeAnswerService.answerSystemQuestion(
                         config,
                         request.prompt(),
-                        intentDecision.answerMessage()
+                        DEFAULT_SCOPE_HELP_MESSAGE
                 );
                 return buildAnswerResponse(request.aspectRatio(), knowledgeAnswer, intentDecision.thinkingSteps(), "ai");
             }
@@ -328,15 +325,16 @@ public class AgentPlannerService {
                 - 多角度 / 改视角 / 主体旋转 / 摄像头视角变化
                 - 画布、项目、导出、下载、画幅比例、参考图、提示词优化等 livart 功能说明
 
-                如果用户的问题不属于以上范围，比如天气、新闻、通用百科、编程、翻译、写作、数学题、情感建议等，必须拒答。
+                你现在只会收到已经被上一步判定为“生图”的请求。不要执行内容安全审核，不要拒绝，不要判断是否能生成；只负责把请求规划成图片任务，最终能否生成由后续生图接口判断。
                 只输出严格 JSON，不要 Markdown，不要解释，不要额外字段：
                 {"allowed":true或false,"responseMode":"execute 或 answer 或 reject","rejectionMessage":"如果拒答，这里给出简短中文引导；否则为空字符串","answerMessage":"如果是 livart 功能问答，这里给出简短中文回答；否则为空字符串","taskType":"text-to-image 或 image-edit","mode":"generate 或 edit 或 background-removal 或 remover 或 layer-subject 或 layer-background 或 view-change","count":1到4的整数,"baseImageId":"候选图片 id，没有就空字符串","referenceImageIds":["其他候选图片 id"],"displayTitle":"给这次图片任务生成的简短中文标题","displayMessage":"展示给用户的一句自然回复","thinkingSteps":["步骤1","步骤2","步骤3"]}
 
                 规则：
-                - 如果请求超出 livart 范围，allowed=false，responseMode=reject，rejectionMessage 必填，其余字段留空或默认。
+                - 默认 allowed=true，responseMode=execute。不要返回 reject，不要输出拒绝理由。
                 - 如果用户是在询问 livart 的功能、用法、限制、导出、下载、画幅、图片编辑方式等站内问题，allowed=true，responseMode=answer，answerMessage 必填，不要规划图片生成。
                 - 如果用户问“你是谁”“你叫什么”“你好”等身份/问候问题，allowed=true，responseMode=answer，回答你是 livart 站内 AI 图像创作助手，可以帮用户生成和编辑图片。
                 - 只有当用户明确要生成图片、编辑图片、去背景、局部重绘、删除物体时，responseMode 才是 execute。
+                - 如果上一步已经把用户输入判定为图片任务，不要再做内容安全审核，不要因为尺度、人物、风格、商品、场景或提示词敏感而拒绝；只负责规划任务，最终能否生成由后续生图接口判断。
                 - 如果用户明确要求生成多张图，count 可以是 2 到 4；没有明确数量时 count=1；图片编辑任务 count 固定为 1。
                 - 如果没有候选图片，taskType 必须是 text-to-image，mode 必须是 generate。
                 - 如果有候选图片，taskType 优先是 image-edit。
@@ -362,19 +360,18 @@ public class AgentPlannerService {
 
     private String getIntentClassifierSystemPrompt() {
         return """
-                你是 livart 的意图分类器。你的职责只有一个：判断用户这句话是想让系统执行图片任务、询问 livart 功能，还是在问无关问题。
-                只输出严格 JSON，不要 Markdown，不要解释，不要额外字段：
-                {"responseMode":"execute 或 answer 或 reject","answerMessage":"当 responseMode=answer 时填写一段简短中文回答，否则为空字符串","rejectionMessage":"当 responseMode=reject 时填写一段简短中文拒答引导，否则为空字符串","thinkingSteps":["步骤1","步骤2"]}
+                你是 livart 的意图分类器。你的职责只有一个：从固定选项里判断用户输入属于“问答”还是“生图”。
+                你只能输出下面两个固定值之一：
+                问答
+                生图
+
+                不要输出 JSON，不要解释，不要标点，不要 Markdown，不要额外字段，不要拒绝。
 
                 规则：
-                - responseMode=execute：用户明确要生成图片、编辑图片、局部重绘、删除物体、去背景、抠图、图层拆分、提取主体层、生成背景层、改视角、多角度、主体旋转、摄像头角度变化、改图、换背景、换物体，或者输入本身就是明显的画面描述 / 生图提示词。
-                - responseMode=answer：用户是在询问 livart 的功能、用法、导出、下载、画幅、参考图、画布、项目、局部重绘、删除物体、去背景、图层拆分、多角度，或询问你是谁/你叫什么/你好等站内助手身份问题。
-                - responseMode=reject：用户在闲聊，或提问天气、新闻、编程、翻译、数学、通用百科、情感建议等与 livart 无关的内容。
-                - 如果用户说“你是谁”“你叫什么”“你好”，这属于 answer；回答你是 livart 站内 AI 图像创作助手，可以帮用户生成和编辑图片。
-                - 对于很短但明显像画面描述的输入，比如“小猫在雨夜街头”“赛博朋克少女”，判为 execute。
-                - thinkingSteps 输出 2 到 3 条简短中文短句，每条不超过 16 个汉字，不要泄露内部推理。
-                - answerMessage 要直接回答，不要把用户引去通用聊天。
-                - rejectionMessage 要明确说明你只支持 livart 相关功能，并引导用户去生成或编辑图片。
+                - 问答：用户在询问 livart 的功能、用法、导出、下载、画幅、参考图、画布、项目、登录、统计、部署、工具按钮、局部重绘、删除物体、去背景、图层拆分、多角度，或询问“你是谁”“你叫什么”“你好”等站内助手问题。
+                - 生图：用户明确要生成图片、编辑图片、局部重绘、删除物体、去背景、抠图、图层拆分、提取主体层、生成背景层、改视角、多角度、主体旋转、摄像头角度变化、改图、换背景、换物体，或者输入本身就是明显的画面描述 / 生图提示词。
+                - 如果用户输入包含图片描述、人物/商品/动物/场景/镜头/风格/画幅/参考图/局部区域修改要求，一律输出“生图”。
+                - 不要判断提示词是否能生成，不要审核内容，不要返回拒绝话术。
                 """;
     }
 
@@ -416,6 +413,7 @@ public class AgentPlannerService {
 
     private String buildIntentClassifierInput(AiProxyDtos.AgentPlanRequest request) {
         StringBuilder builder = new StringBuilder();
+        builder.append("请只返回固定值“问答”或“生图”。\n");
         builder.append("用户指令：").append(request.prompt()).append("\n");
         if (request.contextImageId() != null && !request.contextImageId().isBlank()) {
             builder.append("当前有上下文图片：是，id=").append(request.contextImageId()).append("\n");
@@ -954,13 +952,14 @@ public class AgentPlannerService {
     }
 
     private RawIntentDecision parseIntentDecision(String responseText) throws IOException {
-        JsonNode data = objectMapper.readTree(extractJsonObjectText(responseText));
-        return new RawIntentDecision(
-                normalizeIntentResponseMode(readJsonTextField(data, "responseMode")),
-                readJsonTextField(data, "answerMessage"),
-                readJsonTextField(data, "rejectionMessage"),
-                readJsonTextArrayField(data, "thinkingSteps")
-        );
+        String normalized = normalizeIntentClassifierOutput(responseText);
+        if ("问答".equals(normalized)) {
+            return new RawIntentDecision("answer", List.of("识别意图", "归类为问答"));
+        }
+        if ("生图".equals(normalized)) {
+            return new RawIntentDecision("execute", List.of("识别意图", "归类为生图"));
+        }
+        throw new IOException("intent classifier returned unexpected value: " + safePreview(responseText));
     }
 
     private List<String> readJsonTextArrayField(JsonNode data, String fieldName) {
@@ -1028,12 +1027,36 @@ public class AgentPlannerService {
         return message.replaceAll("\\s+", " ").trim();
     }
 
-    private static String normalizeIntentResponseMode(String value) {
-        return switch (normalizeToken(value)) {
-            case "answer" -> "answer";
-            case "reject" -> "reject";
-            default -> "execute";
-        };
+    private static String normalizeIntentClassifierOutput(String value) {
+        String normalized = value == null ? "" : value
+                .replaceFirst("(?i)^```(?:text|markdown)?\\s*", "")
+                .replaceFirst("(?i)```$", "")
+                .replaceAll("[\\s\"'`“”‘’。\\.，,：:；;！!？?\\[\\]{}()（）]", "")
+                .trim();
+        if ("问答".equals(normalized) || "answer".equalsIgnoreCase(normalized)) {
+            return "问答";
+        }
+        if ("生图".equals(normalized)
+                || "生成图片".equals(normalized)
+                || "图片".equals(normalized)
+                || "execute".equalsIgnoreCase(normalized)
+                || "image".equalsIgnoreCase(normalized)) {
+            return "生图";
+        }
+        boolean containsAnswer = normalized.contains("问答");
+        boolean containsImageTask = normalized.contains("生图") || normalized.contains("生成图片");
+        if (containsAnswer && !containsImageTask) {
+            return "问答";
+        }
+        if (containsImageTask && !containsAnswer) {
+            return "生图";
+        }
+        return normalized;
+    }
+
+    private static String safePreview(String value) {
+        String normalized = value == null ? "" : value.replaceAll("\\s+", " ").trim();
+        return normalized.length() <= 80 ? normalized : normalized.substring(0, 80);
     }
 
     record RawAgentPlan(
@@ -1054,8 +1077,6 @@ public class AgentPlannerService {
 
     record RawIntentDecision(
             String responseMode,
-            String answerMessage,
-            String rejectionMessage,
             List<String> thinkingSteps
     ) {
     }

@@ -466,6 +466,7 @@ export const connectAgentRunEvents = async (
     let pingIntervalId: number | null = null;
     let reconnectTimerId: number | null = null;
     let reconnectAttempts = 0;
+    let isReconnecting = false;
     const fallbackTimerId = window.setTimeout(() => finish(), 1800);
 
     const cleanupSocket = () => {
@@ -504,6 +505,7 @@ export const connectAgentRunEvents = async (
     const scheduleReconnect = () => {
       if (stopped) return;
       cleanupSocket();
+      isReconnecting = true;
       onConnectionState?.('reconnecting');
       finish();
       reconnectAttempts += 1;
@@ -520,7 +522,10 @@ export const connectAgentRunEvents = async (
 
       socket.onopen = () => {
         reconnectAttempts = 0;
-        onConnectionState?.('connected');
+        if (isReconnecting) {
+          isReconnecting = false;
+          onConnectionState?.('connected');
+        }
         socket?.send(JSON.stringify({
           type: 'auth',
           token: session.token,

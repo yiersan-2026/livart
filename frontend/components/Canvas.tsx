@@ -1875,11 +1875,13 @@ const Canvas: React.FC<CanvasProps> = ({
 
         const imageResult = await waitForImageJob(job.jobId, {
           onConnectionState: (state) => {
-            onChatMessageUpdate(planningMessageId, message => ({
-              ...message,
-              text: state === 'reconnecting' ? '等待重连，重连后会自动更新图片结果。' : '已重新连接，正在同步图片结果。',
-              agentPlan: splitAgentPlan
-            }));
+            if (state === 'reconnecting') {
+              onChatMessageUpdate(planningMessageId, message => ({
+                ...message,
+                text: '等待重连，重连后会自动更新图片结果。',
+                agentPlan: splitAgentPlan
+              }));
+            }
           },
           onStatus: (jobStatus) => {
             const queueNotice = getImageJobQueueMessage(jobStatus, `${getLayerSplitLabel(role)}任务`);
@@ -2771,10 +2773,9 @@ const Canvas: React.FC<CanvasProps> = ({
       let queuedInlineJob = false;
       const imageResult: ImageGenerationResult = await waitForImageJob(job.jobId, {
         onConnectionState: (state) => {
-          syncInlineAgentPlanMessage(
-            inlineAgentPlan,
-            state === 'reconnecting' ? '等待重连，重连后会自动更新图片结果。' : '已重新连接，正在同步图片结果。'
-          );
+          if (state === 'reconnecting') {
+            syncInlineAgentPlanMessage(inlineAgentPlan, '等待重连，重连后会自动更新图片结果。');
+          }
         },
         onStatus: (jobStatus) => {
           const queueNotice = buildInlineImageJobQueueNotice(jobStatus);

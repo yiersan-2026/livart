@@ -1223,7 +1223,7 @@ function App() {
 
     updateMessageById(message.id, currentMessage => ({
       ...currentMessage,
-      text: '已重新连接，正在同步图片结果。',
+      text: buildExecutionAnnouncement(agentRun.plan),
       agentPlan: undefined,
       agentRunStatus: 'running'
     }));
@@ -1305,14 +1305,14 @@ function App() {
               startTaskTimer(startedAt);
               isTaskTimerActive = true;
             }
-            updateMessageById(message.id, currentMessage => ({
-              ...currentMessage,
-              text: state === 'reconnecting'
-                ? '等待重连，重连后会自动更新图片结果。'
-                : '已重新连接，正在同步图片结果。',
-              agentPlan: undefined,
-              agentRunStatus: state === 'reconnecting' ? 'waiting-reconnect' : 'running'
-            }));
+            if (state === 'reconnecting') {
+              updateMessageById(message.id, currentMessage => ({
+                ...currentMessage,
+                text: '等待重连，重连后会自动更新图片结果。',
+                agentPlan: undefined,
+                agentRunStatus: 'waiting-reconnect'
+              }));
+            }
           }
         });
         const persistedImageItem = await ensureCanvasImageAsset({
@@ -2236,7 +2236,6 @@ function App() {
                 startTaskTimer(imageTaskStartedAt);
                 isImageTaskTimerActive = true;
               }
-              updateExecutionMessage('已重新连接，正在同步图片结果。', 'running');
             }
           },
           onStatus: (jobStatus) => {
@@ -2342,11 +2341,7 @@ function App() {
       markAgentPlanStep(activePlanStepId, 'error');
       updateMessageById(planningMessageId, message => ({
         ...message,
-        text: showAgentPlan
-          ? (message.agentPlan?.summary
-            ? `${message.agentPlan.summary} 但执行失败了。`
-            : 'AI 任务规划失败。')
-          : (collapsedPlanText || message.text || '任务已开始，但执行失败了。'),
+        text: '任务执行失败，请查看下面的错误原因。',
         agentPlan: undefined,
         agentRunStatus: 'error'
       }));

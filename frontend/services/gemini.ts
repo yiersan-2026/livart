@@ -272,6 +272,7 @@ const waitForImageJobByWebSocket = async (jobId: string, options: WaitForImageJo
     let activeSocket: WebSocket | null = null;
     let reconnectTimerId: number | null = null;
     let reconnectAttempts = 0;
+    let isReconnecting = false;
     const startedAt = Date.now();
     const timeoutId = window.setTimeout(() => {
       finishReject(new Error('图片任务超过 10 分钟仍未完成，请稍后刷新页面查看'));
@@ -317,6 +318,7 @@ const waitForImageJobByWebSocket = async (jobId: string, options: WaitForImageJo
 
     const scheduleReconnect = () => {
       if (settled) return;
+      isReconnecting = true;
       options.onConnectionState?.('reconnecting');
       const elapsedMs = Date.now() - startedAt;
       if (elapsedMs >= REQUEST_TIMEOUT_MS) {
@@ -355,7 +357,10 @@ const waitForImageJobByWebSocket = async (jobId: string, options: WaitForImageJo
 
       socket.onopen = () => {
         reconnectAttempts = 0;
-        options.onConnectionState?.('connected');
+        if (isReconnecting) {
+          isReconnecting = false;
+          options.onConnectionState?.('connected');
+        }
         socket.send(JSON.stringify({
           type: 'auth',
           token: session.token,
