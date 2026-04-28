@@ -2517,6 +2517,7 @@ function App() {
               title={canvasSyncText}
             />
           </div>
+          <ProjectLinks />
           <div
             className="flex min-h-11 max-w-[calc(100vw-520px)] flex-wrap items-center gap-x-3 gap-y-1 rounded-2xl border border-gray-100 bg-white/90 px-3 py-2 text-[11px] font-black text-gray-500 shadow-[0_18px_48px_-28px_rgba(0,0,0,0.35)] backdrop-blur-2xl"
             title={siteStatsError || '站点实时统计，每 3 秒刷新一次'}
@@ -2609,7 +2610,6 @@ function App() {
               <LogOut size={18} />
             </button>
           </div>
-          <ProjectLinks />
         </div>
 
         {exportProjectImageError && (
