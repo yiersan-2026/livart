@@ -6,7 +6,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class AiProxyServiceErrorMappingTest {
     @Test
-    void wrapsImageUpstream502AsContentPolicyMessage() {
+    void mapsUpstream502EofAsConnectionInterruptedInsteadOfContentPolicy() {
         AiProxyService.UserFacingImageJobError error = AiProxyService.toUserFacingImageJobError(
                 502,
                 "EOF reached while reading",
@@ -14,10 +14,11 @@ class AiProxyServiceErrorMappingTest {
                 ""
         );
 
-        assertThat(error.message()).contains("可能").contains("安全策略");
-        assertThat(error.code()).isEqualTo("POSSIBLE_CONTENT_POLICY_BLOCKED");
-        assertThat(error.type()).isEqualTo("content_policy");
-        assertThat(error.hideUpstreamPayload()).isTrue();
+        assertThat(error.message()).contains("连接中断");
+        assertThat(error.message()).doesNotContain("安全策略");
+        assertThat(error.code()).isEqualTo("UPSTREAM_CONNECTION_INTERRUPTED");
+        assertThat(error.type()).isEqualTo("upstream_network");
+        assertThat(error.hideUpstreamPayload()).isFalse();
     }
 
     @Test
@@ -40,6 +41,21 @@ class AiProxyServiceErrorMappingTest {
         AiProxyService.UserFacingImageJobError error = AiProxyService.toUserFacingImageJobError(
                 400,
                 "Your request was rejected by the safety policy",
+                "",
+                ""
+        );
+
+        assertThat(error.message()).contains("安全策略");
+        assertThat(error.code()).isEqualTo("POSSIBLE_CONTENT_POLICY_BLOCKED");
+        assertThat(error.type()).isEqualTo("content_policy");
+        assertThat(error.hideUpstreamPayload()).isTrue();
+    }
+
+    @Test
+    void wrapsExplicitPolicyTextEvenWhenUpstreamStatusIs502() {
+        AiProxyService.UserFacingImageJobError error = AiProxyService.toUserFacingImageJobError(
+                502,
+                "request blocked by content policy",
                 "",
                 ""
         );

@@ -1,4 +1,4 @@
-import type { AgentPlan, AgentPlanStep, CanvasItem, ImageAspectRatio } from '../types';
+import type { AgentPlan, AgentPlanStep, AgentToolId, CanvasItem, ImageAspectRatio } from '../types';
 import { authHeaders, getStoredAuthSession } from './auth';
 import { getCanvasItemAssetId } from './canvasPersistence';
 import { hasUsableImageSource } from './imageSources';
@@ -55,6 +55,8 @@ export interface AgentPlanRequest {
   aspectRatio?: ImageAspectRatio;
   contextImageId?: string;
   requestedEditMode?: 'local-redraw' | 'remover' | 'layer-subject' | 'layer-background' | 'view-change';
+  forcedToolId?: AgentToolId;
+  externalSkillId?: string;
   images: CanvasItem[];
 }
 
@@ -619,7 +621,7 @@ const normalizePlan = (payload: AgentPlanApiResponse, aspectRatio: ImageAspectRa
       status: index === 0 ? 'running' : 'pending'
     }))
     : [],
-  source: payload.source === 'fallback' ? 'fallback' : 'ai'
+  source: payload.source === 'tool' ? 'tool' : payload.source === 'fallback' ? 'fallback' : 'ai'
 });
 
 function normalizeAgentRunPayload(payload: AgentRunApiResponse, aspectRatio: ImageAspectRatio, fallbackPrompt = ''): AgentRun {
@@ -640,7 +642,7 @@ function normalizeAgentRunPayload(payload: AgentRunApiResponse, aspectRatio: Ima
     displayTitle: payload.displayTitle || plan.displayTitle,
     displayMessage: payload.displayMessage || plan.displayMessage,
     jobs: Array.isArray(payload.jobs) ? payload.jobs : [],
-    source: payload.source === 'fallback' ? 'fallback' : 'ai'
+    source: payload.source === 'tool' ? 'tool' : payload.source === 'fallback' ? 'fallback' : 'ai'
   };
 }
 
@@ -669,6 +671,8 @@ export const createAgentRun = async (request: AgentRunRequest): Promise<AgentRun
       contextImageId: request.contextImageId || '',
       aspectRatio,
       requestedEditMode: request.requestedEditMode || '',
+      forcedToolId: request.forcedToolId || '',
+      externalSkillId: request.externalSkillId || '',
       images: mapImageCandidates(request.images),
       maskDataUrl: request.maskDataUrl || '',
       clientRunId: request.clientRunId || ''

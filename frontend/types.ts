@@ -64,6 +64,17 @@ export type ImageAspectRatio = 'auto' | '1:1' | '4:3' | '3:4' | '16:9' | '9:16';
 
 export type CanvasTool = 'select' | 'pan' | 'text';
 
+export type AgentToolId =
+  | 'tool.image.generate'
+  | 'tool.image.edit'
+  | 'tool.image.local-redraw'
+  | 'tool.image.remove-object'
+  | 'tool.image.remove-background'
+  | 'tool.image.change-view'
+  | 'tool.image.layer-subject'
+  | 'tool.image.layer-background'
+  | 'tool.image.layer-split';
+
 export interface AgentPlanStep {
   id: string;
   title: string;
@@ -88,7 +99,7 @@ export interface AgentPlan {
   displayMessage: string;
   thinkingSteps: string[];
   steps: AgentPlanStep[];
-  source: 'ai' | 'fallback';
+  source: 'ai' | 'fallback' | 'tool';
 }
 
 export interface PlanStep {
@@ -118,4 +129,14 @@ export interface ChatImageResultCard {
   modelName?: string;
   title?: string;
   description?: string;
+}
+
+export interface ExternalSkillSummary {
+  id: string;
+  name: string;
+  version?: string;
+  description?: string;
+  sourceUrl?: string;
+  license?: string;
+  supportedTools: string[];
 }

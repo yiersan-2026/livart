@@ -294,9 +294,7 @@ class AgentPlannerServiceTest {
                 anyString(),
                 any(),
                 eq("agent-intent-classifier")
-        )).thenReturn("""
-                {"responseMode":"answer","answerMessage":"我是 livart 站内 AI 图像创作助手，可以帮你生成和编辑图片。","rejectionMessage":"","thinkingSteps":["识别身份提问","回答助手身份"]}
-                """);
+        )).thenReturn("问答");
         when(knowledgeAnswerService.answerSystemQuestion(
                 eq(config),
                 eq("你是谁"),
@@ -366,5 +364,49 @@ class AgentPlannerServiceTest {
         assertThatThrownBy(() -> service.createPlan(userId, request))
                 .isInstanceOf(ApiException.class)
                 .hasMessageContaining("Spring AI 上游错误");
+    }
+
+    @Test
+    void createForcedToolPlanUsesContextImageAsEditBaseWithoutAiPlanning() {
+        AgentPlannerService service = new AgentPlannerService(null, null, null, new com.fasterxml.jackson.databind.ObjectMapper());
+        AiProxyDtos.AgentPlanRequest request = new AiProxyDtos.AgentPlanRequest(
+                "去背景",
+                "main-image",
+                "auto",
+                "",
+                List.of(
+                        new AiProxyDtos.ImageReferenceCandidate("main-image", "人物照片", 1, 768, 1024, "11111111-1111-1111-1111-111111111111"),
+                        new AiProxyDtos.ImageReferenceCandidate("ref-image", "参考背景", 2, 1024, 768, "22222222-2222-2222-2222-222222222222")
+                )
+        );
+
+        AiProxyDtos.AgentPlanResponse plan = service.createForcedToolPlan(request, "tool.image.remove-background");
+
+        assertThat(plan.responseMode()).isEqualTo("execute");
+        assertThat(plan.taskType()).isEqualTo("image-edit");
+        assertThat(plan.mode()).isEqualTo("background-removal");
+        assertThat(plan.baseImageId()).isEqualTo("main-image");
+        assertThat(plan.referenceImageIds()).containsExactly("ref-image");
+        assertThat(plan.source()).isEqualTo("tool");
+    }
+
+    @Test
+    void createForcedToolPlanMapsLocalRedrawToImageEditTool() {
+        AgentPlannerService service = new AgentPlannerService(null, null, null, new com.fasterxml.jackson.databind.ObjectMapper());
+        AiProxyDtos.AgentPlanRequest request = new AiProxyDtos.AgentPlanRequest(
+                "把圈里的花改成小猫",
+                "base",
+                "auto",
+                "local-redraw",
+                List.of(new AiProxyDtos.ImageReferenceCandidate("base", "花园照片", 1, 1024, 1024, "33333333-3333-3333-3333-333333333333"))
+        );
+
+        AiProxyDtos.AgentPlanResponse plan = service.createForcedToolPlan(request, "tool.image.local-redraw");
+
+        assertThat(plan.taskType()).isEqualTo("image-edit");
+        assertThat(plan.mode()).isEqualTo("edit");
+        assertThat(plan.baseImageId()).isEqualTo("base");
+        assertThat(plan.steps()).extracting(AiProxyDtos.AgentPlanStep::id)
+                .containsExactly("identify-images", "optimize-edit-prompt", "run-image-edit");
     }
 }

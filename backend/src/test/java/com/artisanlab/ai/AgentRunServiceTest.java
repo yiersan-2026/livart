@@ -1,5 +1,6 @@
 package com.artisanlab.ai;
 
+import com.artisanlab.skill.ExternalSkillService;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -23,7 +24,9 @@ class AgentRunServiceTest {
         AgentPlannerService plannerService = mock(AgentPlannerService.class);
         AiProxyService aiProxyService = mock(AiProxyService.class);
         ImageJobEventBroadcaster eventBroadcaster = mock(ImageJobEventBroadcaster.class);
-        AgentRunService service = new AgentRunService(plannerService, aiProxyService, eventBroadcaster);
+        ExternalSkillService externalSkillService = mock(ExternalSkillService.class);
+        when(externalSkillService.requirePromptGuidance(any())).thenReturn("");
+        AgentRunService service = new AgentRunService(plannerService, aiProxyService, eventBroadcaster, externalSkillService);
         UUID userId = UUID.randomUUID();
         AiProxyDtos.AgentRunRequest request = new AiProxyDtos.AgentRunRequest(
                 "livart 怎么导出图片？",
@@ -31,6 +34,8 @@ class AgentRunServiceTest {
                 "auto",
                 "",
                 List.of(),
+                "",
+                "",
                 "",
                 "run-answer"
         );
@@ -70,7 +75,9 @@ class AgentRunServiceTest {
         AgentPlannerService plannerService = mock(AgentPlannerService.class);
         AiProxyService aiProxyService = mock(AiProxyService.class);
         ImageJobEventBroadcaster eventBroadcaster = mock(ImageJobEventBroadcaster.class);
-        AgentRunService service = new AgentRunService(plannerService, aiProxyService, eventBroadcaster);
+        ExternalSkillService externalSkillService = mock(ExternalSkillService.class);
+        when(externalSkillService.requirePromptGuidance(any())).thenReturn("");
+        AgentRunService service = new AgentRunService(plannerService, aiProxyService, eventBroadcaster, externalSkillService);
         UUID userId = UUID.randomUUID();
         AiProxyDtos.AgentRunRequest request = new AiProxyDtos.AgentRunRequest(
                 "生成3张小猫",
@@ -79,12 +86,14 @@ class AgentRunServiceTest {
                 "",
                 List.of(),
                 "",
+                "",
+                "",
                 "run-generate"
         );
         AiProxyDtos.AgentPlanResponse plan = executePlan("text-to-image", "generate", 3, "", List.of(), "1:1");
 
         when(plannerService.createPlan(eq(userId), any())).thenReturn(plan);
-        when(aiProxyService.createTextToImageJobsFromAgent(eq(userId), eq("生成3张小猫"), eq("1:1"), eq(3)))
+        when(aiProxyService.createTextToImageJobsFromAgent(eq(userId), eq("生成3张小猫"), eq("1:1"), eq(3), eq("")))
                 .thenReturn(List.of(job("job-1"), job("job-2"), job("job-3")));
 
         AiProxyDtos.AgentRunResponse response = service.run(userId, request);
@@ -93,9 +102,53 @@ class AgentRunServiceTest {
                 .containsExactly("job-1", "job-2", "job-3");
         assertThat(response.displayTitle()).isEqualTo("小猫图片");
         assertThat(response.displayMessage()).isEqualTo("我开始为你生成 3 张小猫图片。");
-        verify(aiProxyService).createTextToImageJobsFromAgent(eq(userId), eq("生成3张小猫"), eq("1:1"), eq(3));
+        verify(aiProxyService).createTextToImageJobsFromAgent(eq(userId), eq("生成3张小猫"), eq("1:1"), eq(3), eq(""));
         verify(aiProxyService, never()).createTextToImageJobFromAgent(any(), any(), any());
         verify(eventBroadcaster, times(5)).publishAgentRunEvent(eq(userId), eq("run-generate"), any());
+    }
+
+    @Test
+    void selectedExternalSkillAddsGuidanceToTextToImagePromptOptimization() throws IOException {
+        AgentPlannerService plannerService = mock(AgentPlannerService.class);
+        AiProxyService aiProxyService = mock(AiProxyService.class);
+        ImageJobEventBroadcaster eventBroadcaster = mock(ImageJobEventBroadcaster.class);
+        ExternalSkillService externalSkillService = mock(ExternalSkillService.class);
+        when(externalSkillService.requirePromptGuidance(eq("gpt-image"))).thenReturn("外部 Skill：GPT Image 2\nSkill 指南：按 Skill 编译提示词");
+        AgentRunService service = new AgentRunService(plannerService, aiProxyService, eventBroadcaster, externalSkillService);
+        UUID userId = UUID.randomUUID();
+        AiProxyDtos.AgentRunRequest request = new AiProxyDtos.AgentRunRequest(
+                "生成一张中文海报",
+                "",
+                "3:4",
+                "",
+                List.of(),
+                "",
+                "",
+                "gpt-image",
+                "run-skill-generate"
+        );
+        AiProxyDtos.AgentPlanResponse plan = executePlan("text-to-image", "generate", 1, "", List.of(), "3:4");
+
+        when(plannerService.createPlan(eq(userId), any())).thenReturn(plan);
+        when(aiProxyService.createTextToImageJobsFromAgent(
+                eq(userId),
+                eq("生成一张中文海报"),
+                eq("3:4"),
+                eq(1),
+                eq("外部 Skill：GPT Image 2\nSkill 指南：按 Skill 编译提示词")
+        )).thenReturn(List.of(job("skill-job")));
+
+        AiProxyDtos.AgentRunResponse response = service.run(userId, request);
+
+        assertThat(response.jobs()).extracting(AiProxyDtos.AgentRunJob::jobId).containsExactly("skill-job");
+        verify(externalSkillService).requirePromptGuidance(eq("gpt-image"));
+        verify(aiProxyService).createTextToImageJobsFromAgent(
+                eq(userId),
+                eq("生成一张中文海报"),
+                eq("3:4"),
+                eq(1),
+                eq("外部 Skill：GPT Image 2\nSkill 指南：按 Skill 编译提示词")
+        );
     }
 
     @Test
@@ -103,7 +156,9 @@ class AgentRunServiceTest {
         AgentPlannerService plannerService = mock(AgentPlannerService.class);
         AiProxyService aiProxyService = mock(AiProxyService.class);
         ImageJobEventBroadcaster eventBroadcaster = mock(ImageJobEventBroadcaster.class);
-        AgentRunService service = new AgentRunService(plannerService, aiProxyService, eventBroadcaster);
+        ExternalSkillService externalSkillService = mock(ExternalSkillService.class);
+        when(externalSkillService.requirePromptGuidance(any())).thenReturn("");
+        AgentRunService service = new AgentRunService(plannerService, aiProxyService, eventBroadcaster, externalSkillService);
         UUID userId = UUID.randomUUID();
         UUID personAssetId = UUID.randomUUID();
         UUID shoeAssetId = UUID.randomUUID();
@@ -116,6 +171,8 @@ class AgentRunServiceTest {
                         new AiProxyDtos.ImageReferenceCandidate("person", "人物图", 1, 512, 768, personAssetId.toString()),
                         new AiProxyDtos.ImageReferenceCandidate("shoe", "红色鞋子", 2, 300, 300, shoeAssetId.toString())
                 ),
+                "",
+                "",
                 "",
                 "run-edit"
         );
@@ -135,6 +192,75 @@ class AgentRunServiceTest {
         assertThat(jobRequest.prompt()).contains("原图“人物图”", "参考图 1“红色鞋子”");
         assertThat(jobRequest.prompt()).contains("原图宽高 512:768", "约 2:3");
         assertThat(jobRequest.prompt()).doesNotContain("@person", "@shoe");
+    }
+
+    @Test
+    void selectedExternalSkillSwitchesGenericImageEditToSkillMode() throws IOException {
+        AgentPlannerService plannerService = mock(AgentPlannerService.class);
+        AiProxyService aiProxyService = mock(AiProxyService.class);
+        ImageJobEventBroadcaster eventBroadcaster = mock(ImageJobEventBroadcaster.class);
+        ExternalSkillService externalSkillService = mock(ExternalSkillService.class);
+        when(externalSkillService.requirePromptGuidance(eq("gpt-image"))).thenReturn("外部 Skill：GPT Image 2\nSkill 指南：保留参考图一致性");
+        AgentRunService service = new AgentRunService(plannerService, aiProxyService, eventBroadcaster, externalSkillService);
+        UUID userId = UUID.randomUUID();
+        UUID baseAssetId = UUID.randomUUID();
+        AiProxyDtos.AgentRunRequest request = new AiProxyDtos.AgentRunRequest(
+                "把画面改成水彩风格",
+                "base",
+                "auto",
+                "",
+                List.of(new AiProxyDtos.ImageReferenceCandidate("base", "风景图", 1, 1024, 768, baseAssetId.toString())),
+                "",
+                "",
+                "gpt-image",
+                "run-skill-edit"
+        );
+        AiProxyDtos.AgentPlanResponse plan = executePlan("image-edit", "edit", 1, "base", List.of(), "auto");
+
+        when(plannerService.createPlan(eq(userId), any())).thenReturn(plan);
+        when(aiProxyService.createImageEditJobFromAgent(eq(userId), any())).thenReturn(job("skill-edit-job"));
+
+        service.run(userId, request);
+
+        ArgumentCaptor<AiProxyService.AgentImageEditJobRequest> captor = ArgumentCaptor.forClass(AiProxyService.AgentImageEditJobRequest.class);
+        verify(aiProxyService).createImageEditJobFromAgent(eq(userId), captor.capture());
+        AiProxyService.AgentImageEditJobRequest jobRequest = captor.getValue();
+        assertThat(jobRequest.promptOptimizationMode()).isEqualTo("skill-image-to-image");
+        assertThat(jobRequest.imageContext()).contains("外部 Skill：GPT Image 2", "保留参考图一致性");
+    }
+
+    @Test
+    void forcedToolRunBypassesAiPlannerAndCreatesImageEditJob() throws IOException {
+        AgentPlannerService plannerService = mock(AgentPlannerService.class);
+        AiProxyService aiProxyService = mock(AiProxyService.class);
+        ImageJobEventBroadcaster eventBroadcaster = mock(ImageJobEventBroadcaster.class);
+        ExternalSkillService externalSkillService = mock(ExternalSkillService.class);
+        when(externalSkillService.requirePromptGuidance(any())).thenReturn("");
+        AgentRunService service = new AgentRunService(plannerService, aiProxyService, eventBroadcaster, externalSkillService);
+        UUID userId = UUID.randomUUID();
+        UUID assetId = UUID.randomUUID();
+        AiProxyDtos.AgentRunRequest request = new AiProxyDtos.AgentRunRequest(
+                "去背景",
+                "base",
+                "auto",
+                "",
+                List.of(new AiProxyDtos.ImageReferenceCandidate("base", "人物图", 1, 512, 768, assetId.toString())),
+                "",
+                "tool.image.remove-background",
+                "",
+                "run-tool"
+        );
+        AiProxyDtos.AgentPlanResponse plan = executePlan("image-edit", "background-removal", 1, "base", List.of(), "auto");
+
+        when(plannerService.createForcedToolPlan(any(), eq("tool.image.remove-background"))).thenReturn(plan);
+        when(aiProxyService.createImageEditJobFromAgent(eq(userId), any())).thenReturn(job("tool-job"));
+
+        AiProxyDtos.AgentRunResponse response = service.run(userId, request);
+
+        assertThat(response.jobs()).extracting(AiProxyDtos.AgentRunJob::jobId).containsExactly("tool-job");
+        verify(plannerService, never()).createPlan(any(), any());
+        verify(plannerService).createForcedToolPlan(any(), eq("tool.image.remove-background"));
+        verify(aiProxyService).createImageEditJobFromAgent(eq(userId), any());
     }
 
     private static AiProxyDtos.AgentPlanResponse executePlan(

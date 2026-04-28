@@ -91,6 +91,8 @@ public final class AiProxyDtos {
             @Size(max = 12)
             List<@NotNull ImageReferenceCandidate> images,
             @Size(max = 8_000_000) String maskDataUrl,
+            @Size(max = 80) String forcedToolId,
+            @Size(max = 120) String externalSkillId,
             @Size(max = 80) String clientRunId
     ) {
         AgentPlanRequest toPlanRequest() {

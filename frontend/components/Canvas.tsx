@@ -1,6 +1,6 @@
 
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import type { AgentPlan, AgentPlanStep, CanvasItem, CanvasTool, CanvasTextStyle, ChatMessage, ImageAspectRatio } from '../types';
+import type { AgentPlan, AgentPlanStep, AgentToolId, CanvasItem, CanvasTool, CanvasTextStyle, ChatMessage, ImageAspectRatio } from '../types';
 import { 
   Loader2, Trash2, Type, 
   Sparkles, ChevronUp, ChevronDown, 
@@ -105,6 +105,21 @@ type CropDragState = {
   itemHeight: number;
 };
 type CanvasRect = Pick<CanvasItem, 'x' | 'y' | 'width' | 'height'>;
+type SelectionBox = {
+  startX: number;
+  startY: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  additive: boolean;
+};
+type CanvasContextMenu = {
+  x: number;
+  y: number;
+  id: string;
+  selectedIds: string[];
+};
 type SnapGuide = {
   axis: 'x' | 'y';
   position: number;
@@ -981,7 +996,7 @@ const Canvas: React.FC<CanvasProps> = ({
   const [isPanning, setIsPanning] = useState(false);
   const [isSpacePressed, setIsSpacePressed] = useState(false);
   const [lastMousePos, setLastMousePos] = useState({ x: 0, y: 0 });
-  const [selectionBox, setSelectionBox] = useState<{ startX: number, startY: number, x: number, y: number, w: number, h: number } | null>(null);
+  const [selectionBox, setSelectionBox] = useState<SelectionBox | null>(null);
   const [isDraggingImageFile, setIsDraggingImageFile] = useState(false);
   const [snapGuides, setSnapGuides] = useState<SnapGuide[]>([]);
 
@@ -1217,7 +1232,7 @@ const Canvas: React.FC<CanvasProps> = ({
   }, [canvasViewportSize.width, pan, selectedItem, zoom]);
 
   // 全局右键菜单状态
-  const [contextMenu, setContextMenu] = useState<{ x: number, y: number, id: string } | null>(null);
+  const [contextMenu, setContextMenu] = useState<CanvasContextMenu | null>(null);
 
   useEffect(() => {
     const element = containerRef.current;
@@ -1858,6 +1873,7 @@ const Canvas: React.FC<CanvasProps> = ({
           aspectRatio: 'auto',
           contextImageId: persistedSource.id,
           requestedEditMode: role === 'subject' ? 'layer-subject' : 'layer-background',
+          forcedToolId: role === 'subject' ? 'tool.image.layer-subject' : 'tool.image.layer-background',
           images: [persistedSource],
           clientRunId
         });
@@ -2230,15 +2246,18 @@ const Canvas: React.FC<CanvasProps> = ({
       return;
     }
 
-    if (e.target === e.currentTarget) {
-      setSelectedIds([]);
+    if (canvasTool === 'select' && activeTool === 'select' && e.target === e.currentTarget) {
+      if (!e.shiftKey) {
+        setSelectedIds([]);
+      }
       setSelectionBox({
         startX: (e.clientX - pan.x) / zoom,
         startY: (e.clientY - pan.y) / zoom,
         x: (e.clientX - pan.x) / zoom,
         y: (e.clientY - pan.y) / zoom,
         w: 0,
-        h: 0
+        h: 0,
+        additive: e.shiftKey
       });
       setContextMenu(null);
     }
@@ -2352,13 +2371,17 @@ const Canvas: React.FC<CanvasProps> = ({
       if (data) onItemUpdate(selectedItem.id, { drawingData: data });
     }
     if (selectionBox) {
-      const selected = items.filter(item => (
+      const selectedImageIds = items.filter(item => (
+        item.type === 'image' &&
         item.x < selectionBox.x + selectionBox.w &&
         item.x + item.width > selectionBox.x &&
         item.y < selectionBox.y + selectionBox.h &&
         item.y + item.height > selectionBox.y
-      )).map(i => i.id);
-      setSelectedIds(selected);
+      )).map(item => item.id);
+      setSelectedIds(selectionBox.additive
+        ? Array.from(new Set([...selectedIds, ...selectedImageIds]))
+        : selectedImageIds
+      );
       setSelectionBox(null);
     }
     setIsPanning(false);
@@ -2418,10 +2441,11 @@ const Canvas: React.FC<CanvasProps> = ({
   const handleItemContextMenu = (e: React.MouseEvent, id: string) => {
     e.preventDefault();
     e.stopPropagation();
+    const nextSelectedIds = selectedIds.includes(id) ? selectedIds : [id];
     if (!selectedIds.includes(id)) {
       setSelectedIds([id]);
     }
-    setContextMenu({ x: e.clientX, y: e.clientY, id });
+    setContextMenu({ x: e.clientX, y: e.clientY, id, selectedIds: nextSelectedIds });
   };
 
   const handleGenerateFromFramework = async () => {
@@ -2507,6 +2531,7 @@ const Canvas: React.FC<CanvasProps> = ({
         prompt: workflowPrompt,
         aspectRatio: 'auto',
         contextImageId: persistedSnapshot.id,
+        forcedToolId: 'tool.image.edit',
         images: [persistedSnapshot]
       });
       const job = agentRun.jobs[0];
@@ -2612,6 +2637,15 @@ const Canvas: React.FC<CanvasProps> = ({
         ? 'view-change'
         : isRemoverMode ? 'remover' : 'edit';
     const inlineAgentAspectRatio = isRemoverMode || isBackgroundRemovalMode || isViewChangeMode ? 'auto' : inlineEditAspectRatio;
+    const forcedToolId: AgentToolId = isBackgroundRemovalMode
+      ? 'tool.image.remove-background'
+      : isViewChangeMode
+        ? 'tool.image.change-view'
+        : isRemoverMode
+          ? 'tool.image.remove-object'
+          : localRedrawItemId === targetItem.id
+            ? 'tool.image.local-redraw'
+            : 'tool.image.edit';
     let inlineAgentPlan = buildAgentDraftPlan({
       taskType: 'image-edit',
       mode: inlineAgentMode,
@@ -2621,7 +2655,7 @@ const Canvas: React.FC<CanvasProps> = ({
     setInlineEditingStartedAt(prev => ({ ...prev, [targetItem.id]: startedAt }));
     clearInlineEditError(targetItem.id);
     onChatMessage(userMessage, 'user');
-    const planningMessageId = onChatDraftMessage('我先识别这次图片快捷编辑的意图。', 'assistant', {
+    const planningMessageId = onChatDraftMessage('正在准备图片编辑工具...', 'assistant', {
       agentPlan: inlineAgentPlan,
       agentRunId: agentRunClientId,
       agentRunStatus: 'running'
@@ -2706,6 +2740,7 @@ const Canvas: React.FC<CanvasProps> = ({
         aspectRatio: inlineAgentAspectRatio,
         contextImageId: targetItem.id,
         requestedEditMode: localMaskMode || (isViewChangeMode ? 'view-change' : undefined),
+        forcedToolId,
         images: persistentAgentImages,
         maskDataUrl: maskDataUrl || undefined,
         clientRunId: agentRunClientId
@@ -3318,6 +3353,13 @@ const Canvas: React.FC<CanvasProps> = ({
   };
 
   const contextMenuItem = items.find(i => i.id === contextMenu?.id);
+  const contextMenuSelectedImageIds = contextMenu
+    ? contextMenu.selectedIds.filter(id => items.some(item => item.id === id && item.type === 'image'))
+    : [];
+  const contextMenuDeleteIds = contextMenu
+    ? (contextMenuSelectedImageIds.length > 1 ? contextMenuSelectedImageIds : [contextMenu.id])
+    : [];
+  const contextMenuIsMultiImageAction = contextMenuDeleteIds.length > 1;
 
   const renderTextToolbar = () => {
     if (canvasTool !== 'select' || !selectedItem || selectedItem.type !== 'text' || selectedIds.length !== 1) return null;
@@ -4049,21 +4091,26 @@ const Canvas: React.FC<CanvasProps> = ({
 
       {contextMenu && (
         <div className="fixed z-[3000000] w-64 bg-white/95 backdrop-blur-3xl border border-gray-100 rounded-2xl shadow-2xl p-2.5 flex flex-col gap-1 animate-in zoom-in-95" style={{ left: contextMenu.x, top: contextMenu.y }} onMouseDown={(e) => e.stopPropagation()}>
-          {contextMenuItem?.type === 'image' && (
+          {contextMenuItem?.type === 'image' && !contextMenuIsMultiImageAction && (
             <button onClick={() => { onAddToChat(contextMenuItem); setContextMenu(null); }} className="flex items-center gap-3 w-full px-3 py-3 hover:bg-indigo-50 rounded-xl text-sm font-bold text-indigo-600 transition-all">
               <MessageSquarePlus size={20} />加入 AI 对话重塑
             </button>
           )}
+          {!contextMenuIsMultiImageAction && (
+            <>
+              <div className="h-px bg-gray-50 my-1 mx-2" />
+              <button onClick={() => adjustZIndex(contextMenu.id, 'front')} className="flex items-center justify-between w-full px-3 py-3 hover:bg-gray-50 rounded-xl text-sm font-bold text-gray-700 transition-all">
+                <div className="flex items-center gap-3"><ChevronUp size={20} className="text-gray-400" />置于顶层</div>
+              </button>
+              <button onClick={() => adjustZIndex(contextMenu.id, 'back')} className="flex items-center justify-between w-full px-3 py-3 hover:bg-gray-50 rounded-xl text-sm font-bold text-gray-700 transition-all">
+                <div className="flex items-center gap-3"><ChevronDown size={20} className="text-gray-400" />置于底层</div>
+              </button>
+            </>
+          )}
           <div className="h-px bg-gray-50 my-1 mx-2" />
-          <button onClick={() => adjustZIndex(contextMenu.id, 'front')} className="flex items-center justify-between w-full px-3 py-3 hover:bg-gray-50 rounded-xl text-sm font-bold text-gray-700 transition-all">
-            <div className="flex items-center gap-3"><ChevronUp size={20} className="text-gray-400" />置于顶层</div>
-          </button>
-          <button onClick={() => adjustZIndex(contextMenu.id, 'back')} className="flex items-center justify-between w-full px-3 py-3 hover:bg-gray-50 rounded-xl text-sm font-bold text-gray-700 transition-all">
-            <div className="flex items-center gap-3"><ChevronDown size={20} className="text-gray-400" />置于底层</div>
-          </button>
-          <div className="h-px bg-gray-50 my-1 mx-2" />
-          <button onClick={() => { onBeforeCanvasMutation(); onItemDelete(contextMenu.id); setContextMenu(null); }} className="flex items-center gap-3 w-full px-3 py-3 hover:bg-red-50 rounded-xl text-sm font-bold text-red-500 transition-all">
-            <Trash2 size={20} />删除选中节点
+          <button onClick={() => { onBeforeCanvasMutation(); onItemDeleteMultiple(contextMenuDeleteIds); setContextMenu(null); }} className="flex items-center gap-3 w-full px-3 py-3 hover:bg-red-50 rounded-xl text-sm font-bold text-red-500 transition-all">
+            <Trash2 size={20} />
+            {contextMenuIsMultiImageAction ? `删除选中图片（${contextMenuDeleteIds.length}）` : '删除选中节点'}
           </button>
         </div>
       )}

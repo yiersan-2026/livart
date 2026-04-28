@@ -93,6 +93,39 @@ public class AgentPlannerService {
         }
     }
 
+    public AiProxyDtos.AgentPlanResponse createForcedToolPlan(AiProxyDtos.AgentPlanRequest request, String forcedToolId) {
+        ForcedToolPlan toolPlan = resolveForcedToolPlan(forcedToolId, request);
+        List<AiProxyDtos.ImageReferenceCandidate> images = request.images() == null ? List.of() : request.images();
+        String baseImageId = "";
+        List<String> referenceImageIds = List.of();
+
+        if ("image-edit".equals(toolPlan.taskType())) {
+            if (images.isEmpty()) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "AGENT_TOOL_IMAGE_REQUIRED", "图片工具需要先选择一张图片");
+            }
+            baseImageId = selectFallbackBaseImageId(request.contextImageId(), images);
+            String resolvedBaseImageId = baseImageId;
+            referenceImageIds = images.stream()
+                    .map(AiProxyDtos.ImageReferenceCandidate::id)
+                    .filter(id -> !id.equals(resolvedBaseImageId))
+                    .toList();
+        }
+
+        return buildPlanResponse(
+                toolPlan.taskType(),
+                toolPlan.mode(),
+                toolPlan.count(),
+                baseImageId,
+                referenceImageIds,
+                request.aspectRatio(),
+                List.of(),
+                "tool",
+                request,
+                "",
+                ""
+        );
+    }
+
     static AiProxyDtos.AgentPlanResponse buildFallbackPlan(AiProxyDtos.AgentPlanRequest request) {
         if (isExplicitlyOutOfScopePrompt(request.prompt())) {
             return buildRejectedResponse(request.aspectRatio(), "", List.of("识别对话意图", "判断超出范围"), "fallback");
@@ -121,6 +154,53 @@ public class AgentPlannerService {
         }
 
         return buildPlanResponse(taskType, mode, 1, baseImageId, referenceImageIds, request.aspectRatio(), List.of(), "fallback", request, "", "");
+    }
+
+    private static ForcedToolPlan resolveForcedToolPlan(String forcedToolId, AiProxyDtos.AgentPlanRequest request) {
+        String normalized = normalizeForcedToolId(forcedToolId);
+        return switch (normalized) {
+            case "tool.image.generate" -> new ForcedToolPlan("text-to-image", "generate", inferForcedToolCount(request.prompt()));
+            case "tool.image.edit" -> new ForcedToolPlan("image-edit", "edit", 1);
+            case "tool.image.local-redraw" -> new ForcedToolPlan("image-edit", "edit", 1);
+            case "tool.image.remove-object" -> new ForcedToolPlan("image-edit", "remover", 1);
+            case "tool.image.remove-background" -> new ForcedToolPlan("image-edit", "background-removal", 1);
+            case "tool.image.change-view" -> new ForcedToolPlan("image-edit", "view-change", 1);
+            case "tool.image.layer-subject" -> new ForcedToolPlan("image-edit", "layer-subject", 1);
+            case "tool.image.layer-background" -> new ForcedToolPlan("image-edit", "layer-background", 1);
+            case "tool.image.layer-split" -> new ForcedToolPlan(
+                    "image-edit",
+                    "layer-background".equals(normalizeRequestedMode(request.requestedEditMode(), request.prompt()))
+                            ? "layer-background"
+                            : "layer-subject",
+                    1
+            );
+            default -> throw new ApiException(HttpStatus.BAD_REQUEST, "AGENT_TOOL_UNSUPPORTED", "不支持的图片工具：" + safePreview(forcedToolId));
+        };
+    }
+
+    private static String normalizeForcedToolId(String forcedToolId) {
+        String normalized = normalizeToken(forcedToolId).replace('_', '-');
+        if (normalized.isBlank()) {
+            return "";
+        }
+        if (!normalized.startsWith("tool.")) {
+            normalized = "tool." + normalized;
+        }
+        return normalized;
+    }
+
+    private static int inferForcedToolCount(String prompt) {
+        String text = prompt == null ? "" : prompt;
+        if (text.matches(".*([4四]张|生成[4四]|四个|4个).*")) {
+            return 4;
+        }
+        if (text.matches(".*([3三]张|生成[3三]|三个|3个).*")) {
+            return 3;
+        }
+        if (text.matches(".*([2二两]张|生成[2二两]|两个|2个).*")) {
+            return 2;
+        }
+        return 1;
     }
 
     static AiProxyDtos.AgentPlanResponse normalizePlan(RawAgentPlan rawPlan, AiProxyDtos.AgentPlanRequest request, String source) {
@@ -1078,6 +1158,13 @@ public class AgentPlannerService {
     record RawIntentDecision(
             String responseMode,
             List<String> thinkingSteps
+    ) {
+    }
+
+    private record ForcedToolPlan(
+            String taskType,
+            String mode,
+            int count
     ) {
     }
 }

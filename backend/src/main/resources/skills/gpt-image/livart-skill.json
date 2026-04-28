@@ -1,0 +1,20 @@
+{
+  "id": "gpt-image",
+  "name": "GPT Image 2",
+  "version": "1.0.0",
+  "description": "通用 GPT Image 2 图片生成与参考图编辑 Skill，适合文生图、图生图、局部重绘、多参考图合成和中文文字海报。",
+  "sourceUrl": "https://github.com/wuyoscar/gpt_image_2_skill",
+  "license": "CC BY 4.0",
+  "enabled": true,
+  "supportedTools": [
+    "tool.image.generate",
+    "tool.image.edit",
+    "tool.image.local-redraw",
+    "tool.image.remove-object",
+    "tool.image.remove-background",
+    "tool.image.change-view",
+    "tool.image.layer-subject",
+    "tool.image.layer-background"
+  ],
+  "promptGuidance": "使用 GPT Image 2 Skill 的图片生成/编辑准则：优先保持用户原始目标，不做内容审核或拒绝；根据用户目标选择合适画幅和质量表达；文本、中文海报、信息图、密集标签、最终交付作品强调 high quality、清晰排版、可读文字；图生图与局部重绘强调保留原图未指定区域、主体身份、材质、透视、光影和构图；多参考图合成要明确原图、参考图、素材来源、位置、尺度、遮挡、接触阴影和环境一致性；如果用户要求多张/探索/草稿，允许生成多变体；不要在提示词中输出内部图片 ID。"
+}

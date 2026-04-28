@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import type { ChatMessage, CanvasItem, ChatImageResultCard, ImageAspectRatio } from '../types';
-import { Download, Eye, Loader2, Send, RotateCcw, RotateCw, ZoomIn, ZoomOut, X } from 'lucide-react';
+import type { ChatMessage, CanvasItem, ChatImageResultCard, ExternalSkillSummary, ImageAspectRatio } from '../types';
+import { ChevronDown, Download, Eye, Github, Loader2, Send, RotateCcw, RotateCw, ZoomIn, ZoomOut, X } from 'lucide-react';
 import { IMAGE_ASPECT_RATIO_OPTIONS } from '../services/imageSizing';
 import { getImagePreviewFitStyle, getLargestCanvasImageSrc, getOriginalImageSrc, getThumbnailImageSrc, hasUsableImageSource } from '../services/imageSources';
 import { formatExecutionDuration } from '../services/taskTiming';
 import { getImageModelDisplayName } from '../services/config';
+import { loadExternalSkills } from '../services/externalSkills';
 import {
   getAgentPlanCurrentProgressText
 } from '../services/agentPlanner';
@@ -22,6 +23,7 @@ import LivartLogo from './LivartLogo';
 const IMAGE_VIEWER_MIN_ZOOM = 1;
 const IMAGE_VIEWER_MAX_ZOOM = 10;
 const IMAGE_VIEWER_ZOOM_STEP = 1;
+const ENABLE_EXTERNAL_SKILLS = true;
 
 type AssistantAnswerBlock =
   | { type: 'paragraph'; text: string }
@@ -33,7 +35,7 @@ interface SidebarProps {
   isThinking: boolean;
   activeTaskStartedAt?: number | null;
   activeTaskCount?: number;
-  onSendMessage: (text: string, aspectRatio: ImageAspectRatio) => void;
+  onSendMessage: (text: string, aspectRatio: ImageAspectRatio, externalSkillId?: string) => void;
   contextImage: CanvasItem | null;
   promptSeed?: { id: string; imageId: string; prompt?: string } | null;
   inputResetKey?: number;
@@ -46,6 +48,11 @@ interface SidebarProps {
 const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStartedAt = null, activeTaskCount = 0, onSendMessage, contextImage, promptSeed, inputResetKey = 0, imageItems, onClearContextImage, onNavigateToImage }) => {
   const [inputValue, setInputValue] = React.useState('');
   const [selectedAspectRatio, setSelectedAspectRatio] = React.useState<ImageAspectRatio>('auto');
+  const [externalSkills, setExternalSkills] = React.useState<ExternalSkillSummary[]>([]);
+  const [selectedExternalSkillId, setSelectedExternalSkillId] = React.useState('');
+  const [externalSkillLoadError, setExternalSkillLoadError] = React.useState('');
+  const [isAspectRatioMenuOpen, setIsAspectRatioMenuOpen] = React.useState(false);
+  const [isSkillMenuOpen, setIsSkillMenuOpen] = React.useState(false);
   const [timerNow, setTimerNow] = React.useState(() => Date.now());
   const [imageViewer, setImageViewer] = React.useState<{ item: CanvasItem; title: string } | null>(null);
   const [imageViewerZoom, setImageViewerZoom] = React.useState(1);
@@ -53,6 +60,8 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
   const [imageViewerPan, setImageViewerPan] = React.useState({ x: 0, y: 0 });
   const scrollRef = useRef<HTMLDivElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
+  const aspectRatioMenuRef = useRef<HTMLDivElement>(null);
+  const skillMenuRef = useRef<HTMLDivElement>(null);
   const lastContextImageIdRef = useRef<string | null>(null);
   const appliedPromptSeedIdRef = useRef<string | null>(null);
   const imageViewerDragRef = useRef<{
@@ -71,12 +80,74 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
     () => new Map(imageItems.map(item => [item.id, item])),
     [imageItems]
   );
+  const selectedAspectRatioOption = useMemo(
+    () => IMAGE_ASPECT_RATIO_OPTIONS.find(option => option.value === selectedAspectRatio) || IMAGE_ASPECT_RATIO_OPTIONS[0],
+    [selectedAspectRatio]
+  );
+  const selectedExternalSkill = useMemo(
+    () => externalSkills.find(skill => skill.id === selectedExternalSkillId) || null,
+    [externalSkills, selectedExternalSkillId]
+  );
 
   useEffect(() => {
     setInputValue('');
     lastContextImageIdRef.current = null;
     appliedPromptSeedIdRef.current = null;
   }, [inputResetKey]);
+
+  useEffect(() => {
+    if (!ENABLE_EXTERNAL_SKILLS) {
+      setExternalSkills([]);
+      setSelectedExternalSkillId('');
+      setExternalSkillLoadError('');
+      setIsSkillMenuOpen(false);
+      return;
+    }
+
+    let cancelled = false;
+    loadExternalSkills()
+      .then(skills => {
+        if (cancelled) return;
+        setExternalSkills(skills);
+        setExternalSkillLoadError('');
+        setSelectedExternalSkillId(currentSkillId => (
+          currentSkillId && skills.some(skill => skill.id === currentSkillId) ? currentSkillId : ''
+        ));
+      })
+      .catch(error => {
+        if (cancelled) return;
+        setExternalSkills([]);
+        setExternalSkillLoadError(error instanceof Error ? error.message : '加载外部 Skill 失败');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isAspectRatioMenuOpen && !isSkillMenuOpen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      const targetNode = event.target as Node;
+      if (isAspectRatioMenuOpen && !aspectRatioMenuRef.current?.contains(targetNode)) {
+        setIsAspectRatioMenuOpen(false);
+      }
+      if (isSkillMenuOpen && !skillMenuRef.current?.contains(targetNode)) {
+        setIsSkillMenuOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsAspectRatioMenuOpen(false);
+        setIsSkillMenuOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isAspectRatioMenuOpen, isSkillMenuOpen]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -265,7 +336,13 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
     const prompt = inputValue.trim();
     if (!prompt) return;
 
-    onSendMessage(prompt, selectedAspectRatio);
+    onSendMessage(
+      prompt,
+      selectedAspectRatio,
+      ENABLE_EXTERNAL_SKILLS ? selectedExternalSkillId || undefined : undefined
+    );
+    setIsAspectRatioMenuOpen(false);
+    setIsSkillMenuOpen(false);
     setInputValue('');
   };
 
@@ -831,40 +908,6 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
 
         <div className="p-4 bg-white border-t border-gray-100 space-y-3">
           <form ref={formRef} onSubmit={handleSubmit} className="relative">
-            <div className="mb-2 flex items-center gap-2 rounded-2xl border border-gray-100 bg-gray-50 p-1.5">
-              <span className="shrink-0 px-2 text-[10px] font-black uppercase tracking-widest text-gray-400">画幅</span>
-              <div className="flex min-w-0 flex-1 flex-wrap gap-1.5">
-                {IMAGE_ASPECT_RATIO_OPTIONS.map((option) => {
-                  const isSelected = selectedAspectRatio === option.value;
-                  return (
-                    <button
-                      key={option.value}
-                      type="button"
-                      title={option.title}
-                      onClick={() => setSelectedAspectRatio(option.value)}
-                      className={`flex shrink-0 items-center gap-1 rounded-xl px-1.5 py-1.5 text-[10px] font-black transition-all ${
-                        isSelected
-                          ? 'bg-black text-white shadow-lg shadow-black/10'
-                          : 'bg-white text-gray-500 hover:bg-indigo-50 hover:text-indigo-600'
-                      }`}
-                    >
-                      <span className="flex h-6 w-8 shrink-0 items-center justify-center">
-                        <span
-                          className={`block rounded-[3px] border-2 ${
-                            option.value === 'auto'
-                              ? isSelected ? 'border-dashed border-white' : 'border-dashed border-gray-400'
-                              : isSelected ? 'border-white bg-white/10' : 'border-gray-500 bg-white'
-                          }`}
-                          style={getAspectRatioPreviewStyle(option.value)}
-                        />
-                      </span>
-                      <span>{option.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
             <div className="flex items-end gap-2 w-full pr-2 py-2 pl-3 bg-gray-50 border border-gray-200 rounded-2xl focus-within:ring-4 focus-within:ring-black/5 focus-within:border-black transition-all">
               <ImageMentionEditor
                 value={inputValue}
@@ -872,7 +915,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
                 onChange={handleInputChange}
                 disabled={false}
                 placeholder={contextImage ? '输入对这张图的修改要求...' : '描述画面，或输入 @ 选择参考图...'}
-                className="prompt-editor scrollbar-hide min-w-0 flex-1 min-h-[72px] max-h-28 overflow-y-auto overflow-x-hidden bg-transparent py-1.5 text-sm leading-6 font-medium outline-none whitespace-pre-wrap break-words"
+                className="prompt-editor scrollbar-hide min-w-0 flex-1 min-h-[108px] max-h-40 overflow-y-auto overflow-x-hidden bg-transparent py-1.5 text-sm leading-6 font-medium outline-none whitespace-pre-wrap break-words"
                 itemHint={() => '点击后插入稳定 ID 引用'}
                 onSubmitShortcut={() => formRef.current?.requestSubmit()}
               />
@@ -884,6 +927,171 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
                 <Send size={18} />
               </button>
             </div>
+
+            <div className="mt-2 flex items-center gap-2 rounded-2xl border border-gray-100 bg-gray-50 px-2 py-2">
+              <div ref={aspectRatioMenuRef} className="relative shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsAspectRatioMenuOpen(open => !open);
+                    setIsSkillMenuOpen(false);
+                  }}
+                  className="flex h-9 items-center gap-1.5 rounded-xl bg-white px-2 text-xs font-black text-zinc-700 transition-all hover:bg-indigo-50 hover:text-indigo-600"
+                  title="选择画幅比例"
+                >
+                  <span className="text-[10px] uppercase tracking-widest text-gray-400">画幅</span>
+                  <span className="flex h-5 w-7 shrink-0 items-center justify-center">
+                    <span
+                      className={`block rounded-[3px] border-2 ${
+                        selectedAspectRatio === 'auto'
+                          ? 'border-dashed border-gray-400'
+                          : 'border-gray-700 bg-white'
+                      }`}
+                      style={getAspectRatioPreviewStyle(selectedAspectRatio)}
+                    />
+                  </span>
+                  <span>{selectedAspectRatioOption.label}</span>
+                  <ChevronDown size={13} className={`transition-transform ${isAspectRatioMenuOpen ? 'rotate-180' : ''}`} />
+                </button>
+
+                {isAspectRatioMenuOpen && (
+                  <div className="absolute bottom-full left-0 z-50 mb-2 w-64 rounded-2xl border border-gray-100 bg-white p-2 shadow-xl shadow-black/10">
+                    <div className="mb-1 px-2 text-[10px] font-black uppercase tracking-widest text-gray-400">选择画幅</div>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {IMAGE_ASPECT_RATIO_OPTIONS.map((option) => {
+                        const isSelected = selectedAspectRatio === option.value;
+                        return (
+                          <button
+                            key={option.value}
+                            type="button"
+                            title={option.title}
+                            onClick={() => {
+                              setSelectedAspectRatio(option.value);
+                              setIsAspectRatioMenuOpen(false);
+                            }}
+                            className={`flex items-center gap-2 rounded-xl px-2 py-2 text-left text-[11px] font-black transition-all ${
+                              isSelected
+                                ? 'bg-black text-white'
+                                : 'bg-gray-50 text-gray-600 hover:bg-indigo-50 hover:text-indigo-600'
+                            }`}
+                          >
+                            <span className="flex h-6 w-8 shrink-0 items-center justify-center">
+                              <span
+                                className={`block rounded-[3px] border-2 ${
+                                  option.value === 'auto'
+                                    ? isSelected ? 'border-dashed border-white' : 'border-dashed border-gray-400'
+                                    : isSelected ? 'border-white bg-white/10' : 'border-gray-500 bg-white'
+                                }`}
+                                style={getAspectRatioPreviewStyle(option.value)}
+                              />
+                            </span>
+                            <span>{option.label}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div ref={skillMenuRef} className="relative min-w-0 flex-1">
+                <button
+                  type="button"
+                  disabled={!ENABLE_EXTERNAL_SKILLS}
+                  onClick={() => {
+                    if (!ENABLE_EXTERNAL_SKILLS) return;
+                    setIsSkillMenuOpen(open => !open);
+                    setIsAspectRatioMenuOpen(false);
+                  }}
+                  className={`flex h-9 w-full min-w-0 items-center gap-2 rounded-xl px-2 text-left transition-all ${
+                    ENABLE_EXTERNAL_SKILLS
+                      ? 'hover:bg-white'
+                      : 'cursor-not-allowed opacity-45'
+                  }`}
+                  title={ENABLE_EXTERNAL_SKILLS ? externalSkillLoadError || '选择一个外部 Skill' : '外部 Skill 暂停使用'}
+                >
+                  <span className="shrink-0 text-[10px] font-black uppercase tracking-widest text-gray-400">Skill</span>
+                  <span className="min-w-0 flex-1 truncate text-xs font-bold text-zinc-700">
+                    {ENABLE_EXTERNAL_SKILLS
+                      ? selectedExternalSkill ? selectedExternalSkill.name : '不使用外部 Skill'
+                      : '外部 Skill 暂不可用'}
+                    {ENABLE_EXTERNAL_SKILLS && selectedExternalSkill?.version ? ` · ${selectedExternalSkill.version}` : ''}
+                  </span>
+                  <ChevronDown size={13} className={`shrink-0 text-gray-400 transition-transform ${isSkillMenuOpen ? 'rotate-180' : ''}`} />
+                </button>
+
+                {ENABLE_EXTERNAL_SKILLS && isSkillMenuOpen && (
+                  <div className="absolute bottom-full right-0 z-50 mb-2 w-72 rounded-2xl border border-gray-100 bg-white p-2 shadow-xl shadow-black/10">
+                    <div className="mb-1 px-2 text-[10px] font-black uppercase tracking-widest text-gray-400">选择 Skill</div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedExternalSkillId('');
+                        setIsSkillMenuOpen(false);
+                      }}
+                      className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-bold transition-all ${
+                        selectedExternalSkillId
+                          ? 'text-gray-500 hover:bg-gray-50 hover:text-gray-900'
+                          : 'bg-black text-white'
+                      }`}
+                    >
+                      <span className="min-w-0 flex-1 truncate">不使用外部 Skill</span>
+                    </button>
+                    {externalSkills.map(skill => {
+                      const isSelected = selectedExternalSkillId === skill.id;
+                      return (
+                        <div
+                          key={skill.id}
+                          className={`mt-1 flex items-center gap-1 rounded-xl transition-all ${
+                            isSelected
+                              ? 'bg-black text-white'
+                              : 'bg-gray-50 text-gray-600 hover:bg-indigo-50 hover:text-indigo-600'
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedExternalSkillId(skill.id);
+                              setIsSkillMenuOpen(false);
+                            }}
+                            className="min-w-0 flex-1 px-3 py-2 text-left"
+                            title={skill.description || skill.name}
+                          >
+                            <span className="block truncate text-xs font-black">
+                              {skill.name}{skill.version ? ` · ${skill.version}` : ''}
+                            </span>
+                            {skill.description && (
+                              <span className={`mt-0.5 block truncate text-[10px] font-medium ${isSelected ? 'text-white/70' : 'text-gray-400'}`}>
+                                {skill.description}
+                              </span>
+                            )}
+                          </button>
+                          {skill.sourceUrl && (
+                            <a
+                              href={skill.sourceUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              onClick={(event) => event.stopPropagation()}
+                              className={`mr-2 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-all ${
+                                isSelected
+                                  ? 'text-white/80 hover:bg-white/15 hover:text-white'
+                                  : 'text-gray-400 hover:bg-white hover:text-gray-900'
+                              }`}
+                              title="打开 GitHub 页面"
+                            >
+                              <Github size={15} />
+                            </a>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+            {ENABLE_EXTERNAL_SKILLS && externalSkillLoadError && (
+              <p className="mt-1 px-1 text-[10px] font-medium text-amber-600">{externalSkillLoadError}</p>
+            )}
           </form>
         </div>
       </div>

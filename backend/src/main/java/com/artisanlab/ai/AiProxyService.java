@@ -168,11 +168,25 @@ public class AiProxyService {
             String aspectRatio,
             int count
     ) throws IOException {
+        return createTextToImageJobsFromAgent(userId, prompt, aspectRatio, count, "");
+    }
+
+    public List<Map<String, Object>> createTextToImageJobsFromAgent(
+            UUID userId,
+            String prompt,
+            String aspectRatio,
+            int count,
+            String promptOptimizeContext
+    ) throws IOException {
         cleanupImageJobs();
         UserApiConfigDtos.ResolvedConfig config = userApiConfigService.getRequiredConfig(userId);
         ObjectNode body = objectMapper.createObjectNode();
         body.put("model", config.model());
         body.put("prompt", appendAspectRatioToPrompt(prompt, aspectRatio));
+        if (promptOptimizeContext != null && !promptOptimizeContext.isBlank()) {
+            body.put("promptOptimizeContext", promptOptimizeContext.trim());
+            body.put("promptOptimizationMode", "skill-text-to-image");
+        }
 
         ImageProxyRequestBody requestBody = readJsonImageProxyRequestBody(
                 config,
@@ -657,7 +671,9 @@ public class AiProxyService {
                 || "background-removal".equals(normalizedValue)
                 || "layer-split-subject".equals(normalizedValue)
                 || "layer-split-background".equals(normalizedValue)
-                || "view-change".equals(normalizedValue)) {
+                || "view-change".equals(normalizedValue)
+                || "skill-text-to-image".equals(normalizedValue)
+                || "skill-image-to-image".equals(normalizedValue)) {
             return normalizedValue;
         }
         return fallbackMode;
@@ -1147,6 +1163,15 @@ public class AiProxyService {
             String upstreamCode,
             String upstreamType
     ) {
+        if (isLikelyUpstreamTransportFailure(upstreamStatus, upstreamMessage, upstreamCode, upstreamType)) {
+            return new UserFacingImageJobError(
+                    "图片生成失败：上游 AI 生成连接中断，可能是生成耗时过长或网关超时，请稍后重试；如果多次出现，可以先降低画幅/分辨率再试。",
+                    "UPSTREAM_CONNECTION_INTERRUPTED",
+                    "upstream_network",
+                    false
+            );
+        }
+
         if (isLikelyContentPolicyBlocked(upstreamStatus, upstreamMessage, upstreamCode, upstreamType)) {
             return new UserFacingImageJobError(
                     "图片生成失败：提示词或参考图片可能触发了上游 AI 的内容安全策略，请调整描述、降低敏感内容或更换参考图后再试。",
@@ -1164,22 +1189,39 @@ public class AiProxyService {
         );
     }
 
+    private static boolean isLikelyUpstreamTransportFailure(
+            int upstreamStatus,
+            String upstreamMessage,
+            String upstreamCode,
+            String upstreamType
+    ) {
+        String combined = normalizeErrorText(upstreamMessage, upstreamCode, upstreamType);
+        if (combined.isBlank()) return false;
+
+        return upstreamStatus == 502 && (
+                combined.contains("eof")
+                        || combined.contains("connection reset")
+                        || combined.contains("connection closed")
+                        || combined.contains("connection aborted")
+                        || combined.contains("read timed out")
+                        || combined.contains("timeout")
+                        || combined.contains("timed out")
+                        || combined.contains("socket")
+                        || combined.contains("stream closed")
+                        || combined.contains("premature")
+                        || combined.contains("网关超时")
+                        || combined.contains("连接中断")
+                        || combined.contains("连接断开")
+        );
+    }
+
     private static boolean isLikelyContentPolicyBlocked(
             int upstreamStatus,
             String upstreamMessage,
             String upstreamCode,
             String upstreamType
     ) {
-        String combined = String.join(
-                " ",
-                upstreamMessage == null ? "" : upstreamMessage,
-                upstreamCode == null ? "" : upstreamCode,
-                upstreamType == null ? "" : upstreamType
-        ).toLowerCase(Locale.ROOT);
-
-        if (upstreamStatus == 502) {
-            return true;
-        }
+        String combined = normalizeErrorText(upstreamMessage, upstreamCode, upstreamType);
 
         return combined.contains("content_policy")
                 || combined.contains("content policy")
@@ -1198,6 +1240,15 @@ public class AiProxyService {
                 || combined.contains("审核")
                 || combined.contains("敏感")
                 || combined.contains("尺度");
+    }
+
+    private static String normalizeErrorText(String upstreamMessage, String upstreamCode, String upstreamType) {
+        return String.join(
+                " ",
+                upstreamMessage == null ? "" : upstreamMessage,
+                upstreamCode == null ? "" : upstreamCode,
+                upstreamType == null ? "" : upstreamType
+        ).toLowerCase(Locale.ROOT);
     }
 
     private Object parseResponsePayload(byte[] body, String contentType) {
@@ -1311,6 +1362,33 @@ public class AiProxyService {
                 - 只补充画面主体、场景、构图、风格、材质、色彩、光影、镜头/视角和质量描述；最终是否能生成由后续生图接口判断。
                 - 必须在提示词末尾加入完整负面约束：%s
                 - 使用中文输出，保持一段完整提示词。""".formatted(NEGATIVE_PROMPT_TEXT);
+
+        if ("skill-text-to-image".equals(mode)) {
+            return """
+                    你是外部 Skill 的提示词编译器。你的任务不是使用 livart 默认通用优化模板，而是严格根据上下文中的“外部 Skill / Skill 指南”把用户输入整理成可直接提交给图片生成模型的最终提示词。
+                    只输出最终提示词，不要解释，不要 Markdown，不要加标题，不要拒绝，不要判断能否生成。
+                    要求：
+                    - 优先遵守外部 Skill 指南；如果 Skill 指南和默认审美描述冲突，以 Skill 指南为准。
+                    - 保留用户原始目标、主体、数量、画幅、文字内容、风格和约束，不要新增用户没有要求的主体或文字。
+                    - 可以按 Skill 指南补充构图、镜头、材质、光影、质量、文字排版和交付质量描述。
+                    - 不要输出内部图片 ID、系统字段、Skill 文件路径或脚本调用方式。
+                    - 不要尝试执行 Skill 脚本；只根据 Skill 文档编译提示词。
+                    - 使用中文输出一段完整提示词。""";
+        }
+
+        if ("skill-image-to-image".equals(mode)) {
+            return """
+                    你是外部 Skill 的图片编辑提示词编译器。你的任务不是使用 livart 默认通用图生图模板，而是严格根据上下文中的“外部 Skill / Skill 指南”和图片角色分析，把用户输入整理成可直接提交给图片编辑模型的最终提示词。
+                    只输出最终提示词，不要解释，不要 Markdown，不要加标题，不要拒绝，不要判断能否生成。
+                    要求：
+                    - 优先遵守外部 Skill 指南；如果 Skill 指南和默认审美描述冲突，以 Skill 指南为准。
+                    - 必须理解原图/编辑目标/参考图/素材图之间的关系，不要把“图片角色分析”标题和内部说明原样输出。
+                    - 原文中任何 @xxx 图片引用标记都是系统占位符；必须改写为“原图”“参考图 1”等角色名称，不要输出内部 ID。
+                    - 保留原图未要求修改的主体身份、结构比例、画幅、构图、透视、材质、光影和关键细节。
+                    - 如果有蒙版、圈选、涂抹或局部区域，必须明确只修改该区域，其余区域保持不变。
+                    - 不要尝试执行 Skill 脚本；只根据 Skill 文档编译提示词。
+                    - 使用中文输出一段完整提示词。""";
+        }
 
         if ("image-to-image".equals(mode)) {
             return """

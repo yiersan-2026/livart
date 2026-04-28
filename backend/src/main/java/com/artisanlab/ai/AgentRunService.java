@@ -1,6 +1,7 @@
 package com.artisanlab.ai;
 
 import com.artisanlab.common.ApiException;
+import com.artisanlab.skill.ExternalSkillService;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
@@ -24,16 +25,19 @@ public class AgentRunService {
     private final AgentPlannerService agentPlannerService;
     private final AiProxyService aiProxyService;
     private final ImageJobEventBroadcaster eventBroadcaster;
+    private final ExternalSkillService externalSkillService;
     private final Map<String, AgentRunState> agentRuns = new ConcurrentHashMap<>();
 
     public AgentRunService(
             AgentPlannerService agentPlannerService,
             AiProxyService aiProxyService,
-            ImageJobEventBroadcaster eventBroadcaster
+            ImageJobEventBroadcaster eventBroadcaster,
+            ExternalSkillService externalSkillService
     ) {
         this.agentPlannerService = agentPlannerService;
         this.aiProxyService = aiProxyService;
         this.eventBroadcaster = eventBroadcaster;
+        this.externalSkillService = externalSkillService;
     }
 
     public AiProxyDtos.AgentRunResponse run(UUID userId, AiProxyDtos.AgentRunRequest request) throws IOException {
@@ -48,14 +52,35 @@ public class AgentRunService {
             publishAgentRunStatus(userId, runId, runState);
         }
 
-        publishProgress(userId, runId, "identify-intent", "识别意图", "判断你是在问 livart 功能，还是要生成 / 编辑图片。", "analysis", "running");
+        String forcedToolId = request.forcedToolId() == null ? "" : request.forcedToolId().trim();
+        boolean forcedToolRun = !forcedToolId.isBlank();
+        String externalSkillGuidance = externalSkillService.requirePromptGuidance(request.externalSkillId());
+        if (forcedToolRun) {
+            publishProgress(userId, runId, "prepare-tool", "准备图片工具", "已识别为工具栏固定操作，正在准备图片任务。", "analysis", "running");
+        } else {
+            publishProgress(userId, runId, "identify-intent", "识别意图", "判断你是在问 livart 功能，还是要生成 / 编辑图片。", "analysis", "running");
+        }
 
         AiProxyDtos.AgentPlanResponse plan;
         try {
-            plan = agentPlannerService.createPlan(userId, request.toPlanRequest());
-            publishProgress(userId, runId, "identify-intent", "识别意图", "已完成意图识别。", "analysis", "completed");
+            plan = forcedToolRun
+                    ? agentPlannerService.createForcedToolPlan(request.toPlanRequest(), forcedToolId)
+                    : agentPlannerService.createPlan(userId, request.toPlanRequest());
+            if (forcedToolRun) {
+                publishProgress(userId, runId, "prepare-tool", "准备图片工具", "图片工具任务已准备完成。", "analysis", "completed");
+            } else {
+                publishProgress(userId, runId, "identify-intent", "识别意图", "已完成意图识别。", "analysis", "completed");
+            }
         } catch (RuntimeException exception) {
-            publishProgress(userId, runId, "identify-intent", "识别意图", "意图识别失败。", "analysis", "error");
+            publishProgress(
+                    userId,
+                    runId,
+                    forcedToolRun ? "prepare-tool" : "identify-intent",
+                    forcedToolRun ? "准备图片工具" : "识别意图",
+                    forcedToolRun ? "图片工具任务准备失败。" : "意图识别失败。",
+                    "analysis",
+                    "error"
+            );
             markRunError(userId, runId, runState, exception);
             throw exception;
         }
@@ -75,8 +100,8 @@ public class AgentRunService {
         publishProgress(userId, runId, "create-image-job", "提交任务", "正在提交图片生成任务。", "generate", "running");
         try {
             AiProxyDtos.AgentRunResponse response = "text-to-image".equals(plan.taskType())
-                    ? runTextToImage(userId, request, plan)
-                    : runImageEdit(userId, request, plan);
+                    ? runTextToImage(userId, request, plan, externalSkillGuidance)
+                    : runImageEdit(userId, request, plan, externalSkillGuidance);
             publishProgress(userId, runId, "create-image-job", "提交任务", "图片任务已创建，接下来等待生成结果。", "generate", "completed");
             markRunCompleted(userId, runId, runState, response);
             return response;
@@ -168,11 +193,12 @@ public class AgentRunService {
     private AiProxyDtos.AgentRunResponse runTextToImage(
             UUID userId,
             AiProxyDtos.AgentRunRequest request,
-            AiProxyDtos.AgentPlanResponse plan
+            AiProxyDtos.AgentPlanResponse plan,
+            String externalSkillGuidance
     ) throws IOException {
         List<AiProxyDtos.AgentRunJob> jobs = new ArrayList<>();
         int count = normalizeCount(plan.count());
-        aiProxyService.createTextToImageJobsFromAgent(userId, request.prompt(), plan.aspectRatio(), count)
+        aiProxyService.createTextToImageJobsFromAgent(userId, request.prompt(), plan.aspectRatio(), count, externalSkillGuidance)
                 .forEach(job -> jobs.add(toRunJob(job)));
 
         return responseWithJobs(plan, request.prompt(), jobs);
@@ -181,7 +207,8 @@ public class AgentRunService {
     private AiProxyDtos.AgentRunResponse runImageEdit(
             UUID userId,
             AiProxyDtos.AgentRunRequest request,
-            AiProxyDtos.AgentPlanResponse plan
+            AiProxyDtos.AgentPlanResponse plan,
+            String externalSkillGuidance
     ) throws IOException {
         Map<String, AiProxyDtos.ImageReferenceCandidate> candidateById = new LinkedHashMap<>();
         for (AiProxyDtos.ImageReferenceCandidate image : safeImages(request.images())) {
@@ -207,7 +234,10 @@ public class AgentRunService {
                 .filter(candidate -> candidate != null && !candidate.id().equals(baseImage.id()))
                 .toList();
         String requestPrompt = buildImageEditPrompt(request.prompt(), plan, baseImage, referenceImages, hasMask);
-        String imageContext = buildImageRoleContext(request.prompt(), baseImage, referenceImages, hasMask, safeImages(request.images()));
+        String imageContext = appendExternalSkillGuidance(
+                buildImageRoleContext(request.prompt(), baseImage, referenceImages, hasMask, safeImages(request.images())),
+                externalSkillGuidance
+        );
         AiProxyService.AgentImageEditJobRequest jobRequest = new AiProxyService.AgentImageEditJobRequest(
                 requestPrompt,
                 plan.aspectRatio(),
@@ -215,7 +245,7 @@ public class AgentRunService {
                 referenceImages.stream().map(candidate -> requireAssetId(candidate, "参考图")).toList(),
                 request.maskDataUrl(),
                 imageContext,
-                promptOptimizationModeFor(plan.mode())
+                promptOptimizationModeFor(plan.mode(), externalSkillGuidance)
         );
 
         return responseWithJobs(
@@ -356,6 +386,16 @@ public class AgentRunService {
         return String.join("\n", lines);
     }
 
+    private String appendExternalSkillGuidance(String imageContext, String externalSkillGuidance) {
+        if (externalSkillGuidance == null || externalSkillGuidance.isBlank()) {
+            return imageContext;
+        }
+        if (imageContext == null || imageContext.isBlank()) {
+            return externalSkillGuidance.trim();
+        }
+        return imageContext + "\n\n" + externalSkillGuidance.trim();
+    }
+
     private String originalAspectRatioInstruction(String requestedAspectRatio, AiProxyDtos.ImageReferenceCandidate baseImage) {
         if (requestedAspectRatio != null && !requestedAspectRatio.isBlank() && !"auto".equals(requestedAspectRatio.trim())) {
             return "";
@@ -472,8 +512,8 @@ public class AgentRunService {
         }
     }
 
-    private String promptOptimizationModeFor(String mode) {
-        return switch (mode) {
+    private String promptOptimizationModeFor(String mode, String externalSkillGuidance) {
+        String nativeMode = switch (mode) {
             case "background-removal" -> "background-removal";
             case "remover" -> "image-remover";
             case "layer-subject" -> "layer-split-subject";
@@ -481,6 +521,10 @@ public class AgentRunService {
             case "view-change" -> "view-change";
             default -> "image-to-image";
         };
+        if ("image-to-image".equals(nativeMode) && externalSkillGuidance != null && !externalSkillGuidance.isBlank()) {
+            return "skill-image-to-image";
+        }
+        return nativeMode;
     }
 
     private String defaultEditPrompt(String mode) {
