@@ -4,6 +4,23 @@ export interface SiteStatsOverview {
   userCount: number;
   generatedImageCount: number;
   activeImageJobCount: number;
+  memory: {
+    usedBytes: number;
+    freeBytes: number;
+    totalBytes: number;
+    usedPercent: number;
+  };
+  processor: {
+    usedPercent: number;
+    availableProcessors: number;
+  };
+  disk: {
+    path: string;
+    usedBytes: number;
+    freeBytes: number;
+    totalBytes: number;
+    usedPercent: number;
+  };
 }
 
 interface ApiResponse<T> {
@@ -15,8 +32,9 @@ interface ApiResponse<T> {
   };
 }
 
-export const loadSiteStatsOverview = async () => {
+export const loadSiteStatsOverview = async (signal?: AbortSignal) => {
   const response = await fetch('/api/stats/overview', {
+    signal,
     headers: {
       Accept: 'application/json',
       ...authHeaders()

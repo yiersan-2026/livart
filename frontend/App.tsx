@@ -1,6 +1,6 @@
 
 import React, { useEffect, useRef, useState } from 'react';
-import { PanelRightClose, PanelRight, Settings, FolderPlus, LogOut, Loader2, X, Download, ChevronDown, Users, Images } from 'lucide-react';
+import { PanelRightClose, PanelRight, Settings, FolderPlus, LogOut, Loader2, X, Download, ChevronDown, Users, Images, MemoryStick, Cpu, HardDrive } from 'lucide-react';
 import type { AgentPlan, CanvasItem, CanvasTool, ChatMessage, ImageAspectRatio } from './types';
 import AuthPanel from './components/AuthPanel';
 import Canvas from './components/Canvas';
@@ -89,6 +89,19 @@ const formatSiteStatsCount = (value: number | undefined) => {
   if (value === undefined || !Number.isFinite(value)) return '--';
   if (value >= 10000) return `${(value / 10000).toFixed(value >= 100000 ? 0 : 1)}万`;
   return Math.max(0, value).toLocaleString('zh-CN');
+};
+
+const GIB_BYTES = 1024 ** 3;
+
+const formatSiteStatsGigabytes = (value: number | undefined) => {
+  if (value === undefined || !Number.isFinite(value)) return '--G';
+  const gigabytes = Math.max(0, value) / GIB_BYTES;
+  return `${gigabytes.toFixed(gigabytes >= 100 ? 0 : 1)}G`;
+};
+
+const formatSiteStatsPercent = (value: number | undefined) => {
+  if (value === undefined || !Number.isFinite(value)) return '--%';
+  return `${Math.round(Math.max(0, Math.min(100, value)))}%`;
 };
 
 const collectAgentPlanCandidateImages = (text: string, contextImage: CanvasItem | null, items: CanvasItem[]) => {
@@ -996,25 +1009,47 @@ function App() {
     if (!isAuthReady || !authSession) return;
 
     let isMounted = true;
+    let isLoadingStats = false;
+    let activeController: AbortController | null = null;
     setSiteStatsError('');
 
-    loadSiteStatsOverview()
-      .then((overview) => {
-        if (isMounted) {
-          setSiteStats(overview);
-        }
-      })
-      .catch((error) => {
-        console.warn('[site-stats] load failed', error);
-        if (isMounted) {
-          setSiteStatsError(error instanceof Error ? error.message : '统计数据加载失败');
-        }
-      });
+    const loadStats = () => {
+      if (isLoadingStats) return;
+      isLoadingStats = true;
+      const controller = new AbortController();
+      activeController = controller;
+
+      loadSiteStatsOverview(controller.signal)
+        .then((overview) => {
+          if (isMounted) {
+            setSiteStats(overview);
+            setSiteStatsError('');
+          }
+        })
+        .catch((error) => {
+          if (error instanceof DOMException && error.name === 'AbortError') return;
+          console.warn('[site-stats] load failed', error);
+          if (isMounted) {
+            setSiteStatsError(error instanceof Error ? error.message : '统计数据加载失败');
+          }
+        })
+        .finally(() => {
+          if (activeController === controller) {
+            activeController = null;
+            isLoadingStats = false;
+          }
+        });
+    };
+
+    loadStats();
+    const intervalId = window.setInterval(loadStats, 3000);
 
     return () => {
       isMounted = false;
+      window.clearInterval(intervalId);
+      activeController?.abort();
     };
-  }, [isAuthReady, authSession?.token, activeTaskStartedAts.length]);
+  }, [isAuthReady, authSession?.token]);
 
   useEffect(() => {
     if (!isAuthReady) return;
@@ -2483,8 +2518,8 @@ function App() {
             />
           </div>
           <div
-            className="flex h-11 items-center gap-3 rounded-2xl border border-gray-100 bg-white/90 px-3 text-[11px] font-black text-gray-500 shadow-[0_18px_48px_-28px_rgba(0,0,0,0.35)] backdrop-blur-2xl"
-            title={siteStatsError || '站点实时统计，每次进入/刷新页面时重新查询'}
+            className="flex min-h-11 max-w-[calc(100vw-520px)] flex-wrap items-center gap-x-3 gap-y-1 rounded-2xl border border-gray-100 bg-white/90 px-3 py-2 text-[11px] font-black text-gray-500 shadow-[0_18px_48px_-28px_rgba(0,0,0,0.35)] backdrop-blur-2xl"
+            title={siteStatsError || '站点实时统计，每 3 秒刷新一次'}
           >
             <span className="flex items-center gap-1.5">
               <Users size={14} className="text-gray-300" />
@@ -2502,6 +2537,21 @@ function App() {
                 className={`${(siteStats?.activeImageJobCount || 0) > 0 ? 'animate-spin text-indigo-400' : 'text-gray-300'}`}
               />
               进行中 {formatSiteStatsCount(siteStats?.activeImageJobCount)}
+            </span>
+            <span className="h-3 w-px bg-gray-100" />
+            <span className="flex items-center gap-1.5">
+              <MemoryStick size={14} className="text-gray-300" />
+              内存 {formatSiteStatsGigabytes(siteStats?.memory?.usedBytes)}/{formatSiteStatsGigabytes(siteStats?.memory?.totalBytes)}
+            </span>
+            <span className="h-3 w-px bg-gray-100" />
+            <span className="flex items-center gap-1.5">
+              <Cpu size={14} className="text-gray-300" />
+              CPU {formatSiteStatsPercent(siteStats?.processor?.usedPercent)}/100%
+            </span>
+            <span className="h-3 w-px bg-gray-100" />
+            <span className="flex items-center gap-1.5">
+              <HardDrive size={14} className="text-gray-300" />
+              硬盘 {formatSiteStatsGigabytes(siteStats?.disk?.usedBytes)}/{formatSiteStatsGigabytes(siteStats?.disk?.totalBytes)}
             </span>
           </div>
         </div>

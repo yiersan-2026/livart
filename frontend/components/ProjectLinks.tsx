@@ -1,7 +1,8 @@
 import React from 'react';
-import { Github } from 'lucide-react';
+import { Github, ShoppingBag } from 'lucide-react';
 
 const PROJECT_LINKS = {
+  stickers: 'https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=3816860766594793858&origin_type=604',
   gitee: 'https://gitee.com/sunowen/livart',
   github: 'https://github.com/yiersan-2026/livart'
 };
@@ -28,6 +29,16 @@ interface ProjectLinksProps {
 
 const ProjectLinks: React.FC<ProjectLinksProps> = ({ className = '' }) => (
   <div className={`flex items-center gap-1.5 rounded-2xl border border-gray-100 bg-white/90 p-1 backdrop-blur-2xl ${className}`}>
+    <a
+      href={PROJECT_LINKS.stickers}
+      target="_blank"
+      rel="noreferrer"
+      className="flex h-9 w-9 items-center justify-center rounded-xl text-gray-500 transition-all hover:bg-amber-50 hover:text-amber-600 active:scale-95"
+      title="热门AI产品贴纸"
+      aria-label="热门AI产品贴纸"
+    >
+      <ShoppingBag size={19} strokeWidth={2.3} />
+    </a>
     <a
       href={PROJECT_LINKS.gitee}
       target="_blank"
