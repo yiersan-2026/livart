@@ -49,4 +49,11 @@ public class AiProxyController {
     ) throws IOException {
         return ApiResponse.ok(agentRunService.run(authContext.requireUserId(), request));
     }
+
+    @GetMapping("/agent/runs/{runId}")
+    public ApiResponse<AiProxyDtos.AgentRunStatusResponse> getAgentRun(
+            @PathVariable String runId
+    ) {
+        return ApiResponse.ok(agentRunService.getRunStatus(authContext.requireUserId(), runId));
+    }
 }

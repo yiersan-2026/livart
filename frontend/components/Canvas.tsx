@@ -50,8 +50,8 @@ interface CanvasProps {
   onAddTextAt: (x: number, y: number) => string;
   onAddImageAt: (file: File, x: number, y: number) => void;
   onAddToChat: (item: CanvasItem) => void;
-  onChatMessage: (text: string, role: 'user' | 'assistant', options?: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan'>) => void;
-  onChatDraftMessage: (text: string, role: 'user' | 'assistant', options?: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan'>) => string;
+  onChatMessage: (text: string, role: 'user' | 'assistant', options?: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan' | 'agentRunId' | 'agentRunStatus'>) => void;
+  onChatDraftMessage: (text: string, role: 'user' | 'assistant', options?: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan' | 'agentRunId' | 'agentRunStatus'>) => string;
   onChatMessageUpdate: (messageId: string, updater: (message: ChatMessage) => ChatMessage) => void;
   onImageTaskStart: (startedAt: number) => void;
   onImageTaskFinish: (startedAt: number) => void;
@@ -1874,6 +1874,13 @@ const Canvas: React.FC<CanvasProps> = ({
         });
 
         const imageResult = await waitForImageJob(job.jobId, {
+          onConnectionState: (state) => {
+            onChatMessageUpdate(planningMessageId, message => ({
+              ...message,
+              text: state === 'reconnecting' ? '等待重连，重连后会自动更新图片结果。' : '已重新连接，正在同步图片结果。',
+              agentPlan: splitAgentPlan
+            }));
+          },
           onStatus: (jobStatus) => {
             const queueNotice = getImageJobQueueMessage(jobStatus, `${getLayerSplitLabel(role)}任务`);
             if (queueNotice) {
@@ -2507,6 +2514,11 @@ const Canvas: React.FC<CanvasProps> = ({
       imageTaskStartedAt = Date.now();
       onImageTaskStart(imageTaskStartedAt);
       const imageResult = await waitForImageJob(job.jobId, {
+        onConnectionState: (state) => {
+          if (state === 'reconnecting') {
+            onItemUpdate(selectedItem.id, { label: '等待重连...' });
+          }
+        },
         onStatus: (jobStatus) => {
           const queueNotice = getImageJobQueueMessage(jobStatus, '视觉逻辑任务');
           if (!queueNotice) return;
@@ -2608,21 +2620,25 @@ const Canvas: React.FC<CanvasProps> = ({
     clearInlineEditError(targetItem.id);
     onChatMessage(userMessage, 'user');
     const planningMessageId = onChatDraftMessage('我先识别这次图片快捷编辑的意图。', 'assistant', {
-      agentPlan: inlineAgentPlan
+      agentPlan: inlineAgentPlan,
+      agentRunId: agentRunClientId,
+      agentRunStatus: 'running'
     });
     const syncInlineAgentPlanMessage = (nextPlan: AgentPlan, nextText = nextPlan.summary) => {
       inlineAgentPlan = nextPlan;
       onChatMessageUpdate(planningMessageId, message => ({
         ...message,
         text: nextText,
-        agentPlan: nextPlan
+        agentPlan: nextPlan,
+        agentRunStatus: 'running'
       }));
     };
     const collapseInlineAgentPlanMessage = (nextText: string) => {
       onChatMessageUpdate(planningMessageId, message => ({
         ...message,
         text: nextText,
-        agentPlan: undefined
+        agentPlan: undefined,
+        agentRunStatus: 'running'
       }));
     };
 
@@ -2714,7 +2730,7 @@ const Canvas: React.FC<CanvasProps> = ({
       const persistentById = new Map(persistentAgentImages.map(item => [item.id, item]));
       const editBaseItem = persistentById.get(agentRun.baseImageId) || persistentById.get(targetItem.id) || targetItem;
       const persistentReferenceImages = agentRun.referenceImageIds
-        .map(id => persistentById.get(id))
+        .map(id => persistentById.get(id) as CanvasItem | undefined)
         .filter((item): item is CanvasItem => !!item);
       const nextZIndex = Math.max(0, ...items.map(item => item.zIndex || 0)) + 1;
       const newId = Math.random().toString(36).substr(2, 9);
@@ -2754,6 +2770,12 @@ const Canvas: React.FC<CanvasProps> = ({
 
       let queuedInlineJob = false;
       const imageResult: ImageGenerationResult = await waitForImageJob(job.jobId, {
+        onConnectionState: (state) => {
+          syncInlineAgentPlanMessage(
+            inlineAgentPlan,
+            state === 'reconnecting' ? '等待重连，重连后会自动更新图片结果。' : '已重新连接，正在同步图片结果。'
+          );
+        },
         onStatus: (jobStatus) => {
           const queueNotice = buildInlineImageJobQueueNotice(jobStatus);
           if (queueNotice) {
@@ -2837,6 +2859,11 @@ const Canvas: React.FC<CanvasProps> = ({
           ? rawExecutionMessage
           : fallbackExecutionMessage
       );
+      onChatMessageUpdate(planningMessageId, message => ({
+        ...message,
+        agentPlan: undefined,
+        agentRunStatus: 'completed'
+      }));
       setInlineEditPromptForItem(targetItem.id, '');
       setQuickEditItemId(null);
       if (isViewChangeMode) {
@@ -2868,6 +2895,11 @@ const Canvas: React.FC<CanvasProps> = ({
         createdAt: Date.now()
       });
       syncInlineAgentPlanMessage(errorPlan, `执行失败：${message}`);
+      onChatMessageUpdate(planningMessageId, currentMessage => ({
+        ...currentMessage,
+        agentPlan: undefined,
+        agentRunStatus: 'error'
+      }));
       if (resultItemId) {
         onItemDelete(resultItemId);
       }

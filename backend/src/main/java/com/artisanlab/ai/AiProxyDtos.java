@@ -125,4 +125,14 @@ public final class AiProxyDtos {
             String source
     ) {
     }
+
+    public record AgentRunStatusResponse(
+            String runId,
+            String status,
+            AgentRunResponse response,
+            String errorMessage,
+            String errorCode,
+            long updatedAt
+    ) {
+    }
 }

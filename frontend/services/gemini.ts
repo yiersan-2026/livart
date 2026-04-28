@@ -30,6 +30,7 @@ export interface ImageJobStatus extends ImagePromptMetadata {
 
 interface WaitForImageJobOptions {
   onStatus?: (job: ImageJobStatus) => void;
+  onConnectionState?: (state: 'connected' | 'reconnecting') => void;
 }
 
 interface ImageJobSocketMessage {
@@ -316,6 +317,7 @@ const waitForImageJobByWebSocket = async (jobId: string, options: WaitForImageJo
 
     const scheduleReconnect = () => {
       if (settled) return;
+      options.onConnectionState?.('reconnecting');
       const elapsedMs = Date.now() - startedAt;
       if (elapsedMs >= REQUEST_TIMEOUT_MS) {
         finishReject(new Error('图片任务 WebSocket 多次断开且已超时，请稍后刷新页面查看'));
@@ -353,6 +355,7 @@ const waitForImageJobByWebSocket = async (jobId: string, options: WaitForImageJo
 
       socket.onopen = () => {
         reconnectAttempts = 0;
+        options.onConnectionState?.('connected');
         socket.send(JSON.stringify({
           type: 'auth',
           token: session.token,

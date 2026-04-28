@@ -46,6 +46,9 @@ import {
   connectAgentRunEvents,
   createAgentRun,
   createAgentRunClientId,
+  getAgentRunStatus,
+  type AgentRun,
+  type AgentRunStatus,
   updateAgentPlanStepStatuses
 } from './services/agentPlanner';
 import {
@@ -180,7 +183,7 @@ type CanvasHistorySnapshot = {
 const createChatMessage = (
   text: string,
   role: 'user' | 'assistant',
-  options: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan'> = {}
+  options: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan' | 'agentRunId' | 'agentRunStatus'> = {}
 ): ChatMessage => ({
   id: Math.random().toString(36).substr(2, 9),
   role,
@@ -188,6 +191,42 @@ const createChatMessage = (
   timestamp: Date.now(),
   ...options
 });
+
+const hasRunningAgentPlan = (message: ChatMessage) => (
+  message.role === 'assistant' &&
+  (
+    message.agentRunStatus === 'running' ||
+    (!!message.agentPlan && message.agentPlan.steps.some(step => step.status === 'running'))
+  )
+);
+
+const markAgentMessageWaitingReconnect = (message: ChatMessage): ChatMessage => {
+  if (!hasRunningAgentPlan(message)) return message;
+  if (!message.agentRunId) {
+    return {
+      ...message,
+      text: '连接已断开，这次任务无法自动恢复，请重新提交。',
+      agentPlan: undefined,
+      agentRunStatus: 'error'
+    };
+  }
+  return {
+    ...message,
+    text: '等待重连，重连后会自动更新任务结果。',
+    agentPlan: undefined,
+    agentRunStatus: 'waiting-reconnect'
+  };
+};
+
+const normalizeTransientChatMessages = (messages: ChatMessage[]) => (
+  messages.map(markAgentMessageWaitingReconnect)
+);
+
+const isRecoverableAgentConnectionError = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return error instanceof TypeError ||
+    /Failed to fetch|NetworkError|Load failed|aborted|cancelled|连接.*断开|连接.*失败|WebSocket 多次断开|稍后刷新页面查看/i.test(message);
+};
 
 const appendImageCompletionMessage = (
   messages: ChatMessage[],
@@ -700,6 +739,7 @@ function App() {
   const isSavingCanvasRef = useRef(false);
   const saveRevisionRef = useRef(Date.now());
   const resumedImageJobIdsRef = useRef<Set<string>>(new Set());
+  const resumedAgentRunIdsRef = useRef<Set<string>>(new Set());
   const canvasHistoryPastRef = useRef<CanvasHistorySnapshot[]>([]);
   const canvasHistoryFutureRef = useRef<CanvasHistorySnapshot[]>([]);
   const canvasHistoryTimerRef = useRef<number | null>(null);
@@ -883,7 +923,8 @@ function App() {
     localStorage.setItem(LAST_PROJECT_STORAGE_KEY, project.id);
     saveRevisionRef.current = Math.max(Date.now(), project.revision || 0);
     setItems(state.items);
-    setMessages(state.messages.length > 0 ? state.messages : [createWelcomeMessage()]);
+    const restoredMessages = normalizeTransientChatMessages(state.messages);
+    setMessages(restoredMessages.length > 0 ? restoredMessages : [createWelcomeMessage()]);
     setZoom(state.viewport.zoom);
     setPan(state.viewport.pan);
     setCanvasBackgroundColor(state.settings.backgroundColor || DEFAULT_CANVAS_BACKGROUND_COLOR);
@@ -895,6 +936,7 @@ function App() {
     setActiveTaskStartedAts([]);
     resetCanvasHistory(createCanvasHistorySnapshot(state.items, state.viewport.pan, state.viewport.zoom, [], state.settings.backgroundColor || DEFAULT_CANVAS_BACKGROUND_COLOR));
     resumedImageJobIdsRef.current = new Set();
+    resumedAgentRunIdsRef.current = new Set();
   };
 
   const loadProjectById = async (projectId: string) => {
@@ -1036,7 +1078,7 @@ function App() {
       title: currentProjectTitle,
       state: {
         items,
-        messages,
+        messages: normalizeTransientChatMessages(messages),
         viewport: { zoom, pan },
         settings: { backgroundColor: canvasBackgroundColor },
         selectedIds: []
@@ -1112,6 +1154,271 @@ function App() {
     window.addEventListener('keydown', handleHistoryShortcut);
     return () => window.removeEventListener('keydown', handleHistoryShortcut);
   });
+
+  const resumeAgentRunResult = async (message: ChatMessage, agentRun: AgentRun) => {
+    if (agentRun.responseMode === 'reject' || !agentRun.allowed) {
+      updateMessageById(message.id, currentMessage => ({
+        ...currentMessage,
+        text: agentRun.rejectionMessage || agentRun.plan.rejectionMessage || LIVART_SCOPE_REJECTION_MESSAGE,
+        agentPlan: undefined,
+        agentRunStatus: 'completed'
+      }));
+      return;
+    }
+
+    if (agentRun.responseMode === 'answer') {
+      updateMessageById(message.id, currentMessage => ({
+        ...currentMessage,
+        text: agentRun.answerMessage || agentRun.plan.answerMessage || LIVART_SCOPE_HELP_MESSAGE,
+        agentPlan: undefined,
+        agentRunStatus: 'completed'
+      }));
+      return;
+    }
+
+    if (!agentRun.jobs.length) {
+      updateMessageById(message.id, currentMessage => ({
+        ...currentMessage,
+        text: '已重新连接，但没有找到可同步的图片任务。',
+        agentPlan: undefined,
+        agentRunStatus: 'error'
+      }));
+      return;
+    }
+
+    updateMessageById(message.id, currentMessage => ({
+      ...currentMessage,
+      text: '已重新连接，正在同步图片结果。',
+      agentPlan: undefined,
+      agentRunStatus: 'running'
+    }));
+
+    const startedAt = Date.now();
+    startTaskTimer(startedAt);
+    let isTaskTimerActive = true;
+    try {
+      const editBaseImage = agentRun.taskType === 'image-edit'
+        ? items.find(item => item.id === agentRun.baseImageId && item.type === 'image') || null
+        : null;
+      const aspectRatio = agentRun.aspectRatio || 'auto';
+      const fallbackWidth = editBaseImage ? editBaseImage.width : DEFAULT_GENERATED_IMAGE_LONG_SIDE;
+      const fallbackHeight = editBaseImage ? editBaseImage.height : DEFAULT_GENERATED_IMAGE_LONG_SIDE;
+      const maxLongSide = editBaseImage
+        ? Math.max(editBaseImage.width, editBaseImage.height)
+        : DEFAULT_GENERATED_IMAGE_LONG_SIDE;
+      const initialFrame = editBaseImage && aspectRatio === 'auto'
+        ? fitDimensionsToLongSide(editBaseImage.width, editBaseImage.height, maxLongSide)
+        : getAspectRatioFrame(aspectRatio, fallbackWidth, fallbackHeight, maxLongSide);
+      const visibleCanvasRect = getVisibleCanvasRect(pan, zoom, showSidebar);
+      const canvasCenterX = visibleCanvasRect.x + visibleCanvasRect.width / 2;
+      const canvasCenterY = visibleCanvasRect.y + visibleCanvasRect.height / 2;
+
+      let virtualItems = [...items];
+      const maxZIndex = Math.max(60, ...items.map(item => item.zIndex || 0));
+      const placeholderItems = agentRun.jobs.map((job, index) => {
+        const existingItem = virtualItems.find(item => item.type === 'image' && item.imageJobId === job.jobId);
+        if (existingItem?.type === 'image') {
+          return existingItem;
+        }
+
+        const generatedPosition = editBaseImage
+          ? findRightSideCanvasPosition(virtualItems, editBaseImage, initialFrame.width, initialFrame.height)
+          : findNextRootImageRowPosition(
+            virtualItems,
+            canvasCenterX - initialFrame.width / 2,
+            canvasCenterY - initialFrame.height / 2,
+            initialFrame.width,
+            initialFrame.height
+          );
+        const item: CanvasItem = {
+          id: Math.random().toString(36).substr(2, 9),
+          type: 'image',
+          content: '',
+          x: generatedPosition.x,
+          y: generatedPosition.y,
+          width: initialFrame.width,
+          height: initialFrame.height,
+          status: 'loading',
+          label: editBaseImage ? 'AI 编辑同步中...' : 'AI 生成同步中...',
+          zIndex: maxZIndex + index + 1,
+          parentId: editBaseImage?.id,
+          prompt: agentRun.requestPrompt || message.text,
+          originalPrompt: message.text,
+          optimizedPrompt: job.optimizedPrompt || '',
+          imageJobId: job.jobId,
+          imageJobStartedAt: startedAt,
+          layers: []
+        };
+        virtualItems = [...virtualItems, item];
+        return item;
+      });
+
+      const missingItems = placeholderItems.filter(placeholder => !items.some(item => item.id === placeholder.id));
+      if (missingItems.length > 0) {
+        setItems(prev => [...prev, ...missingItems]);
+      }
+
+      const resultCards = await Promise.all(agentRun.jobs.map(async (job, index) => {
+        const placeholder = placeholderItems[index];
+        const imageResult = await waitForImageJob(job.jobId, {
+          onConnectionState: (state) => {
+            if (state === 'reconnecting' && isTaskTimerActive) {
+              finishTaskTimer(startedAt);
+              isTaskTimerActive = false;
+            }
+            if (state === 'connected' && !isTaskTimerActive) {
+              startTaskTimer(startedAt);
+              isTaskTimerActive = true;
+            }
+            updateMessageById(message.id, currentMessage => ({
+              ...currentMessage,
+              text: state === 'reconnecting'
+                ? '等待重连，重连后会自动更新图片结果。'
+                : '已重新连接，正在同步图片结果。',
+              agentPlan: undefined,
+              agentRunStatus: state === 'reconnecting' ? 'waiting-reconnect' : 'running'
+            }));
+          }
+        });
+        const persistedImageItem = await ensureCanvasImageAsset({
+          ...placeholder,
+          content: imageResult.image,
+          status: 'completed'
+        });
+        const resultTitle = agentRun.displayTitle || agentRun.plan.displayTitle || generateImageTitleFromPrompt(
+          agentRun.requestPrompt || imageResult.optimizedPrompt || job.optimizedPrompt || '',
+          editBaseImage ? '编辑结果' : '生成图片'
+        );
+        const resultDescription = buildImageResultDescription(resultTitle, editBaseImage ? 'edited' : 'generated');
+        setItems(prev => prev.map(item => {
+          if (item.id !== placeholder.id) return item;
+          const rawOptimizedPrompt = imageResult.optimizedPrompt || job.optimizedPrompt || imageResult.originalPrompt || agentRun.requestPrompt || '';
+          const optimizedPrompt = editBaseImage && rawOptimizedPrompt
+            ? normalizeOptimizedPromptImageReferences(rawOptimizedPrompt, editBaseImage, [], prev)
+            : rawOptimizedPrompt;
+          return {
+            ...item,
+            content: persistedImageItem.content,
+            assetId: persistedImageItem.assetId,
+            previewContent: persistedImageItem.previewContent,
+            thumbnailContent: persistedImageItem.thumbnailContent,
+            status: 'completed',
+            imageJobId: undefined,
+            imageJobStartedAt: undefined,
+            prompt: agentRun.requestPrompt || message.text,
+            originalPrompt: message.text,
+            optimizedPrompt,
+            label: resultTitle
+          };
+        }));
+        return {
+          imageId: placeholder.id,
+          modelName: getImageModelDisplayName(getApiConfig().model),
+          title: resultTitle,
+          description: resultDescription
+        };
+      }));
+
+      updateMessageById(message.id, currentMessage => ({
+        ...currentMessage,
+        text: buildExecutionAnnouncement(agentRun.plan),
+        agentPlan: undefined,
+        agentRunStatus: 'completed'
+      }));
+
+      addMessage(resultCards.length > 1
+        ? `已为您同步完成 ${resultCards.length} 张图片。`
+        : resultCards[0]?.description || '已为您同步完成图片。', 'assistant', {
+        imageIds: resultCards.map(card => card.imageId),
+        imageResultCards: resultCards,
+        durationMs: Date.now() - startedAt
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : '任务恢复失败';
+      updateMessageById(message.id, currentMessage => ({
+        ...currentMessage,
+        text: `重连后同步失败：${errorMessage}`,
+        agentPlan: undefined,
+        agentRunStatus: 'error'
+      }));
+    } finally {
+      if (isTaskTimerActive) {
+        finishTaskTimer(startedAt);
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (!authSession || !hasLoadedCanvas || !currentProjectId) return;
+
+    const reconnectMessages = messages.filter(message => (
+      message.role === 'assistant' &&
+      message.agentRunId &&
+      message.agentRunStatus === 'waiting-reconnect'
+    ));
+
+    reconnectMessages.forEach((message) => {
+      const runId = message.agentRunId;
+      if (!runId || resumedAgentRunIdsRef.current.has(runId)) return;
+      resumedAgentRunIdsRef.current.add(runId);
+
+      let finished = false;
+      let unsubscribe: (() => void) | null = null;
+      const finishReconnect = () => {
+        finished = true;
+        if (unsubscribe) {
+          unsubscribe();
+          unsubscribe = null;
+        }
+      };
+      const handleStatus = (status: AgentRunStatus) => {
+        if (finished) return;
+        if (status.status === 'completed' && status.response) {
+          finishReconnect();
+          resumeAgentRunResult(message, status.response);
+          return;
+        }
+        if (status.status === 'error') {
+          finishReconnect();
+          updateMessageById(message.id, currentMessage => ({
+            ...currentMessage,
+            text: `重连后任务失败：${status.errorMessage || 'Agent 任务执行失败'}`,
+            agentPlan: undefined,
+            agentRunStatus: 'error'
+          }));
+          return;
+        }
+        updateMessageById(message.id, currentMessage => ({
+          ...currentMessage,
+          text: '等待重连，任务仍在后台处理中。',
+          agentPlan: undefined,
+          agentRunStatus: 'waiting-reconnect'
+        }));
+      };
+
+      connectAgentRunEvents(runId, () => {}, handleStatus)
+        .then(nextUnsubscribe => {
+          unsubscribe = nextUnsubscribe;
+          return getAgentRunStatus(runId);
+        })
+        .then(handleStatus)
+        .catch((error) => {
+          updateMessageById(message.id, currentMessage => ({
+            ...currentMessage,
+            text: `重连后无法恢复任务：${error instanceof Error ? error.message : '任务不存在或已过期'}`,
+            agentPlan: undefined,
+            agentRunStatus: 'error'
+          }));
+        });
+
+      window.setTimeout(() => {
+        if (finished) return;
+        if (unsubscribe) {
+          unsubscribe();
+        }
+      }, 10 * 60 * 1000);
+    });
+  }, [authSession, hasLoadedCanvas, currentProjectId, messages]);
 
   useEffect(() => {
     if (!hasLoadedCanvas || !currentProjectId) return;
@@ -1460,14 +1767,14 @@ function App() {
     return newId;
   };
 
-  const addMessage = (text: string, role: 'user' | 'assistant', options: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan'> = {}) => {
+  const addMessage = (text: string, role: 'user' | 'assistant', options: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan' | 'agentRunId' | 'agentRunStatus'> = {}) => {
     setMessages(prev => [...prev, createChatMessage(text, role, options)]);
   };
 
   const appendDraftMessage = (
     text: string,
     role: 'user' | 'assistant',
-    options: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan'> = {}
+    options: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan' | 'agentRunId' | 'agentRunStatus'> = {}
   ) => {
     const message = createChatMessage(text, role, options);
     setMessages(prev => [...prev, message]);
@@ -1488,7 +1795,7 @@ function App() {
   const finishTaskTimer = (startedAt: number) => {
     setActiveTaskStartedAts(prev => {
       const startedAtIndex = prev.indexOf(startedAt);
-      if (startedAtIndex < 0) return prev.slice(1);
+      if (startedAtIndex < 0) return prev;
       return prev.filter((_, index) => index !== startedAtIndex);
     });
   };
@@ -1496,7 +1803,7 @@ function App() {
   const handleCanvasChatMessage = (
     text: string,
     role: 'user' | 'assistant',
-    options: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan'> = {}
+    options: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan' | 'agentRunId' | 'agentRunStatus'> = {}
   ) => {
     setShowSidebar(true);
     addMessage(text, role, options);
@@ -1505,7 +1812,7 @@ function App() {
   const handleCanvasChatDraftMessage = (
     text: string,
     role: 'user' | 'assistant',
-    options: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan'> = {}
+    options: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan' | 'agentRunId' | 'agentRunStatus'> = {}
   ) => {
     setShowSidebar(true);
     return appendDraftMessage(text, role, options);
@@ -1622,13 +1929,17 @@ function App() {
     let editBaseImage: CanvasItem | null = null;
     let failureActionLabel = 'AI Agent';
     let imageTaskStartedAt: number | null = null;
-    const planningMessageId = appendDraftMessage('正在分析你的意图...', 'assistant');
+    let isImageTaskTimerActive = false;
+    const agentRunClientId = createAgentRunClientId();
+    const planningMessageId = appendDraftMessage('正在分析你的意图...', 'assistant', {
+      agentRunId: agentRunClientId,
+      agentRunStatus: 'running'
+    });
     const planningVisibleStartedAt = Date.now();
     let agentPlan: AgentPlan | null = null;
     let activePlanStepId = '';
     let showAgentPlan = true;
     let collapsedPlanText = '';
-    const agentRunClientId = createAgentRunClientId();
     let unsubscribeAgentRunEvents: () => void = () => {};
 
     const syncAgentPlanMessage = (nextPlan: AgentPlan, nextText = nextPlan.summary) => {
@@ -1636,7 +1947,8 @@ function App() {
       updateMessageById(planningMessageId, message => ({
         ...message,
         text: showAgentPlan ? nextText : (collapsedPlanText || message.text || nextText),
-        agentPlan: showAgentPlan ? nextPlan : undefined
+        agentPlan: showAgentPlan ? nextPlan : undefined,
+        agentRunStatus: 'running'
       }));
     };
 
@@ -1646,17 +1958,19 @@ function App() {
       updateMessageById(planningMessageId, message => ({
         ...message,
         text: nextText,
-        agentPlan: undefined
+        agentPlan: undefined,
+        agentRunStatus: 'running'
       }));
     };
 
-    const updateExecutionMessage = (nextText: string) => {
+    const updateExecutionMessage = (nextText: string, nextStatus: ChatMessage['agentRunStatus'] = 'running') => {
       if (!nextText.trim()) return;
       collapsedPlanText = nextText;
       updateMessageById(planningMessageId, message => ({
         ...message,
         text: nextText,
-        agentPlan: showAgentPlan ? message.agentPlan : undefined
+        agentPlan: showAgentPlan ? message.agentPlan : undefined,
+        agentRunStatus: nextStatus
       }));
     };
 
@@ -1751,7 +2065,8 @@ function App() {
         updateMessageById(planningMessageId, message => ({
           ...message,
           text: initialPlan.rejectionMessage || initialPlan.summary || LIVART_SCOPE_REJECTION_MESSAGE,
-          agentPlan: undefined
+          agentPlan: undefined,
+          agentRunStatus: 'completed'
         }));
         return;
       }
@@ -1777,7 +2092,8 @@ function App() {
         updateMessageById(planningMessageId, message => ({
           ...message,
           text: initialPlan.answerMessage || initialPlan.summary || LIVART_SCOPE_HELP_MESSAGE,
-          agentPlan: undefined
+          agentPlan: undefined,
+          agentRunStatus: 'completed'
         }));
         return;
       }
@@ -1810,6 +2126,7 @@ function App() {
       }
       imageTaskStartedAt = Date.now();
       startTaskTimer(imageTaskStartedAt);
+      isImageTaskTimerActive = true;
 
       const fallbackWidth = editBaseImage ? editBaseImage.width : DEFAULT_GENERATED_IMAGE_LONG_SIDE;
       const fallbackHeight = editBaseImage ? editBaseImage.height : DEFAULT_GENERATED_IMAGE_LONG_SIDE;
@@ -1872,6 +2189,21 @@ function App() {
       const resultCards = await Promise.all(agentRun.jobs.map(async (job, index) => {
         const placeholder = placeholderItems[index];
         const imageResult: ImageGenerationResult = await waitForImageJob(job.jobId, {
+          onConnectionState: (state) => {
+            if (state === 'reconnecting') {
+              if (imageTaskStartedAt !== null && isImageTaskTimerActive) {
+                finishTaskTimer(imageTaskStartedAt);
+                isImageTaskTimerActive = false;
+              }
+              updateExecutionMessage('等待重连，重连后会自动更新图片结果。', 'waiting-reconnect');
+            } else {
+              if (imageTaskStartedAt !== null && !isImageTaskTimerActive) {
+                startTaskTimer(imageTaskStartedAt);
+                isImageTaskTimerActive = true;
+              }
+              updateExecutionMessage('已重新连接，正在同步图片结果。', 'running');
+            }
+          },
           onStatus: (jobStatus) => {
             const queueNotice = buildImageJobQueueNotice(jobStatus, agentRun.jobs.length > 1 ? index : undefined);
             if (queueNotice) {
@@ -1937,6 +2269,11 @@ function App() {
         };
       }));
       markAgentPlanStep(activePlanStepId, 'completed');
+      updateMessageById(planningMessageId, message => ({
+        ...message,
+        agentPlan: undefined,
+        agentRunStatus: 'completed'
+      }));
 
       const finalMessageText = resultCards.length > 1
         ? `已为您生成 ${resultCards.length} 张图片。`
@@ -1952,6 +2289,17 @@ function App() {
       setSidebarPromptSeed(null);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : '未知错误';
+      if (isRecoverableAgentConnectionError(error)) {
+        updateMessageById(planningMessageId, message => ({
+          ...message,
+          text: '等待重连，重连后会自动更新任务结果。',
+          agentPlan: undefined,
+          agentRunStatus: 'waiting-reconnect'
+        }));
+        setSelectedIds(editBaseImage ? [editBaseImage.id] : []);
+        setContextImage(prev => prev && createdImageIds.includes(prev.id) ? null : prev);
+        return;
+      }
       if (createdImageIds.length > 0) {
         const createdIdSet = new Set(createdImageIds);
         setItems(prev => prev.filter(item => !createdIdSet.has(item.id)));
@@ -1964,7 +2312,8 @@ function App() {
             ? `${message.agentPlan.summary} 但执行失败了。`
             : 'AI 任务规划失败。')
           : (collapsedPlanText || message.text || '任务已开始，但执行失败了。'),
-        agentPlan: undefined
+        agentPlan: undefined,
+        agentRunStatus: 'error'
       }));
       setSelectedIds(editBaseImage ? [editBaseImage.id] : []);
       setContextImage(prev => prev && createdImageIds.includes(prev.id) ? null : prev);
@@ -1973,7 +2322,7 @@ function App() {
       });
     } finally {
       unsubscribeAgentRunEvents();
-      if (imageTaskStartedAt !== null) {
+      if (imageTaskStartedAt !== null && isImageTaskTimerActive) {
         finishTaskTimer(imageTaskStartedAt);
       }
     }

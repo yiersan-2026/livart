@@ -67,6 +67,18 @@ public class ImageJobEventBroadcaster {
         sendToUser(userId, payload);
     }
 
+    public void publishAgentRunStatus(UUID userId, String runId, Map<String, Object> status) {
+        if (runId == null || runId.isBlank()) {
+            return;
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", "agent-run-status");
+        payload.put("runId", runId);
+        payload.putAll(status);
+        sendToUser(userId, payload);
+    }
+
     public void sendToSession(WebSocketSession session, Map<String, Object> payload) {
         if (!session.isOpen()) {
             unregister(session);

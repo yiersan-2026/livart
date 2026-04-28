@@ -109,6 +109,8 @@ export interface ChatMessage {
   imageResultCards?: ChatImageResultCard[];
   durationMs?: number;
   agentPlan?: AgentPlan;
+  agentRunId?: string;
+  agentRunStatus?: 'running' | 'waiting-reconnect' | 'completed' | 'error';
 }
 
 export interface ChatImageResultCard {

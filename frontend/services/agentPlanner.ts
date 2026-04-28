@@ -5,6 +5,7 @@ import { hasUsableImageSource } from './imageSources';
 import { getImageReferenceLabel } from './imageReferences';
 
 const AGENT_RUN_URL = '/api/agent/runs';
+const AGENT_RUN_STATUS_URL = '/api/agent/runs';
 const AGENT_RUN_WS_PATH = '/ws/image-jobs';
 
 interface ApiResponse<T> {
@@ -83,6 +84,15 @@ interface AgentRunApiResponse {
   source?: AgentPlan['source'];
 }
 
+interface AgentRunStatusApiResponse {
+  runId: string;
+  status: 'running' | 'completed' | 'error';
+  response?: AgentRunApiResponse;
+  errorMessage?: string;
+  errorCode?: string;
+  updatedAt?: number;
+}
+
 export interface AgentRunRequest extends AgentPlanRequest {
   maskDataUrl?: string;
   clientRunId?: string;
@@ -107,6 +117,15 @@ export interface AgentRun {
   source: AgentPlan['source'];
 }
 
+export interface AgentRunStatus {
+  runId: string;
+  status: 'running' | 'completed' | 'error';
+  response?: AgentRun;
+  errorMessage: string;
+  errorCode: string;
+  updatedAt: number;
+}
+
 export interface AgentRunProgressEvent {
   stepId: string;
   title: string;
@@ -120,6 +139,11 @@ interface AgentRunSocketMessage {
   type?: string;
   runId?: string;
   event?: Partial<AgentRunProgressEvent>;
+  status?: AgentRunStatus['status'];
+  response?: AgentRunApiResponse;
+  errorMessage?: string;
+  errorCode?: string;
+  updatedAt?: number;
   error?: unknown;
 }
 
@@ -222,7 +246,7 @@ export const updateAgentPlanStepStatuses = (
   steps: AgentPlanStep[],
   activeStepId?: string,
   terminalStatus?: 'completed' | 'error'
-) => {
+): AgentPlanStep[] => {
   if (steps.length === 0) return steps;
   const activeIndex = activeStepId ? steps.findIndex(step => step.id === activeStepId) : -1;
 
@@ -425,7 +449,9 @@ const normalizeProgressEvent = (event: Partial<AgentRunProgressEvent> | undefine
 
 export const connectAgentRunEvents = async (
   clientRunId: string,
-  onEvent: (event: AgentRunProgressEvent) => void
+  onEvent: (event: AgentRunProgressEvent) => void,
+  onStatus?: (status: AgentRunStatus) => void,
+  onConnectionState?: (state: 'connected' | 'reconnecting') => void
 ): Promise<() => void> => {
   const session = getStoredAuthSession();
   const socketUrl = getAgentRunWebSocketUrl();
@@ -435,11 +461,14 @@ export const connectAgentRunEvents = async (
 
   return new Promise((resolve) => {
     let resolved = false;
-    let socket: WebSocket | null = new WebSocket(socketUrl);
+    let stopped = false;
+    let socket: WebSocket | null = null;
     let pingIntervalId: number | null = null;
+    let reconnectTimerId: number | null = null;
+    let reconnectAttempts = 0;
     const fallbackTimerId = window.setTimeout(() => finish(), 1800);
 
-    const cleanup = () => {
+    const cleanupSocket = () => {
       if (pingIntervalId !== null) {
         window.clearInterval(pingIntervalId);
         pingIntervalId = null;
@@ -456,7 +485,14 @@ export const connectAgentRunEvents = async (
       }
     };
 
-    const unsubscribe = () => cleanup();
+    const unsubscribe = () => {
+      stopped = true;
+      if (reconnectTimerId !== null) {
+        window.clearTimeout(reconnectTimerId);
+        reconnectTimerId = null;
+      }
+      cleanupSocket();
+    };
 
     const finish = () => {
       if (resolved) return;
@@ -465,44 +501,80 @@ export const connectAgentRunEvents = async (
       resolve(unsubscribe);
     };
 
-    socket.onopen = () => {
-      socket?.send(JSON.stringify({
-        type: 'auth',
-        token: session.token,
-        runId: clientRunId
-      }));
-      pingIntervalId = window.setInterval(() => {
-        if (socket?.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({ type: 'ping' }));
+    const scheduleReconnect = () => {
+      if (stopped) return;
+      cleanupSocket();
+      onConnectionState?.('reconnecting');
+      finish();
+      reconnectAttempts += 1;
+      const reconnectDelayMs = Math.min(5000, 800 + reconnectAttempts * 700);
+      reconnectTimerId = window.setTimeout(() => {
+        reconnectTimerId = null;
+        connectSocket();
+      }, reconnectDelayMs);
+    };
+
+    function connectSocket() {
+      if (stopped) return;
+      socket = new WebSocket(socketUrl);
+
+      socket.onopen = () => {
+        reconnectAttempts = 0;
+        onConnectionState?.('connected');
+        socket?.send(JSON.stringify({
+          type: 'auth',
+          token: session.token,
+          runId: clientRunId
+        }));
+        pingIntervalId = window.setInterval(() => {
+          if (socket?.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'ping' }));
+          }
+        }, 25 * 1000);
+      };
+
+      socket.onmessage = (message) => {
+        let payload: AgentRunSocketMessage;
+        try {
+          payload = JSON.parse(String(message.data));
+        } catch {
+          return;
         }
-      }, 25 * 1000);
-    };
 
-    socket.onmessage = (message) => {
-      let payload: AgentRunSocketMessage;
-      try {
-        payload = JSON.parse(String(message.data));
-      } catch {
-        return;
-      }
+        if (payload.type === 'authenticated') {
+          finish();
+          return;
+        }
 
-      if (payload.type === 'authenticated') {
-        finish();
-        return;
-      }
+        if (payload.type !== 'agent-run-event' || payload.runId !== clientRunId) {
+          if (payload.type === 'agent-run-status' && payload.runId === clientRunId) {
+            onStatus?.(normalizeAgentRunStatusPayload({
+              runId: payload.runId || clientRunId,
+              status: payload.status || 'running',
+              response: payload.response,
+              errorMessage: payload.errorMessage,
+              errorCode: payload.errorCode,
+              updatedAt: payload.updatedAt
+            }, 'auto'));
+          }
+          return;
+        }
 
-      if (payload.type !== 'agent-run-event' || payload.runId !== clientRunId) {
-        return;
-      }
+        const progressEvent = normalizeProgressEvent(payload.event);
+        if (progressEvent) {
+          onEvent(progressEvent);
+        }
+      };
 
-      const progressEvent = normalizeProgressEvent(payload.event);
-      if (progressEvent) {
-        onEvent(progressEvent);
-      }
-    };
+      socket.onerror = () => {
+        if (socket?.readyState !== WebSocket.CLOSED && socket?.readyState !== WebSocket.CLOSING) {
+          socket.close();
+        }
+      };
+      socket.onclose = () => scheduleReconnect();
+    }
 
-    socket.onerror = () => finish();
-    socket.onclose = () => finish();
+    connectSocket();
   });
 };
 
@@ -545,6 +617,39 @@ const normalizePlan = (payload: AgentPlanApiResponse, aspectRatio: ImageAspectRa
   source: payload.source === 'fallback' ? 'fallback' : 'ai'
 });
 
+function normalizeAgentRunPayload(payload: AgentRunApiResponse, aspectRatio: ImageAspectRatio, fallbackPrompt = ''): AgentRun {
+  const plan = normalizePlan(payload.plan, aspectRatio);
+  return {
+    allowed: payload.allowed !== false,
+    responseMode: payload.responseMode === 'answer' ? 'answer' : payload.responseMode === 'reject' ? 'reject' : 'execute',
+    rejectionMessage: payload.rejectionMessage || '',
+    answerMessage: payload.answerMessage || '',
+    plan,
+    taskType: payload.taskType || plan.taskType,
+    mode: payload.mode || plan.mode,
+    count: Math.max(0, Number(payload.count || 0)),
+    baseImageId: payload.baseImageId || plan.baseImageId || '',
+    referenceImageIds: Array.isArray(payload.referenceImageIds) ? payload.referenceImageIds : plan.referenceImageIds,
+    aspectRatio: payload.aspectRatio || plan.aspectRatio,
+    requestPrompt: payload.requestPrompt || fallbackPrompt,
+    displayTitle: payload.displayTitle || plan.displayTitle,
+    displayMessage: payload.displayMessage || plan.displayMessage,
+    jobs: Array.isArray(payload.jobs) ? payload.jobs : [],
+    source: payload.source === 'fallback' ? 'fallback' : 'ai'
+  };
+}
+
+function normalizeAgentRunStatusPayload(payload: AgentRunStatusApiResponse, aspectRatio: ImageAspectRatio): AgentRunStatus {
+  return {
+    runId: payload.runId || '',
+    status: payload.status === 'completed' || payload.status === 'error' ? payload.status : 'running',
+    response: payload.response ? normalizeAgentRunPayload(payload.response, aspectRatio, payload.response.requestPrompt || '') : undefined,
+    errorMessage: payload.errorMessage || '',
+    errorCode: payload.errorCode || '',
+    updatedAt: typeof payload.updatedAt === 'number' ? payload.updatedAt : Date.now()
+  };
+}
+
 export const createAgentRun = async (request: AgentRunRequest): Promise<AgentRun> => {
   const aspectRatio = request.aspectRatio || 'auto';
   const response = await fetch(AGENT_RUN_URL, {
@@ -570,23 +675,23 @@ export const createAgentRun = async (request: AgentRunRequest): Promise<AgentRun
     throw new Error(payload?.error?.message || `Agent 执行失败：${response.status}`);
   }
 
-  const plan = normalizePlan(payload.data.plan, aspectRatio);
-  return {
-    allowed: payload.data.allowed !== false,
-    responseMode: payload.data.responseMode === 'answer' ? 'answer' : payload.data.responseMode === 'reject' ? 'reject' : 'execute',
-    rejectionMessage: payload.data.rejectionMessage || '',
-    answerMessage: payload.data.answerMessage || '',
-    plan,
-    taskType: payload.data.taskType || plan.taskType,
-    mode: payload.data.mode || plan.mode,
-    count: Math.max(0, Number(payload.data.count || 0)),
-    baseImageId: payload.data.baseImageId || plan.baseImageId || '',
-    referenceImageIds: Array.isArray(payload.data.referenceImageIds) ? payload.data.referenceImageIds : plan.referenceImageIds,
-    aspectRatio: payload.data.aspectRatio || plan.aspectRatio,
-    requestPrompt: payload.data.requestPrompt || request.prompt,
-    displayTitle: payload.data.displayTitle || plan.displayTitle,
-    displayMessage: payload.data.displayMessage || plan.displayMessage,
-    jobs: Array.isArray(payload.data.jobs) ? payload.data.jobs : [],
-    source: payload.data.source === 'fallback' ? 'fallback' : 'ai'
-  };
+  return normalizeAgentRunPayload(payload.data, aspectRatio, request.prompt);
+};
+
+export const getAgentRunStatus = async (
+  runId: string,
+  aspectRatio: ImageAspectRatio = 'auto'
+): Promise<AgentRunStatus> => {
+  const response = await fetch(`${AGENT_RUN_STATUS_URL}/${encodeURIComponent(runId)}`, {
+    headers: {
+      Accept: 'application/json',
+      ...authHeaders()
+    }
+  });
+
+  const payload = await response.json().catch(() => null) as ApiResponse<AgentRunStatusApiResponse> | null;
+  if (!response.ok || !payload?.success || !payload.data) {
+    throw new Error(payload?.error?.message || `Agent 任务状态查询失败：${response.status}`);
+  }
+  return normalizeAgentRunStatusPayload(payload.data, aspectRatio);
 };

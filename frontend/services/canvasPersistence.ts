@@ -48,6 +48,13 @@ interface AssetResponse {
   thumbnailUrlPath?: string;
 }
 
+interface PersistedCanvasImageValue {
+  content?: string;
+  assetId?: string;
+  previewContent?: string;
+  thumbnailContent?: string;
+}
+
 let currentCanvasId: string | null = null;
 const dataUrlUploadCache = new Map<string, Promise<AssetResponse>>();
 
@@ -140,7 +147,7 @@ const persistRawImageValue = async (value: string | undefined, filenameSeed: str
   return (await uploadDataImage(value, filenameSeed)).urlPath;
 };
 
-const persistCanvasImageValue = async (item: CanvasItem) => {
+const persistCanvasImageValue = async (item: CanvasItem): Promise<PersistedCanvasImageValue> => {
   if (!isDataImageUrl(item.content)) {
     const assetId = getCanvasItemAssetId(item) || undefined;
     return {
@@ -199,8 +206,9 @@ const normalizeTransientItemState = (item: CanvasItem): CanvasItem | null => {
 
 const persistItemAssets = async (item: CanvasItem): Promise<CanvasItem> => {
   const [imageContent, drawingData, maskData, redrawMaskData, removerMaskData, compositeImage, layers] = await Promise.all([
-    item.type === 'image' ? persistCanvasImageValue(item) : Promise.resolve({
+    item.type === 'image' ? persistCanvasImageValue(item) : Promise.resolve<PersistedCanvasImageValue>({
       content: item.content,
+      assetId: item.assetId,
       previewContent: item.previewContent,
       thumbnailContent: item.thumbnailContent
     }),

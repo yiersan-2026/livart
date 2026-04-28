@@ -26,6 +26,7 @@ public class ImageJobWebSocketHandler extends TextWebSocketHandler {
     private final JwtService jwtService;
     private final AuthService authService;
     private final AiProxyService aiProxyService;
+    private final AgentRunService agentRunService;
     private final ImageJobEventBroadcaster broadcaster;
     private final ObjectMapper objectMapper;
 
@@ -33,12 +34,14 @@ public class ImageJobWebSocketHandler extends TextWebSocketHandler {
             JwtService jwtService,
             AuthService authService,
             AiProxyService aiProxyService,
+            AgentRunService agentRunService,
             ImageJobEventBroadcaster broadcaster,
             ObjectMapper objectMapper
     ) {
         this.jwtService = jwtService;
         this.authService = authService;
         this.aiProxyService = aiProxyService;
+        this.agentRunService = agentRunService;
         this.broadcaster = broadcaster;
         this.objectMapper = objectMapper;
     }
@@ -118,6 +121,11 @@ public class ImageJobWebSocketHandler extends TextWebSocketHandler {
             if (!jobId.isBlank()) {
                 sendJobSnapshot(session, user.id(), jobId);
             }
+
+            String runId = payload.path("runId").asText("");
+            if (!runId.isBlank()) {
+                sendAgentRunSnapshot(session, user.id(), runId);
+            }
         } catch (ApiException exception) {
             broadcaster.sendToSession(session, Map.of(
                     "type", "error",
@@ -138,6 +146,21 @@ public class ImageJobWebSocketHandler extends TextWebSocketHandler {
             broadcaster.sendToSession(session, Map.of(
                     "type", "image-job-error",
                     "jobId", jobId,
+                    "error", toErrorPayload(exception)
+            ));
+        }
+    }
+
+    private void sendAgentRunSnapshot(WebSocketSession session, UUID userId, String runId) {
+        try {
+            Map<String, Object> status = new LinkedHashMap<>(agentRunService.getRunStatusPayload(userId, runId));
+            status.put("type", "agent-run-status");
+            status.put("runId", runId);
+            broadcaster.sendToSession(session, status);
+        } catch (ApiException exception) {
+            broadcaster.sendToSession(session, Map.of(
+                    "type", "agent-run-error",
+                    "runId", runId,
                     "error", toErrorPayload(exception)
             ));
         }

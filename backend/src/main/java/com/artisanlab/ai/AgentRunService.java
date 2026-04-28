@@ -5,15 +5,18 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
 @Service
 public class AgentRunService {
+    private static final Duration AGENT_RUN_TTL = Duration.ofMinutes(30);
     private static final Pattern PLACEMENT_INTENT_PATTERN = Pattern.compile(
             "放在|放到|放入|放进|放置|摆在|摆到|置于|添加到|放上|摆放|穿到|穿在|穿上|戴到|戴在|装到|装在|应用到|应用在"
     );
@@ -21,6 +24,7 @@ public class AgentRunService {
     private final AgentPlannerService agentPlannerService;
     private final AiProxyService aiProxyService;
     private final ImageJobEventBroadcaster eventBroadcaster;
+    private final Map<String, AgentRunState> agentRuns = new ConcurrentHashMap<>();
 
     public AgentRunService(
             AgentPlannerService agentPlannerService,
@@ -33,7 +37,17 @@ public class AgentRunService {
     }
 
     public AiProxyDtos.AgentRunResponse run(UUID userId, AiProxyDtos.AgentRunRequest request) throws IOException {
+        cleanupAgentRuns();
         String runId = normalizeClientRunId(request.clientRunId());
+        AgentRunState runState = registerRun(userId, runId);
+        if (runState != null && "completed".equals(runState.status()) && runState.response() != null) {
+            return runState.response();
+        }
+        if (runState != null) {
+            runState.markRunning();
+            publishAgentRunStatus(userId, runId, runState);
+        }
+
         publishProgress(userId, runId, "identify-intent", "识别意图", "判断你是在问 livart 功能，还是要生成 / 编辑图片。", "analysis", "running");
 
         AiProxyDtos.AgentPlanResponse plan;
@@ -42,6 +56,7 @@ public class AgentRunService {
             publishProgress(userId, runId, "identify-intent", "识别意图", "已完成意图识别。", "analysis", "completed");
         } catch (RuntimeException exception) {
             publishProgress(userId, runId, "identify-intent", "识别意图", "意图识别失败。", "analysis", "error");
+            markRunError(userId, runId, runState, exception);
             throw exception;
         }
 
@@ -51,7 +66,9 @@ public class AgentRunService {
             } else {
                 publishProgress(userId, runId, "scope-check", "检查范围", "当前请求不属于 livart 可处理范围。", "analysis", "completed");
             }
-            return responseWithoutJobs(plan, request.prompt());
+            AiProxyDtos.AgentRunResponse response = responseWithoutJobs(plan, request.prompt());
+            markRunCompleted(userId, runId, runState, response);
+            return response;
         }
 
         publishProgress(userId, runId, "plan-task", "规划任务", "已规划公开执行步骤，准备创建图片任务。", "analysis", "completed");
@@ -61,11 +78,91 @@ public class AgentRunService {
                     ? runTextToImage(userId, request, plan)
                     : runImageEdit(userId, request, plan);
             publishProgress(userId, runId, "create-image-job", "提交任务", "图片任务已创建，接下来等待生成结果。", "generate", "completed");
+            markRunCompleted(userId, runId, runState, response);
             return response;
         } catch (IOException | RuntimeException exception) {
             publishProgress(userId, runId, "create-image-job", "提交任务", "图片任务创建失败。", "generate", "error");
+            markRunError(userId, runId, runState, exception);
             throw exception;
         }
+    }
+
+    public AiProxyDtos.AgentRunStatusResponse getRunStatus(UUID userId, String runId) {
+        cleanupAgentRuns();
+        String normalizedRunId = normalizeClientRunId(runId);
+        if (normalizedRunId.isBlank()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_AGENT_RUN_ID", "无效的 Agent 任务 ID");
+        }
+
+        AgentRunState runState = agentRuns.get(runKey(userId, normalizedRunId));
+        if (runState == null) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "AGENT_RUN_NOT_FOUND", "Agent 任务不存在或已过期");
+        }
+        return runState.toResponse();
+    }
+
+    public Map<String, Object> getRunStatusPayload(UUID userId, String runId) {
+        return toStatusPayload(getRunStatus(userId, runId));
+    }
+
+    private AgentRunState registerRun(UUID userId, String runId) {
+        if (runId.isBlank()) {
+            return null;
+        }
+        return agentRuns.computeIfAbsent(runKey(userId, runId), ignored -> new AgentRunState(runId));
+    }
+
+    private void markRunCompleted(
+            UUID userId,
+            String runId,
+            AgentRunState runState,
+            AiProxyDtos.AgentRunResponse response
+    ) {
+        if (runState == null) {
+            return;
+        }
+        runState.markCompleted(response);
+        publishAgentRunStatus(userId, runId, runState);
+    }
+
+    private void markRunError(UUID userId, String runId, AgentRunState runState, Exception exception) {
+        if (runState == null) {
+            return;
+        }
+        runState.markError(safeErrorCode(exception), safeMessage(exception));
+        publishAgentRunStatus(userId, runId, runState);
+    }
+
+    private void publishAgentRunStatus(UUID userId, String runId, AgentRunState runState) {
+        eventBroadcaster.publishAgentRunStatus(userId, runId, toStatusPayload(runState.toResponse()));
+    }
+
+    private Map<String, Object> toStatusPayload(AiProxyDtos.AgentRunStatusResponse status) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("status", status.status());
+        payload.put("updatedAt", status.updatedAt());
+        if (status.response() != null) {
+            payload.put("response", status.response());
+        }
+        if (status.errorMessage() != null && !status.errorMessage().isBlank()) {
+            payload.put("errorMessage", status.errorMessage());
+        }
+        if (status.errorCode() != null && !status.errorCode().isBlank()) {
+            payload.put("errorCode", status.errorCode());
+        }
+        return payload;
+    }
+
+    private String runKey(UUID userId, String runId) {
+        return userId + ":" + runId;
+    }
+
+    private void cleanupAgentRuns() {
+        long expiredBefore = System.currentTimeMillis() - AGENT_RUN_TTL.toMillis();
+        agentRuns.entrySet().removeIf(entry -> {
+            AgentRunState runState = entry.getValue();
+            return runState.updatedAt() < expiredBefore && !"running".equals(runState.status());
+        });
     }
 
     private AiProxyDtos.AgentRunResponse runTextToImage(
@@ -411,5 +508,74 @@ public class AgentRunService {
 
     private String stringValue(Object value) {
         return value instanceof String text ? text : "";
+    }
+
+    private String safeErrorCode(Exception exception) {
+        return exception instanceof ApiException apiException ? apiException.code() : "AGENT_RUN_FAILED";
+    }
+
+    private String safeMessage(Throwable throwable) {
+        String message = throwable == null ? "" : throwable.getMessage();
+        return message == null || message.isBlank()
+                ? "Agent 任务执行失败"
+                : message.replaceAll("\\s+", " ").trim();
+    }
+
+    private static final class AgentRunState {
+        private final String runId;
+        private volatile String status = "running";
+        private volatile AiProxyDtos.AgentRunResponse response;
+        private volatile String errorMessage = "";
+        private volatile String errorCode = "";
+        private volatile long updatedAt = System.currentTimeMillis();
+
+        private AgentRunState(String runId) {
+            this.runId = runId;
+        }
+
+        private String status() {
+            return status;
+        }
+
+        private AiProxyDtos.AgentRunResponse response() {
+            return response;
+        }
+
+        private long updatedAt() {
+            return updatedAt;
+        }
+
+        private void markRunning() {
+            status = "running";
+            errorMessage = "";
+            errorCode = "";
+            updatedAt = System.currentTimeMillis();
+        }
+
+        private void markCompleted(AiProxyDtos.AgentRunResponse response) {
+            this.response = response;
+            status = "completed";
+            errorMessage = "";
+            errorCode = "";
+            updatedAt = System.currentTimeMillis();
+        }
+
+        private void markError(String code, String message) {
+            status = "error";
+            errorCode = code == null ? "" : code;
+            errorMessage = message == null ? "" : message;
+            updatedAt = System.currentTimeMillis();
+        }
+
+        private AiProxyDtos.AgentRunStatusResponse toResponse() {
+            return new AiProxyDtos.AgentRunStatusResponse(
+                    runId,
+                    status,
+                    response,
+                    errorMessage,
+                    errorCode,
+                    updatedAt
+            );
+        }
     }
 }

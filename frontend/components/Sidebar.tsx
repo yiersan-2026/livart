@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import type { ChatMessage, CanvasItem, ImageAspectRatio } from '../types';
+import type { ChatMessage, CanvasItem, ChatImageResultCard, ImageAspectRatio } from '../types';
 import { Download, Eye, Loader2, Send, RotateCcw, RotateCw, ZoomIn, ZoomOut, X } from 'lucide-react';
 import { IMAGE_ASPECT_RATIO_OPTIONS } from '../services/imageSizing';
 import { getImagePreviewFitStyle, getLargestCanvasImageSrc, getOriginalImageSrc, getThumbnailImageSrc, hasUsableImageSource } from '../services/imageSources';
@@ -550,7 +550,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
     );
   };
 
-  const getImageResultCards = (message: ChatMessage) => {
+  const getImageResultCards = (message: ChatMessage): ChatImageResultCard[] => {
     if (message.role !== 'assistant') return [];
 
     const explicitCards = message.imageResultCards || [];
@@ -647,6 +647,13 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
       </div>
     );
   };
+
+  const renderReconnectMessage = (message: ChatMessage) => (
+    <div className="inline-flex max-w-full items-center gap-2 rounded-[9px] bg-transparent px-0 py-0 text-[13px] font-medium leading-6 text-amber-700">
+      <span className="h-2 w-2 shrink-0 rounded-full bg-amber-500" />
+      <span className="min-w-0 flex-1 truncate">{message.text || '等待重连，重连后会自动更新任务结果。'}</span>
+    </div>
+  );
 
   const imageViewerControlClass = 'inline-flex h-10 w-10 items-center justify-center rounded-full text-zinc-100 transition-all hover:bg-white/10 hover:text-white active:scale-95 disabled:cursor-not-allowed disabled:opacity-35';
 
@@ -777,17 +784,20 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
             const resultCards = renderImageResultCards(message);
             const isImageResultMessage = !!resultCards;
             const isAgentPlanMessage = message.role === 'assistant' && !!message.agentPlan && !isImageResultMessage;
+            const isReconnectMessage = message.role === 'assistant' && message.agentRunStatus === 'waiting-reconnect' && !isImageResultMessage;
 
             return (
               <div key={message.id} className={`flex flex-col ${message.role === 'user' ? 'items-end' : 'items-start'}`}>
-                <div className={isImageResultMessage || isAgentPlanMessage
+                <div className={isImageResultMessage || isAgentPlanMessage || isReconnectMessage
                   ? 'w-full bg-white text-sm leading-relaxed text-gray-800'
                   : message.role === 'user'
                     ? 'max-w-[85%] rounded-[9px] bg-[#f5f5f6] px-4 py-3 text-sm font-medium leading-relaxed text-zinc-900'
                     : 'w-full bg-transparent px-0 py-0 text-sm leading-relaxed text-gray-800'
                 }>
                   {isImageResultMessage ? resultCards : (
-                    isAgentPlanMessage
+                    isReconnectMessage
+                      ? renderReconnectMessage(message)
+                      : isAgentPlanMessage
                       ? renderAgentPlan(message)
                       : message.role === 'assistant'
                         ? renderAssistantAnswer(message)
