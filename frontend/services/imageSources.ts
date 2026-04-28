@@ -8,9 +8,21 @@ const isDataImageUrl = (value: unknown): value is string => {
   return typeof value === 'string' && value.startsWith('data:image/');
 };
 
+const isHttpImageUrl = (value: unknown): value is string => {
+  return typeof value === 'string' && /^https?:\/\/.+/i.test(value);
+};
+
+const isAssetImageUrl = (value: unknown): value is string => {
+  return typeof value === 'string' && /\/api\/assets\/[^/]+\/(?:content|preview|thumbnail|view\/\d+)(?:[?#].*)?$/.test(value);
+};
+
+const getDisplayableImageSource = (...values: unknown[]) => {
+  return values.find(value => isDataImageUrl(value) || isHttpImageUrl(value) || isAssetImageUrl(value)) as string | undefined;
+};
+
 export const hasUsableImageSource = (item: CanvasItem) => (
   item.type === 'image' &&
-  !!(item.content || item.previewContent || item.thumbnailContent || item.assetId)
+  !!(item.assetId || getDisplayableImageSource(item.content, item.previewContent, item.thumbnailContent))
 );
 
 const getAssetVariantUrlFromValue = (value: unknown, variant: ImageVariant) => {
@@ -44,8 +56,8 @@ export const getCanvasImageSrc = (item: CanvasItem, zoom = 1) => {
   const tierSize = getCanvasImageWidthTierSize(item, zoom);
   return (
     getAssetVariantUrl(item, `view/${tierSize}`) ||
-    item.previewContent ||
-    (isDataImageUrl(item.content) ? item.content : '')
+    getDisplayableImageSource(item.previewContent, item.thumbnailContent, item.content) ||
+    ''
   );
 };
 
@@ -53,23 +65,21 @@ export const getLargestCanvasImageSrc = (item: CanvasItem) => {
   const largestTierSize = CANVAS_IMAGE_WIDTH_TIERS[CANVAS_IMAGE_WIDTH_TIERS.length - 1];
   return (
     getAssetVariantUrl(item, `view/${largestTierSize}`) ||
-    item.previewContent ||
-    item.thumbnailContent ||
-    (isDataImageUrl(item.content) ? item.content : '')
+    getDisplayableImageSource(item.previewContent, item.thumbnailContent, item.content) ||
+    ''
   );
 };
 
 export const getThumbnailImageSrc = (item: CanvasItem) => {
   return (
     getAssetVariantUrl(item, 'thumbnail') ||
-    item.thumbnailContent ||
-    item.previewContent ||
-    (isDataImageUrl(item.content) ? item.content : '')
+    getDisplayableImageSource(item.thumbnailContent, item.previewContent, item.content) ||
+    ''
   );
 };
 
 export const getOriginalImageSrc = (item: CanvasItem) => {
-  return item.content;
+  return getAssetVariantUrl(item, 'content') || getDisplayableImageSource(item.content, item.previewContent, item.thumbnailContent) || '';
 };
 
 export const getImagePreviewFrame = (

@@ -55,7 +55,7 @@ import {
 import { createTransparentEditMask } from './services/imageMask';
 import { buildImageResultDescription, generateImageTitleFromPrompt } from './services/imageTitle';
 import { loadSiteStatsOverview, type SiteStatsOverview } from './services/siteStats';
-import { importExternalImage, type ExternalImageCandidate } from './services/externalImages';
+import { importExternalImage, type ExternalImageCandidate, type ImportedExternalImage } from './services/externalImages';
 import { hasUsableImageSource } from './services/imageSources';
 
 const MIN_ZOOM = 0.1;
@@ -488,6 +488,38 @@ const getVisibleCanvasRect = (
 
 const isDataImageUrl = (value: unknown) => {
   return typeof value === 'string' && value.startsWith('data:image/');
+};
+
+const GENERIC_EXTERNAL_IMAGE_LABEL_PATTERN = /^(?:图片|image)\s*\d*$/i;
+
+const normalizeExternalImageLabelCandidate = (value: unknown) => {
+  if (typeof value !== 'string') return '';
+  return value.replace(/\s+/g, ' ').trim();
+};
+
+const stripImageFileExtension = (value: string) => {
+  return value.replace(/\.(?:png|jpe?g|webp|gif|avif|bmp|svg)$/i, '');
+};
+
+const isMeaningfulExternalImageLabel = (value: string) => {
+  return !!value && !GENERIC_EXTERNAL_IMAGE_LABEL_PATTERN.test(value);
+};
+
+const getExternalImageCanvasLabel = (
+  candidate: ExternalImageCandidate,
+  asset: ImportedExternalImage,
+  index: number
+) => {
+  const title = normalizeExternalImageLabelCandidate(candidate.title);
+  if (isMeaningfulExternalImageLabel(title)) return title.slice(0, 80);
+
+  const filename = stripImageFileExtension(normalizeExternalImageLabelCandidate(asset.originalFilename));
+  if (isMeaningfulExternalImageLabel(filename)) return filename.slice(0, 80);
+
+  const formatLabel = normalizeExternalImageLabelCandidate(candidate.formatLabel);
+  if (formatLabel) return `社媒${formatLabel}`.slice(0, 80);
+
+  return `社交媒体图片 ${index + 1}`;
 };
 
 const mergePersistedImageAssets = (
@@ -1371,7 +1403,7 @@ function App() {
           width: frame.width,
           height: frame.height,
           status: 'completed',
-          label: candidate.formatLabel || candidate.title || asset.originalFilename || '社交媒体图片',
+          label: getExternalImageCanvasLabel(candidate, asset, index),
           zIndex: maxZIndex + index + 1,
           layers: []
         };

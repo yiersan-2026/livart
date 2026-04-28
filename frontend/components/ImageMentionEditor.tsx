@@ -28,6 +28,25 @@ interface ImageMentionEditorProps {
   onSubmitShortcut?: () => void;
 }
 
+const MAX_MENTION_IMAGE_OPTIONS = 80;
+
+const getImageMentionSearchText = (item: CanvasItem) => {
+  const sourceText = item.source === 'external'
+    ? '社媒 社交媒体 外部导入 外部图片'
+    : item.source === 'upload'
+      ? '上传 本地图片'
+      : item.source === 'ai'
+        ? '生成 ai 图片'
+        : '';
+
+  return [
+    getImageReferenceLabel(item),
+    getImageReferenceMentionLabel(item),
+    item.id,
+    sourceText
+  ].join(' ').toLowerCase();
+};
+
 const readEditorText = (root: ParentNode) => {
   let text = '';
 
@@ -130,16 +149,11 @@ const ImageMentionEditor: React.FC<ImageMentionEditorProps> = ({
       .slice()
       .reverse();
 
-    if (!normalizedQuery) return availableImages.slice(0, 12);
+    if (!normalizedQuery) return availableImages.slice(0, MAX_MENTION_IMAGE_OPTIONS);
 
     return availableImages
-      .filter(item => {
-        const label = getImageReferenceLabel(item).toLowerCase();
-        const mentionLabel = getImageReferenceMentionLabel(item).toLowerCase();
-        const stableId = item.id.toLowerCase();
-        return label.includes(normalizedQuery) || mentionLabel.includes(normalizedQuery) || stableId.includes(normalizedQuery);
-      })
-      .slice(0, 12);
+      .filter(item => getImageMentionSearchText(item).includes(normalizedQuery))
+      .slice(0, MAX_MENTION_IMAGE_OPTIONS);
   }, [imageItems, mentionQuery, searchQuery, selectableImageItems]);
 
   const activePreviewItem = useMemo(() => {
