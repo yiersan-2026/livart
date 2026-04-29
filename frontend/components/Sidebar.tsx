@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import type { ActiveImageTaskInfo, ChatMessage, CanvasItem, ChatImageResultCard, ExternalSkillSummary, ImageAspectRatio, ImageResolution } from '../types';
-import { ChevronDown, Download, Eye, Github, Loader2, Send, RotateCcw, RotateCw, ZoomIn, ZoomOut, X } from 'lucide-react';
+import { ChevronDown, Copy, Download, Eye, Github, Loader2, Send, RotateCcw, RotateCw, Share2, ZoomIn, ZoomOut, X } from 'lucide-react';
+import { QRCodeCanvas } from 'qrcode.react';
 import { IMAGE_ASPECT_RATIO_OPTIONS, IMAGE_RESOLUTION_OPTIONS } from '../services/imageSizing';
 import { getImagePreviewFitStyle, getLargestCanvasImageSrc, getOriginalImageSrc, getThumbnailImageSrc, hasUsableImageSource } from '../services/imageSources';
 import { formatExecutionDuration } from '../services/taskTiming';
@@ -17,6 +18,7 @@ import {
   tokenizeImageReferenceText
 } from '../services/imageReferences';
 import { buildImageResultDescription, getCanvasItemDisplayTitle } from '../services/imageTitle';
+import { buildLivartImageSharePageUrl, LIVART_SHARE_PROMOTION_TEXT } from '../services/shareLinks';
 import ImageMentionEditor from './ImageMentionEditor';
 import LivartLogo from './LivartLogo';
 
@@ -24,6 +26,57 @@ const IMAGE_VIEWER_MIN_ZOOM = 1;
 const IMAGE_VIEWER_MAX_ZOOM = 10;
 const IMAGE_VIEWER_ZOOM_STEP = 1;
 const ENABLE_EXTERNAL_SKILLS = true;
+
+type ImageSharePanelState = {
+  itemId: string;
+  title: string;
+  placement: 'message' | 'viewer';
+  wechatScene?: 'friend' | 'timeline';
+};
+
+const copyTextToClipboard = async (text: string) => {
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand('copy');
+  textarea.remove();
+  if (!copied) throw new Error('复制失败');
+};
+
+const toAbsoluteShareUrl = (source: string) => {
+  if (!source || source.startsWith('data:')) return '';
+  try {
+    return new URL(source, window.location.origin).toString();
+  } catch {
+    return '';
+  }
+};
+
+const buildWeiboShareUrl = (pageUrl: string, title: string, imageUrl: string) => {
+  const params = new URLSearchParams({
+    url: pageUrl,
+    title,
+    pic: imageUrl
+  });
+  return `https://service.weibo.com/share/share.php?${params.toString()}`;
+};
+
+const openExternalShareWindow = (url: string) => {
+  window.open(url, '_blank', 'noopener,noreferrer,width=720,height=640');
+};
+
+const getWeChatShareSceneLabel = (scene: ImageSharePanelState['wechatScene']) => (
+  scene === 'timeline' ? '朋友圈' : '微信好友'
+);
 
 type AssistantAnswerBlock =
   | { type: 'paragraph'; text: string }
@@ -63,6 +116,8 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
   const [imageViewerZoom, setImageViewerZoom] = React.useState(1);
   const [imageViewerRotation, setImageViewerRotation] = React.useState(0);
   const [imageViewerPan, setImageViewerPan] = React.useState({ x: 0, y: 0 });
+  const [imageSharePanel, setImageSharePanel] = React.useState<ImageSharePanelState | null>(null);
+  const [imageShareCopyNotice, setImageShareCopyNotice] = React.useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
   const aspectRatioMenuRef = useRef<HTMLDivElement>(null);
@@ -211,12 +266,16 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
   };
 
   const openImageViewer = (item: CanvasItem, title = getCanvasItemDisplayTitle(item)) => {
+    setImageSharePanel(null);
+    setImageShareCopyNotice('');
     setImageViewer({ item, title });
     resetImageViewerTransform();
   };
 
   const closeImageViewer = () => {
     setImageViewer(null);
+    setImageSharePanel(currentPanel => currentPanel?.placement === 'viewer' ? null : currentPanel);
+    setImageShareCopyNotice('');
     resetImageViewerTransform();
   };
 
@@ -249,6 +308,177 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
   const downloadImageViewerImage = () => {
     if (!imageViewer) return;
     downloadOriginalImage(imageViewer.item, imageViewer.title);
+  };
+
+  const getImageShareSource = (item: CanvasItem) => (
+    toAbsoluteShareUrl(getOriginalImageSrc(item) || getLargestCanvasImageSrc(item) || getThumbnailImageSrc(item))
+  );
+
+  const getImageShareTitle = (item: CanvasItem, title = getCanvasItemDisplayTitle(item)) => (
+    title || getCanvasItemDisplayTitle(item) || 'livart 图片'
+  );
+
+  const getImageSharePageUrl = (item: CanvasItem, title?: string) => {
+    const imageUrl = getImageShareSource(item);
+    if (!imageUrl) return '';
+    return buildLivartImageSharePageUrl({
+      imageUrl,
+      title: getImageShareTitle(item, title)
+    });
+  };
+
+  const getImageShareText = (item: CanvasItem, title?: string) => (
+    `${getImageShareTitle(item, title)}\n${LIVART_SHARE_PROMOTION_TEXT}`
+  );
+
+  const openImageSharePanel = (
+    item: CanvasItem,
+    title = getCanvasItemDisplayTitle(item),
+    placement: ImageSharePanelState['placement'] = 'message'
+  ) => {
+    if (!getImageSharePageUrl(item, title)) return;
+    setImageShareCopyNotice('');
+    setImageSharePanel(currentPanel => (
+      currentPanel?.itemId === item.id && currentPanel.placement === placement
+        ? null
+        : { itemId: item.id, title: getImageShareTitle(item, title), placement }
+    ));
+  };
+
+  const copyImageShareText = async (item: CanvasItem, title?: string) => {
+    const pageUrl = getImageSharePageUrl(item, title);
+    if (!pageUrl) return;
+
+    try {
+      await copyTextToClipboard(`${getImageShareText(item, title)}\n${pageUrl}`);
+      setImageShareCopyNotice('分享文案已复制');
+      window.setTimeout(() => {
+        setImageShareCopyNotice(currentNotice => currentNotice === '分享文案已复制' ? '' : currentNotice);
+      }, 1800);
+    } catch (error) {
+      setImageShareCopyNotice(error instanceof Error ? error.message : '复制失败');
+    }
+  };
+
+  const shareImageToWeibo = (item: CanvasItem, title?: string) => {
+    const pageUrl = getImageSharePageUrl(item, title);
+    const imageUrl = getImageShareSource(item);
+    if (!pageUrl || !imageUrl) return;
+    openExternalShareWindow(buildWeiboShareUrl(pageUrl, getImageShareText(item, title), imageUrl));
+  };
+
+  const renderImageSharePanel = (
+    item: CanvasItem,
+    title: string,
+    placement: ImageSharePanelState['placement']
+  ) => {
+    if (imageSharePanel?.itemId !== item.id || imageSharePanel.placement !== placement) return null;
+
+    const pageUrl = getImageSharePageUrl(item, title);
+    if (!pageUrl) return null;
+    const isViewerPlacement = placement === 'viewer';
+
+    return (
+      <div
+        className={`z-30 w-72 rounded-2xl border p-3 text-left shadow-2xl backdrop-blur-xl ${
+          isViewerPlacement
+            ? 'absolute bottom-16 right-0 border-white/10 bg-zinc-950/95 text-white'
+            : 'absolute bottom-3 right-14 border-zinc-200 bg-white text-zinc-900'
+        }`}
+        onClick={event => event.stopPropagation()}
+      >
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className={`text-xs font-black ${isViewerPlacement ? 'text-white' : 'text-zinc-900'}`}>分享图片</div>
+            <div className={`mt-0.5 truncate text-[10px] font-bold ${isViewerPlacement ? 'text-zinc-400' : 'text-zinc-400'}`}>
+              {title}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setImageSharePanel(null);
+              setImageShareCopyNotice('');
+            }}
+            className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg transition-colors ${
+              isViewerPlacement ? 'text-zinc-400 hover:bg-white/10 hover:text-white' : 'text-zinc-400 hover:bg-zinc-50 hover:text-zinc-900'
+            }`}
+            title="关闭分享"
+          >
+            <X size={14} />
+          </button>
+        </div>
+        <div className={`mb-3 rounded-xl px-3 py-2 text-[11px] font-bold leading-5 ${
+          isViewerPlacement ? 'bg-white/10 text-zinc-200' : 'bg-zinc-50 text-zinc-600'
+        }`}>
+          {LIVART_SHARE_PROMOTION_TEXT}
+        </div>
+        <div className="grid grid-cols-3 gap-1.5">
+          <button
+            type="button"
+            onClick={() => setImageSharePanel({ itemId: item.id, title, placement, wechatScene: 'friend' })}
+            className={`flex h-[58px] flex-col items-center justify-center gap-1 rounded-xl p-1.5 text-[10px] font-black transition-colors ${
+              isViewerPlacement ? 'text-zinc-200 hover:bg-white/10' : 'text-zinc-500 hover:bg-zinc-50'
+            }`}
+            title="分享到微信好友"
+          >
+            <span className="flex h-[30px] w-[30px] items-center justify-center rounded-full bg-[#07c160] text-[10px] font-black text-white">友</span>
+            微信好友
+          </button>
+          <button
+            type="button"
+            onClick={() => setImageSharePanel({ itemId: item.id, title, placement, wechatScene: 'timeline' })}
+            className={`flex h-[58px] flex-col items-center justify-center gap-1 rounded-xl p-1.5 text-[10px] font-black transition-colors ${
+              isViewerPlacement ? 'text-zinc-200 hover:bg-white/10' : 'text-zinc-500 hover:bg-zinc-50'
+            }`}
+            title="分享到朋友圈"
+          >
+            <span className="flex h-[30px] w-[30px] items-center justify-center rounded-full bg-[#10b981] text-[10px] font-black text-white">圈</span>
+            朋友圈
+          </button>
+          <button
+            type="button"
+            onClick={() => shareImageToWeibo(item, title)}
+            className={`flex h-[58px] flex-col items-center justify-center gap-1 rounded-xl p-1.5 text-[10px] font-black transition-colors ${
+              isViewerPlacement ? 'text-zinc-200 hover:bg-white/10' : 'text-zinc-500 hover:bg-zinc-50'
+            }`}
+            title="分享到微博"
+          >
+            <span className="flex h-[30px] w-[30px] items-center justify-center rounded-full bg-[#e6162d] text-[10px] font-black text-white">博</span>
+            微博
+          </button>
+        </div>
+        {imageSharePanel.wechatScene && (
+          <div className={`mt-3 rounded-2xl border p-3 ${
+            isViewerPlacement ? 'border-emerald-400/20 bg-emerald-400/10' : 'border-emerald-100 bg-emerald-50/70'
+          }`}>
+            <div className="flex items-start gap-3">
+              <div className="rounded-xl bg-white p-2">
+                <QRCodeCanvas value={pageUrl} size={112} includeMargin />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className={`text-xs font-black ${isViewerPlacement ? 'text-emerald-100' : 'text-emerald-900'}`}>
+                  微信扫一扫：分享到{getWeChatShareSceneLabel(imageSharePanel.wechatScene)}
+                </div>
+                <div className={`mt-1 text-[11px] font-bold leading-5 ${isViewerPlacement ? 'text-emerald-200' : 'text-emerald-700'}`}>
+                  手机微信扫码打开后，点击右上角“...”分享到{getWeChatShareSceneLabel(imageSharePanel.wechatScene)}。
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        <button
+          type="button"
+          onClick={() => void copyImageShareText(item, title)}
+          className={`mt-3 flex h-9 w-full items-center justify-center gap-2 rounded-xl px-3 text-xs font-black transition-colors active:scale-[0.99] ${
+            isViewerPlacement ? 'bg-white text-zinc-950 hover:bg-zinc-100' : 'bg-zinc-900 text-white hover:bg-zinc-800'
+          }`}
+        >
+          <Copy size={14} />
+          {imageShareCopyNotice || '复制分享文案'}
+        </button>
+      </div>
+    );
   };
 
   const handleImageViewerWheel = (event: React.WheelEvent<HTMLDivElement>) => {
@@ -630,14 +860,15 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
       <div className="mt-3 grid gap-2">
         {attachedImages.map((item) => {
           const previewStyle = getImagePreviewFitStyle(item, 230, 180);
+          const title = getCanvasItemDisplayTitle(item);
           return (
             <div
               key={item.id}
-              className="group relative overflow-hidden rounded-2xl bg-white p-2 text-left shadow-sm ring-1 ring-black/5 transition-all hover:-translate-y-0.5 hover:shadow-md hover:ring-indigo-200 active:scale-[0.99]"
+              className="group relative overflow-visible rounded-2xl bg-white p-2 text-left shadow-sm ring-1 ring-black/5 transition-all hover:-translate-y-0.5 hover:shadow-md hover:ring-indigo-200 active:scale-[0.99]"
             >
               <button
                 type="button"
-                onClick={() => openImageViewer(item)}
+                onClick={() => openImageViewer(item, title)}
                 title="打开大图预览"
                 className="block overflow-hidden rounded-xl bg-gray-100 text-left"
                 style={previewStyle}
@@ -648,13 +879,25 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
                 type="button"
                 onClick={(event) => {
                   event.stopPropagation();
-                  downloadOriginalImage(item);
+                  openImageSharePanel(item, title, 'message');
+                }}
+                className="absolute bottom-14 right-4 flex h-8 w-8 items-center justify-center rounded-full bg-white/95 text-zinc-900 opacity-0 shadow-lg ring-1 ring-black/10 transition-all hover:scale-105 hover:bg-white group-hover:opacity-100"
+                title="分享图片"
+              >
+                <Share2 size={15} />
+              </button>
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  downloadOriginalImage(item, title);
                 }}
                 className="absolute bottom-4 right-4 flex h-8 w-8 items-center justify-center rounded-full bg-white/95 text-zinc-900 opacity-0 shadow-lg ring-1 ring-black/10 transition-all hover:scale-105 hover:bg-white group-hover:opacity-100"
                 title="下载原始图片"
               >
                 <Download size={15} />
               </button>
+              {renderImageSharePanel(item, title, 'message')}
             </div>
           );
         })}
@@ -707,7 +950,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
               <h3 className="mb-3 text-[16px] font-black leading-snug text-zinc-800">
                 {card.title}
               </h3>
-              <div className="group relative overflow-hidden rounded-[4px] bg-zinc-100" style={previewStyle}>
+              <div className="group relative overflow-visible rounded-[4px] bg-zinc-100" style={previewStyle}>
                 <button
                   type="button"
                   onClick={() => openImageViewer(card.item, card.title)}
@@ -724,6 +967,17 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
                   type="button"
                   onClick={(event) => {
                     event.stopPropagation();
+                    openImageSharePanel(card.item, card.title, 'message');
+                  }}
+                  className="absolute bottom-14 right-3 flex h-9 w-9 items-center justify-center rounded-full bg-white/95 text-zinc-900 opacity-0 shadow-lg ring-1 ring-black/10 transition-all hover:scale-105 hover:bg-white group-hover:opacity-100"
+                  title="分享图片"
+                >
+                  <Share2 size={16} />
+                </button>
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
                     downloadOriginalImage(card.item, card.title);
                   }}
                   className="absolute bottom-3 right-3 flex h-9 w-9 items-center justify-center rounded-full bg-white/95 text-zinc-900 opacity-0 shadow-lg ring-1 ring-black/10 transition-all hover:scale-105 hover:bg-white group-hover:opacity-100"
@@ -731,6 +985,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
                 >
                   <Download size={16} />
                 </button>
+                {renderImageSharePanel(card.item, card.title, 'message')}
               </div>
               <p className="mt-4 text-[15px] font-medium leading-7 text-zinc-700">
                 {card.description}
@@ -874,6 +1129,18 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
             >
               <Download size={18} />
             </button>
+            <button
+              type="button"
+              className={imageViewerControlClass}
+              onClick={(event) => {
+                event.stopPropagation();
+                openImageSharePanel(imageViewer.item, imageViewer.title, 'viewer');
+              }}
+              title="分享图片"
+            >
+              <Share2 size={18} />
+            </button>
+            {renderImageSharePanel(imageViewer.item, imageViewer.title, 'viewer')}
           </div>
       </div>,
       document.body
