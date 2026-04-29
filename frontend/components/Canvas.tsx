@@ -18,7 +18,7 @@ import {
   getAspectRatioFrame,
   getImageFrameFromSource,
 } from '../services/imageSizing';
-import { getCanvasImageSrc, getOriginalImageSrc } from '../services/imageSources';
+import { getCanvasImageSrc, getLargestCanvasImageSrc, getOriginalImageSrc } from '../services/imageSources';
 import {
   normalizeOptimizedPromptImageReferences,
   resolveMentionedImageReferences
@@ -629,8 +629,30 @@ const loadImageElement = (src: string) => new Promise<HTMLImageElement>((resolve
   image.src = src;
 });
 
+const fitCropFrameToCanvasLongSide = (
+  sourceWidth: number,
+  sourceHeight: number,
+  maxLongSide: number
+) => {
+  const safeWidth = getCanvasDimension(sourceWidth);
+  const safeHeight = getCanvasDimension(sourceHeight);
+  const safeMaxLongSide = Math.max(MIN_CROP_SIZE, getCanvasDimension(maxLongSide));
+
+  if (safeWidth >= safeHeight) {
+    return {
+      width: safeMaxLongSide,
+      height: Math.max(MIN_CROP_SIZE, getCanvasDimension((safeMaxLongSide * safeHeight) / safeWidth))
+    };
+  }
+
+  return {
+    width: Math.max(MIN_CROP_SIZE, getCanvasDimension((safeMaxLongSide * safeWidth) / safeHeight)),
+    height: safeMaxLongSide
+  };
+};
+
 const createCroppedImageDataUrl = async (item: CanvasItem, cropRect: CropRect) => {
-  const source = getCanvasImageSrc(item);
+  const source = getOriginalImageSrc(item) || getLargestCanvasImageSrc(item) || getCanvasImageSrc(item);
   if (!source) throw new Error('图片缺少可裁剪内容');
 
   const image = await loadImageElement(source);
@@ -679,10 +701,11 @@ const createCroppedImageDataUrl = async (item: CanvasItem, cropRect: CropRect) =
 
   return {
     dataUrl: outputCanvas.toDataURL('image/png'),
-    frame: {
-      width: Math.max(MIN_CROP_SIZE, cropWidth),
-      height: Math.max(MIN_CROP_SIZE, cropHeight)
-    }
+    frame: fitCropFrameToCanvasLongSide(
+      outputCanvas.width,
+      outputCanvas.height,
+      Math.max(item.width, item.height)
+    )
   };
 };
 
@@ -2208,8 +2231,9 @@ const Canvas: React.FC<CanvasProps> = ({
         optimizedPrompt: `从 ${selectedItem.id} 裁剪生成`,
         layers: []
       };
+      const persistedCroppedItem = await ensureCanvasImageAsset(croppedItem);
 
-      onItemAdd(croppedItem);
+      onItemAdd(persistedCroppedItem);
       resetImageToolModes();
       setSelectedIds([newId]);
     } catch (error) {

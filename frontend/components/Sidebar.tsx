@@ -901,7 +901,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
           })}
 
           {isThinking && (
-            <div className="space-y-2 text-sm font-bold text-black">
+            <div className="relative overflow-visible text-sm font-bold text-black">
               <div className="flex flex-wrap items-center gap-2">
                 <Loader2 className="animate-spin" size={16} />
                 <span>livart 正在生图</span>
@@ -916,7 +916,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
                 <span className="text-xs font-black text-gray-400">可继续提交新任务</span>
               </div>
               {isActiveTaskListOpen && (
-                <div className="rounded-2xl border border-gray-100 bg-white p-2">
+                <div className="absolute bottom-full left-0 z-30 mb-2 w-full min-w-[280px] rounded-2xl border border-gray-100 bg-white p-2 shadow-[0_18px_50px_-28px_rgba(0,0,0,0.45)]">
                   {sortedActiveTasks.map((task, index) => (
                     <div key={task.key} className="flex items-center justify-between gap-3 rounded-xl px-2 py-2 text-xs">
                       <span className="min-w-0 truncate font-black text-gray-700">
