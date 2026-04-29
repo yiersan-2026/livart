@@ -46,6 +46,8 @@ interface AssetResponse {
   urlPath: string;
   previewUrlPath?: string;
   thumbnailUrlPath?: string;
+  width?: number;
+  height?: number;
 }
 
 interface PersistedCanvasImageValue {
@@ -181,6 +183,19 @@ export const ensureCanvasImageAsset = async (item: CanvasItem) => {
     previewContent: imageContent.previewContent,
     thumbnailContent: imageContent.thumbnailContent
   };
+};
+
+export const rotateCanvasImageAsset = async (assetId: string, quarterTurns: number) => {
+  const response = await fetch(`/api/assets/${encodeURIComponent(assetId)}/rotate`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      ...authHeaders()
+    },
+    body: JSON.stringify({ quarterTurns })
+  });
+  return unwrapApiResponse<AssetResponse>(response);
 };
 
 const normalizeTransientItemState = (item: CanvasItem): CanvasItem | null => {

@@ -1,4 +1,4 @@
-import type { ImageAspectRatio } from '../types';
+import type { ImageAspectRatio, ImageResolution } from '../types';
 
 export const DEFAULT_GENERATED_IMAGE_LONG_SIDE = 512;
 
@@ -13,6 +13,16 @@ export const IMAGE_ASPECT_RATIO_OPTIONS: Array<{
   { value: '3:4', label: '3:4', title: '竖向标准画幅' },
   { value: '16:9', label: '16:9', title: '横向宽屏画幅' },
   { value: '9:16', label: '9:16', title: '竖向手机画幅' }
+];
+
+export const IMAGE_RESOLUTION_OPTIONS: Array<{
+  value: ImageResolution;
+  label: string;
+  title: string;
+}> = [
+  { value: '1k', label: '1K', title: '轻量生成，速度更快' },
+  { value: '2k', label: '2K', title: '默认高清，兼顾质量和速度' },
+  { value: '4k', label: '4K', title: '超高清，耗时更长，部分画幅会使用最大安全尺寸' }
 ];
 
 type GeminiAspectRatio = '1:1' | '4:3' | '3:4' | '16:9' | '9:16';

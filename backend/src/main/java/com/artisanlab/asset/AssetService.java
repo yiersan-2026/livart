@@ -219,6 +219,50 @@ public class AssetService {
         return new AssetContent(entity, new ByteArrayInputStream(preparedImage.bytes()), preparedImage.contentType());
     }
 
+    @Transactional
+    public AssetDtos.AssetResponse rotate(UUID userId, UUID assetId, String directionValue, Integer quarterTurnsValue) {
+        int quarterTurns = normalizeQuarterTurns(quarterTurnsValue != null
+                ? quarterTurnsValue
+                : AssetRotationDirection.from(directionValue).quarterTurns);
+        AssetEntity entity = requireUserAsset(userId, assetId);
+        if (quarterTurns == 0) {
+            return toResponse(entity);
+        }
+
+        byte[] originalBytes = readOriginalBytes(entity);
+        BufferedImage originalImage = readImage(originalBytes);
+        if (originalImage == null) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "ASSET_ROTATE_UNSUPPORTED", "当前图片格式暂不支持旋转");
+        }
+
+        BufferedImage rotatedImage = rotateImage(originalImage, quarterTurns);
+        EncodedImage encodedOriginal = encodeOriginalImage(rotatedImage, entity.getMimeType());
+
+        try (InputStream inputStream = new ByteArrayInputStream(encodedOriginal.bytes())) {
+            minioClient.putObject(PutObjectArgs.builder()
+                    .bucket(properties.minio().bucket())
+                    .object(entity.getObjectKey())
+                    .stream(inputStream, encodedOriginal.bytes().length, -1)
+                    .contentType(encodedOriginal.contentType())
+                    .build());
+            uploadImageVariants(entity.getObjectKey(), rotatedImage);
+        } catch (Exception exception) {
+            log.warn("[asset] rotate failed assetId={} bucket={} objectKey={} error={}",
+                    entity.getId(), properties.minio().bucket(), entity.getObjectKey(), exception.getMessage());
+            throw new ApiException(HttpStatus.BAD_GATEWAY, "ASSET_ROTATE_FAILED", "旋转图片资源失败");
+        }
+
+        entity.setMimeType(encodedOriginal.contentType());
+        entity.setSizeBytes(encodedOriginal.bytes().length);
+        entity.setWidth(rotatedImage.getWidth());
+        entity.setHeight(rotatedImage.getHeight());
+        if (assetMapper.updateAssetMetadata(entity) != 1) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "ASSET_NOT_FOUND", "图片资源不存在");
+        }
+
+        return toResponse(assetMapper.findById(assetId));
+    }
+
     public PreparedImageContent prepareModelInputImage(byte[] originalBytes, String contentType) {
         String normalizedContentType = normalizeMimeType(contentType);
         BufferedImage image = readImage(originalBytes);
@@ -503,6 +547,66 @@ public class AssetService {
         return new EncodedImage(outputStream.toByteArray(), contentType);
     }
 
+    private EncodedImage encodeOriginalImage(BufferedImage source, String contentType) {
+        String normalizedContentType = normalizeMimeType(contentType);
+        ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+        try {
+            switch (normalizedContentType) {
+                case "image/jpeg", "image/jpg" -> {
+                    writeJpeg(source, outputStream, MODEL_INPUT_JPEG_QUALITY);
+                    return new EncodedImage(outputStream.toByteArray(), "image/jpeg");
+                }
+                case "image/png" -> {
+                    ImageIO.write(source, "png", outputStream);
+                    return new EncodedImage(outputStream.toByteArray(), "image/png");
+                }
+                case "image/webp" -> {
+                    writeCompressedImage(source, WEBP_FORMAT, outputStream, CANVAS_VIEW_WEBP_QUALITY);
+                    return new EncodedImage(outputStream.toByteArray(), WEBP_CONTENT_TYPE);
+                }
+                default -> throw new ApiException(HttpStatus.BAD_REQUEST, "ASSET_ROTATE_UNSUPPORTED", "当前图片格式暂不支持旋转");
+            }
+        } catch (IOException exception) {
+            throw new ApiException(HttpStatus.BAD_GATEWAY, "ASSET_ROTATE_FAILED", "旋转图片资源失败");
+        }
+    }
+
+    private BufferedImage rotateImage(BufferedImage source, int quarterTurns) {
+        int normalizedQuarterTurns = normalizeQuarterTurns(quarterTurns);
+        if (normalizedQuarterTurns == 0) {
+            return source;
+        }
+        boolean swapsDimensions = normalizedQuarterTurns % 2 == 1;
+        int targetType = source.getColorModel().hasAlpha()
+                ? BufferedImage.TYPE_INT_ARGB
+                : BufferedImage.TYPE_INT_RGB;
+        BufferedImage target = new BufferedImage(
+                swapsDimensions ? source.getHeight() : source.getWidth(),
+                swapsDimensions ? source.getWidth() : source.getHeight(),
+                targetType
+        );
+        Graphics2D graphics = target.createGraphics();
+        try {
+            if (!source.getColorModel().hasAlpha()) {
+                graphics.setColor(Color.WHITE);
+                graphics.fillRect(0, 0, target.getWidth(), target.getHeight());
+            }
+            graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+            graphics.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+            graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            graphics.translate(target.getWidth() / 2.0, target.getHeight() / 2.0);
+            graphics.rotate(normalizedQuarterTurns * Math.PI / 2);
+            graphics.drawImage(source, -source.getWidth() / 2, -source.getHeight() / 2, null);
+        } finally {
+            graphics.dispose();
+        }
+        return target;
+    }
+
+    private int normalizeQuarterTurns(int quarterTurns) {
+        return Math.floorMod(quarterTurns, 4);
+    }
+
     private BufferedImage resizeToMaxSide(BufferedImage source, int maxSide) {
         int sourceWidth = source.getWidth();
         int sourceHeight = source.getHeight();
@@ -624,5 +728,26 @@ public class AssetService {
     private enum ResizeMode {
         MAX_SIDE,
         MAX_WIDTH
+    }
+
+    private enum AssetRotationDirection {
+        LEFT(-1),
+        RIGHT(1);
+
+        private final int quarterTurns;
+
+        AssetRotationDirection(int quarterTurns) {
+            this.quarterTurns = quarterTurns;
+        }
+
+        private static AssetRotationDirection from(String value) {
+            if ("left".equalsIgnoreCase(value)) {
+                return LEFT;
+            }
+            if ("right".equalsIgnoreCase(value)) {
+                return RIGHT;
+            }
+            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_ROTATION_DIRECTION", "请选择向左或向右旋转");
+        }
     }
 }

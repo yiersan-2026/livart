@@ -7,6 +7,9 @@ public final class AssetDtos {
     private AssetDtos() {
     }
 
+    public record AssetRotationRequest(String direction, Integer quarterTurns) {
+    }
+
     public record AssetResponse(
             UUID id,
             UUID canvasId,

@@ -16,6 +16,7 @@ export interface CanvasItem {
   content: string;
   source?: 'ai' | 'upload' | 'external' | 'crop';
   assetId?: string;
+  assetVersion?: number;
   previewContent?: string;
   thumbnailContent?: string;
   x: number;
@@ -61,6 +62,8 @@ export interface CanvasTextStyle {
 export type DesignStyle = 'none' | 'cyberpunk' | 'minimalist' | '3d-clay' | 'watercolor' | 'sketch';
 
 export type ImageAspectRatio = 'auto' | '1:1' | '4:3' | '3:4' | '16:9' | '9:16';
+
+export type ImageResolution = '1k' | '2k' | '4k';
 
 export type CanvasTool = 'select' | 'pan' | 'text';
 

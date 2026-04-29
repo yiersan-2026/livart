@@ -5,6 +5,7 @@ import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Update;
 
 import java.util.UUID;
 
@@ -29,4 +30,15 @@ public interface AssetMapper extends BaseMapper<AssetEntity> {
             WHERE id = #{id}
             """)
     AssetEntity findById(@Param("id") UUID id);
+
+    @Update("""
+            UPDATE artisan_assets
+            SET mime_type = #{mimeType},
+                size_bytes = #{sizeBytes},
+                width = #{width},
+                height = #{height}
+            WHERE id = #{id}
+              AND user_id = #{userId}
+            """)
+    int updateAssetMetadata(AssetEntity entity);
 }

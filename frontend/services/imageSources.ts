@@ -34,7 +34,10 @@ const getAssetVariantUrlFromValue = (value: unknown, variant: ImageVariant) => {
 
 const getAssetVariantUrl = (item: CanvasItem, variant: ImageVariant) => {
   if (item.assetId) {
-    return `/api/assets/${encodeURIComponent(item.assetId)}/${variant}`;
+    const cacheVersion = Number.isFinite(item.assetVersion) && item.assetVersion
+      ? `?v=${encodeURIComponent(String(item.assetVersion))}`
+      : '';
+    return `/api/assets/${encodeURIComponent(item.assetId)}/${variant}${cacheVersion}`;
   }
   return (
     getAssetVariantUrlFromValue(item.previewContent, variant) ||

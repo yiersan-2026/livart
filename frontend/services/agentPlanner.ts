@@ -1,4 +1,4 @@
-import type { AgentPlan, AgentPlanStep, AgentToolId, CanvasItem, ImageAspectRatio } from '../types';
+import type { AgentPlan, AgentPlanStep, AgentToolId, CanvasItem, ImageAspectRatio, ImageResolution } from '../types';
 import { authHeaders, getStoredAuthSession } from './auth';
 import { getCanvasItemAssetId } from './canvasPersistence';
 import { hasUsableImageSource } from './imageSources';
@@ -53,6 +53,7 @@ interface AgentPlanApiResponse {
 export interface AgentPlanRequest {
   prompt: string;
   aspectRatio?: ImageAspectRatio;
+  imageResolution?: ImageResolution;
   contextImageId?: string;
   requestedEditMode?: 'local-redraw' | 'remover' | 'layer-subject' | 'layer-background' | 'view-change';
   forcedToolId?: AgentToolId;
@@ -659,6 +660,7 @@ function normalizeAgentRunStatusPayload(payload: AgentRunStatusApiResponse, aspe
 
 export const createAgentRun = async (request: AgentRunRequest): Promise<AgentRun> => {
   const aspectRatio = request.aspectRatio || 'auto';
+  const imageResolution = request.imageResolution || '2k';
   const response = await fetch(AGENT_RUN_URL, {
     method: 'POST',
     headers: {
@@ -670,6 +672,7 @@ export const createAgentRun = async (request: AgentRunRequest): Promise<AgentRun
       prompt: request.prompt,
       contextImageId: request.contextImageId || '',
       aspectRatio,
+      imageResolution,
       requestedEditMode: request.requestedEditMode || '',
       forcedToolId: request.forcedToolId || '',
       externalSkillId: request.externalSkillId || '',

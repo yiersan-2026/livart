@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import type { ActiveImageTaskInfo, ChatMessage, CanvasItem, ChatImageResultCard, ExternalSkillSummary, ImageAspectRatio } from '../types';
+import type { ActiveImageTaskInfo, ChatMessage, CanvasItem, ChatImageResultCard, ExternalSkillSummary, ImageAspectRatio, ImageResolution } from '../types';
 import { ChevronDown, Download, Eye, Github, Loader2, Send, RotateCcw, RotateCw, ZoomIn, ZoomOut, X } from 'lucide-react';
-import { IMAGE_ASPECT_RATIO_OPTIONS } from '../services/imageSizing';
+import { IMAGE_ASPECT_RATIO_OPTIONS, IMAGE_RESOLUTION_OPTIONS } from '../services/imageSizing';
 import { getImagePreviewFitStyle, getLargestCanvasImageSrc, getOriginalImageSrc, getThumbnailImageSrc, hasUsableImageSource } from '../services/imageSources';
 import { formatExecutionDuration } from '../services/taskTiming';
 import { getImageModelDisplayName } from '../services/config';
@@ -34,7 +34,7 @@ interface SidebarProps {
   messages: ChatMessage[];
   isThinking: boolean;
   activeTasks?: ActiveImageTaskInfo[];
-  onSendMessage: (text: string, aspectRatio: ImageAspectRatio, externalSkillId?: string) => void;
+  onSendMessage: (text: string, aspectRatio: ImageAspectRatio, imageResolution: ImageResolution, externalSkillId?: string) => void;
   contextImage: CanvasItem | null;
   promptSeed?: { id: string; imageId: string; prompt?: string } | null;
   inputResetKey?: number;
@@ -47,10 +47,12 @@ interface SidebarProps {
 const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [], onSendMessage, contextImage, promptSeed, inputResetKey = 0, imageItems, onClearContextImage, onNavigateToImage }) => {
   const [inputValue, setInputValue] = React.useState('');
   const [selectedAspectRatio, setSelectedAspectRatio] = React.useState<ImageAspectRatio>('auto');
+  const [selectedImageResolution, setSelectedImageResolution] = React.useState<ImageResolution>('2k');
   const [externalSkills, setExternalSkills] = React.useState<ExternalSkillSummary[]>([]);
   const [selectedExternalSkillId, setSelectedExternalSkillId] = React.useState('');
   const [externalSkillLoadError, setExternalSkillLoadError] = React.useState('');
   const [isAspectRatioMenuOpen, setIsAspectRatioMenuOpen] = React.useState(false);
+  const [isResolutionMenuOpen, setIsResolutionMenuOpen] = React.useState(false);
   const [isSkillMenuOpen, setIsSkillMenuOpen] = React.useState(false);
   const [isActiveTaskListOpen, setIsActiveTaskListOpen] = React.useState(false);
   const [timerNow, setTimerNow] = React.useState(() => Date.now());
@@ -61,6 +63,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
   const scrollRef = useRef<HTMLDivElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
   const aspectRatioMenuRef = useRef<HTMLDivElement>(null);
+  const resolutionMenuRef = useRef<HTMLDivElement>(null);
   const skillMenuRef = useRef<HTMLDivElement>(null);
   const lastContextImageIdRef = useRef<string | null>(null);
   const appliedPromptSeedIdRef = useRef<string | null>(null);
@@ -83,6 +86,10 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
   const selectedAspectRatioOption = useMemo(
     () => IMAGE_ASPECT_RATIO_OPTIONS.find(option => option.value === selectedAspectRatio) || IMAGE_ASPECT_RATIO_OPTIONS[0],
     [selectedAspectRatio]
+  );
+  const selectedImageResolutionOption = useMemo(
+    () => IMAGE_RESOLUTION_OPTIONS.find(option => option.value === selectedImageResolution) || IMAGE_RESOLUTION_OPTIONS[1],
+    [selectedImageResolution]
   );
   const selectedExternalSkill = useMemo(
     () => externalSkills.find(skill => skill.id === selectedExternalSkillId) || null,
@@ -130,11 +137,14 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
   }, []);
 
   useEffect(() => {
-    if (!isAspectRatioMenuOpen && !isSkillMenuOpen) return;
+    if (!isAspectRatioMenuOpen && !isResolutionMenuOpen && !isSkillMenuOpen) return;
     const handlePointerDown = (event: PointerEvent) => {
       const targetNode = event.target as Node;
       if (isAspectRatioMenuOpen && !aspectRatioMenuRef.current?.contains(targetNode)) {
         setIsAspectRatioMenuOpen(false);
+      }
+      if (isResolutionMenuOpen && !resolutionMenuRef.current?.contains(targetNode)) {
+        setIsResolutionMenuOpen(false);
       }
       if (isSkillMenuOpen && !skillMenuRef.current?.contains(targetNode)) {
         setIsSkillMenuOpen(false);
@@ -143,6 +153,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setIsAspectRatioMenuOpen(false);
+        setIsResolutionMenuOpen(false);
         setIsSkillMenuOpen(false);
       }
     };
@@ -152,7 +163,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
       document.removeEventListener('pointerdown', handlePointerDown);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [isAspectRatioMenuOpen, isSkillMenuOpen]);
+  }, [isAspectRatioMenuOpen, isResolutionMenuOpen, isSkillMenuOpen]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -345,9 +356,11 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
     onSendMessage(
       prompt,
       selectedAspectRatio,
+      selectedImageResolution,
       ENABLE_EXTERNAL_SKILLS ? selectedExternalSkillId || undefined : undefined
     );
     setIsAspectRatioMenuOpen(false);
+    setIsResolutionMenuOpen(false);
     setIsSkillMenuOpen(false);
     setInputValue('');
   };
@@ -961,6 +974,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
                   type="button"
                   onClick={() => {
                     setIsAspectRatioMenuOpen(open => !open);
+                    setIsResolutionMenuOpen(false);
                     setIsSkillMenuOpen(false);
                   }}
                   className="flex h-9 items-center gap-1.5 rounded-xl bg-white px-2 text-xs font-black text-zinc-700 transition-all hover:bg-indigo-50 hover:text-indigo-600"
@@ -1021,6 +1035,57 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
                 )}
               </div>
 
+              <div ref={resolutionMenuRef} className="relative shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsResolutionMenuOpen(open => !open);
+                    setIsAspectRatioMenuOpen(false);
+                    setIsSkillMenuOpen(false);
+                  }}
+                  className="flex h-9 items-center gap-1.5 rounded-xl bg-white px-2 text-xs font-black text-zinc-700 transition-all hover:bg-indigo-50 hover:text-indigo-600"
+                  title={selectedImageResolutionOption.title}
+                >
+                  <span className="text-[10px] uppercase tracking-widest text-gray-400">清晰度</span>
+                  <span>{selectedImageResolutionOption.label}</span>
+                  <ChevronDown size={13} className={`transition-transform ${isResolutionMenuOpen ? 'rotate-180' : ''}`} />
+                </button>
+
+                {isResolutionMenuOpen && (
+                  <div className="absolute bottom-full left-0 z-50 mb-2 w-48 rounded-2xl border border-gray-100 bg-white p-2 shadow-xl shadow-black/10">
+                    <div className="mb-1 px-2 text-[10px] font-black uppercase tracking-widest text-gray-400">选择清晰度</div>
+                    <div className="space-y-1">
+                      {IMAGE_RESOLUTION_OPTIONS.map(option => {
+                        const isSelected = selectedImageResolution === option.value;
+                        return (
+                          <button
+                            key={option.value}
+                            type="button"
+                            title={option.title}
+                            onClick={() => {
+                              setSelectedImageResolution(option.value);
+                              setIsResolutionMenuOpen(false);
+                            }}
+                            className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left transition-all ${
+                              isSelected
+                                ? 'bg-black text-white'
+                                : 'bg-gray-50 text-gray-600 hover:bg-indigo-50 hover:text-indigo-600'
+                            }`}
+                          >
+                            <span className="text-xs font-black">{option.label}</span>
+                            <span className={`min-w-0 flex-1 truncate text-[10px] font-bold ${
+                              isSelected ? 'text-white/70' : 'text-gray-400'
+                            }`}>
+                              {option.title}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <div ref={skillMenuRef} className="relative min-w-0 flex-1">
                 <button
                   type="button"
@@ -1029,6 +1094,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
                     if (!ENABLE_EXTERNAL_SKILLS) return;
                     setIsSkillMenuOpen(open => !open);
                     setIsAspectRatioMenuOpen(false);
+                    setIsResolutionMenuOpen(false);
                   }}
                   className={`flex h-9 w-full min-w-0 items-center gap-2 rounded-xl px-2 text-left transition-all ${
                     ENABLE_EXTERNAL_SKILLS

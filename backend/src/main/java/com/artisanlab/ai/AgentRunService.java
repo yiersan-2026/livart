@@ -198,7 +198,7 @@ public class AgentRunService {
     ) throws IOException {
         List<AiProxyDtos.AgentRunJob> jobs = new ArrayList<>();
         int count = normalizeCount(plan.count());
-        aiProxyService.createTextToImageJobsFromAgent(userId, request.prompt(), plan.aspectRatio(), count, externalSkillGuidance)
+        aiProxyService.createTextToImageJobsFromAgent(userId, request.prompt(), plan.aspectRatio(), request.imageResolution(), count, externalSkillGuidance)
                 .forEach(job -> jobs.add(toRunJob(job)));
 
         return responseWithJobs(plan, request.prompt(), jobs);
@@ -245,7 +245,8 @@ public class AgentRunService {
                 referenceImages.stream().map(candidate -> requireAssetId(candidate, "参考图")).toList(),
                 request.maskDataUrl(),
                 imageContext,
-                promptOptimizationModeFor(plan.mode(), externalSkillGuidance)
+                promptOptimizationModeFor(plan.mode(), externalSkillGuidance),
+                request.imageResolution()
         );
 
         return responseWithJobs(

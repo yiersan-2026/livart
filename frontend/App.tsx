@@ -1,7 +1,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { PanelRightClose, PanelRight, Settings, FolderPlus, LogOut, Loader2, X, Download, ChevronDown, Users, Images, MemoryStick, Cpu, HardDrive } from 'lucide-react';
-import type { ActiveImageTaskInfo, AgentPlan, CanvasItem, CanvasTool, ChatMessage, ImageAspectRatio } from './types';
+import type { ActiveImageTaskInfo, AgentPlan, CanvasItem, CanvasTool, ChatMessage, ImageAspectRatio, ImageResolution } from './types';
 import AuthPanel from './components/AuthPanel';
 import Canvas from './components/Canvas';
 import Sidebar from './components/Sidebar';
@@ -1958,18 +1958,14 @@ function App() {
         const nextItem = { ...item, ...updates };
         if (nextItem.type === 'image' && nextItem.status === 'completed') {
           uploadCandidate = nextItem;
-          return {
-            ...nextItem,
-            content: '',
-            status: 'loading',
-            label: `${nextItem.label || '图片'} 上传中...`
-          };
+          return nextItem;
         }
         return nextItem;
       }));
 
       if (uploadCandidate) {
         const imageToUpload = uploadCandidate;
+        syncContextImage(imageToUpload);
         ensureCanvasImageAsset(imageToUpload)
           .then((persistedItem) => {
             const completedItem = {
@@ -1977,12 +1973,20 @@ function App() {
               ...persistedItem,
               status: 'completed' as const
             };
-            setItems(prev => prev.map(item => item.id === id ? completedItem : item));
-            syncContextImage(completedItem);
+            setItems(prev => prev.map(item => (
+              item.id === id && item.type === 'image' && item.content === imageToUpload.content
+                ? completedItem
+                : item
+            )));
+            setContextImage(prev => (
+              prev?.id === id && prev.content === imageToUpload.content
+                ? { ...prev, ...completedItem }
+                : prev
+            ));
           })
           .catch((error) => {
             const message = error instanceof Error ? error.message : '图片上传失败';
-            const errorUpdates = { status: 'error' as const, label: message };
+            const errorUpdates = { label: message };
             setItems(prev => prev.map(item => (
               item.id === id
                 ? { ...item, ...errorUpdates }
@@ -2042,7 +2046,12 @@ function App() {
     setItems(prev => arrangeCanvasImageItems(prev));
   };
 
-  const handleSidebarSendMessage = async (text: string, aspectRatio: ImageAspectRatio = 'auto', externalSkillId = '') => {
+  const handleSidebarSendMessage = async (
+    text: string,
+    aspectRatio: ImageAspectRatio = 'auto',
+    imageResolution: ImageResolution = '2k',
+    externalSkillId = ''
+  ) => {
     const startedAt = Date.now();
     addMessage(text, 'user');
 
@@ -2167,6 +2176,7 @@ function App() {
       const agentRun = await createAgentRun({
         prompt: text,
         aspectRatio,
+        imageResolution,
         contextImageId: freshContextImage?.id,
         requestedEditMode,
         externalSkillId,

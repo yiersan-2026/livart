@@ -162,7 +162,7 @@ public class AiProxyService {
             String prompt,
             String aspectRatio
     ) throws IOException {
-        return createTextToImageJobsFromAgent(userId, prompt, aspectRatio, 1).get(0);
+        return createTextToImageJobsFromAgent(userId, prompt, aspectRatio, "2k", 1, "").get(0);
     }
 
     public List<Map<String, Object>> createTextToImageJobsFromAgent(
@@ -171,21 +171,26 @@ public class AiProxyService {
             String aspectRatio,
             int count
     ) throws IOException {
-        return createTextToImageJobsFromAgent(userId, prompt, aspectRatio, count, "");
+        return createTextToImageJobsFromAgent(userId, prompt, aspectRatio, "2k", count, "");
     }
 
     public List<Map<String, Object>> createTextToImageJobsFromAgent(
             UUID userId,
             String prompt,
             String aspectRatio,
+            String imageResolution,
             int count,
             String promptOptimizeContext
     ) throws IOException {
         cleanupImageJobs();
         UserApiConfigDtos.ResolvedConfig config = userApiConfigService.getRequiredConfig(userId);
         ObjectNode body = objectMapper.createObjectNode();
+        String normalizedImageResolution = normalizeImageResolution(imageResolution);
         body.put("model", config.model());
-        body.put("prompt", appendAspectRatioToPrompt(prompt, aspectRatio));
+        body.put("prompt", appendImageOutputInstructions(prompt, aspectRatio, normalizedImageResolution));
+        if (!normalizedImageResolution.isBlank()) {
+            body.put("imageResolution", normalizedImageResolution);
+        }
         if (promptOptimizeContext != null && !promptOptimizeContext.isBlank()) {
             body.put("promptOptimizeContext", promptOptimizeContext.trim());
             body.put("promptOptimizationMode", "skill-text-to-image");
@@ -502,12 +507,20 @@ public class AiProxyService {
     ) throws IOException {
         String boundary = "----LivartProxyBoundary" + UUID.randomUUID().toString().replace("-", "");
         ByteArrayOutputStream output = new ByteArrayOutputStream();
-        String prompt = appendAspectRatioToPrompt(request.prompt(), request.aspectRatio());
+        String normalizedImageResolution = normalizeImageResolution(request.imageResolution());
+        String prompt = appendImageOutputInstructions(request.prompt(), request.aspectRatio(), normalizedImageResolution);
         String promptOptimizationMode = normalizePromptOptimizationMode(request.promptOptimizationMode(), "image-to-image");
         String optimizedPrompt = optimizePromptInline(config, promptOptimizationMode, prompt, request.imageContext());
+        ImageOutputSettings outputSettings = resolveImageOutputSettings(prompt, request.aspectRatio(), normalizedImageResolution, false);
 
         writeTextMultipartPart(output, boundary, "model", config.model());
         writeTextMultipartPart(output, boundary, "prompt", optimizedPrompt);
+        if (!outputSettings.size().isBlank()) {
+            writeTextMultipartPart(output, boundary, "size", outputSettings.size());
+        }
+        if (outputSettings.highQuality()) {
+            writeTextMultipartPart(output, boundary, "quality", "high");
+        }
         writeAssetImagePart(output, boundary, userId, request.imageAssetId());
         for (UUID referenceAssetId : request.referenceAssetIds()) {
             writeAssetImagePart(output, boundary, userId, referenceAssetId);
@@ -545,6 +558,7 @@ public class AiProxyService {
 
         ObjectNode rewrittenBody = objectNode.deepCopy();
         String prompt = readTextField(rewrittenBody, "prompt");
+        String imageResolution = normalizeImageResolution(readTextField(rewrittenBody, "imageResolution"));
         String imageContext = firstNonBlank(
                 readTextField(rewrittenBody, "imageContext"),
                 readTextField(rewrittenBody, "promptOptimizeContext"),
@@ -554,18 +568,18 @@ public class AiProxyService {
                 readTextField(rewrittenBody, "promptOptimizationMode"),
                 label
         );
-        rewrittenBody.remove(List.of("imageContext", "promptOptimizeContext", "promptContext", "promptOptimizationMode"));
+        rewrittenBody.remove(List.of("imageContext", "promptOptimizeContext", "promptContext", "promptOptimizationMode", "imageResolution"));
 
         String optimizedPrompt = optimizePromptInline(config, promptOptimizationMode, prompt, imageContext);
         if (!optimizedPrompt.isBlank()) {
             rewrittenBody.put("prompt", optimizedPrompt);
         }
-        applyDefaultTextToImageSize(label, rewrittenBody, prompt);
+        applyDefaultTextToImageSize(label, rewrittenBody, prompt, imageResolution);
 
         return new ImageProxyRequestBody(contentType, objectMapper.writeValueAsBytes(rewrittenBody), prompt, optimizedPrompt);
     }
 
-    private void applyDefaultTextToImageSize(String label, ObjectNode body, String prompt) {
+    private void applyDefaultTextToImageSize(String label, ObjectNode body, String prompt, String imageResolution) {
         if (!"text-to-image".equals(label) || !defaultImageSizeEnabled || hasUsableField(body, "size")) {
             return;
         }
@@ -575,18 +589,32 @@ public class AiProxyService {
             return;
         }
 
-        String defaultSize = resolveDefaultTextToImageSize(prompt, defaultImageLongSide);
-        if (!defaultSize.isBlank()) {
-            body.put("size", defaultSize);
+        ImageOutputSettings outputSettings = imageResolution.isBlank()
+                ? new ImageOutputSettings(resolveDefaultTextToImageSize(prompt, defaultImageLongSide), defaultImageLongSide >= 2048)
+                : resolveImageOutputSettings(prompt, readTextField(body, "aspectRatio"), imageResolution, true);
+        if (!outputSettings.size().isBlank()) {
+            body.put("size", outputSettings.size());
+        }
+        if (outputSettings.highQuality() && !hasUsableField(body, "quality")) {
+            body.put("quality", "high");
         }
     }
 
-    private String appendAspectRatioToPrompt(String prompt, String aspectRatio) {
-        String instruction = aspectRatioToPromptInstruction(aspectRatio);
+    private String appendImageOutputInstructions(String prompt, String aspectRatio, String imageResolution) {
+        String instruction = joinNonBlankLines(
+                aspectRatioToPromptInstruction(aspectRatio),
+                imageResolutionToPromptInstruction(imageResolution)
+        );
         String trimmedPrompt = prompt == null ? "" : prompt.trim();
-        if (instruction.isBlank() || trimmedPrompt.contains("画幅比例要求")) {
+        if (instruction.isBlank()) {
             return trimmedPrompt;
         }
+        boolean hasAspectInstruction = trimmedPrompt.contains("画幅比例要求");
+        boolean hasResolutionInstruction = trimmedPrompt.contains("清晰度要求") || trimmedPrompt.contains("输出分辨率要求");
+        if (hasAspectInstruction && hasResolutionInstruction) return trimmedPrompt;
+        if (hasAspectInstruction) instruction = imageResolutionToPromptInstruction(imageResolution);
+        if (hasResolutionInstruction) instruction = aspectRatioToPromptInstruction(aspectRatio);
+        if (instruction.isBlank()) return trimmedPrompt;
         if (trimmedPrompt.isBlank()) {
             return instruction;
         }
@@ -605,6 +633,28 @@ public class AiProxyService {
         };
     }
 
+    private String imageResolutionToPromptInstruction(String imageResolution) {
+        return switch (normalizeImageResolution(imageResolution)) {
+            case "1k" -> "清晰度要求：目标为 1K 清晰度，画面清楚干净，不要添加白边或相框。";
+            case "2k" -> "清晰度要求：目标为 2K 高清输出，高细节、高质量、画面清晰，不要添加白边或相框。";
+            case "4k" -> "清晰度要求：目标为 4K 超高清输出，高分辨率、高细节、高质量，适合放大查看，不要添加白边或相框。";
+            default -> "";
+        };
+    }
+
+    private String normalizeImageResolution(String imageResolution) {
+        return switch (imageResolution == null ? "" : imageResolution.trim().toLowerCase(Locale.ROOT)) {
+            case "1k", "2k", "4k" -> imageResolution.trim().toLowerCase(Locale.ROOT);
+            default -> "";
+        };
+    }
+
+    private String joinNonBlankLines(String... lines) {
+        return String.join("\n", java.util.Arrays.stream(lines)
+                .filter(line -> line != null && !line.isBlank())
+                .toList());
+    }
+
     private boolean hasUsableField(ObjectNode data, String fieldName) {
         JsonNode value = data.get(fieldName);
         return value != null && !value.isNull() && (!value.isTextual() || !value.asText().isBlank());
@@ -612,6 +662,53 @@ public class AiProxyService {
 
     private boolean supportsDefaultImageSize(String model) {
         return "gpt-image-2".equalsIgnoreCase(model == null ? "" : model.trim());
+    }
+
+    private ImageOutputSettings resolveImageOutputSettings(
+            String prompt,
+            String aspectRatio,
+            String imageResolution,
+            boolean allowSquareFallback
+    ) {
+        String normalizedResolution = normalizeImageResolution(imageResolution);
+        if (normalizedResolution.isBlank()) {
+            return new ImageOutputSettings("", false);
+        }
+
+        Optional<ImageAspect> requestedAspect = parseAspectRatio(aspectRatio).or(() -> detectPromptAspectRatio(prompt));
+        if (requestedAspect.isEmpty() && !allowSquareFallback) {
+            return new ImageOutputSettings("", shouldUseHighQuality(normalizedResolution));
+        }
+
+        ImageAspect aspect = requestedAspect.orElse(new ImageAspect(1, 1));
+        return new ImageOutputSettings(resolveImageSizeForTier(aspect, normalizedResolution), shouldUseHighQuality(normalizedResolution));
+    }
+
+    private boolean shouldUseHighQuality(String imageResolution) {
+        String normalizedResolution = normalizeImageResolution(imageResolution);
+        return "2k".equals(normalizedResolution) || "4k".equals(normalizedResolution);
+    }
+
+    private String resolveImageSizeForTier(ImageAspect aspect, String imageResolution) {
+        String aspectKey = "%d:%d".formatted(aspect.width(), aspect.height());
+        return switch (normalizeImageResolution(imageResolution) + "|" + aspectKey) {
+            case "1k|1:1" -> "1024x1024";
+            case "1k|4:3" -> "1536x1152";
+            case "1k|3:4" -> "1152x1536";
+            case "1k|16:9" -> "1536x864";
+            case "1k|9:16" -> "864x1536";
+            case "2k|1:1" -> "2048x2048";
+            case "2k|4:3" -> "2048x1536";
+            case "2k|3:4" -> "1536x2048";
+            case "2k|16:9" -> "2048x1152";
+            case "2k|9:16" -> "1152x2048";
+            case "4k|1:1" -> "2880x2880";
+            case "4k|4:3" -> "3264x2448";
+            case "4k|3:4" -> "2448x3264";
+            case "4k|16:9" -> "3840x2160";
+            case "4k|9:16" -> "2160x3840";
+            default -> "";
+        };
     }
 
     static String resolveDefaultTextToImageSize(String prompt, int longSide) {
@@ -624,6 +721,17 @@ public class AiProxyService {
             return "%dx%d".formatted(longSide, scaleAspectDimension(longSide, aspect.height(), aspect.width()));
         }
         return "%dx%d".formatted(scaleAspectDimension(longSide, aspect.width(), aspect.height()), longSide);
+    }
+
+    private static Optional<ImageAspect> parseAspectRatio(String aspectRatio) {
+        return switch (aspectRatio == null ? "" : aspectRatio.trim()) {
+            case "1:1" -> Optional.of(new ImageAspect(1, 1));
+            case "4:3" -> Optional.of(new ImageAspect(4, 3));
+            case "3:4" -> Optional.of(new ImageAspect(3, 4));
+            case "16:9" -> Optional.of(new ImageAspect(16, 9));
+            case "9:16" -> Optional.of(new ImageAspect(9, 16));
+            default -> Optional.empty();
+        };
     }
 
     private static Optional<ImageAspect> detectPromptAspectRatio(String prompt) {
@@ -1056,6 +1164,7 @@ public class AiProxyService {
             JsonNode data = objectMapper.readTree(body);
             JsonNode model = data.get("model");
             JsonNode size = data.get("size");
+            JsonNode quality = data.get("quality");
             JsonNode prompt = data.get("prompt");
 
             if (model != null && model.isTextual()) {
@@ -1063,6 +1172,9 @@ public class AiProxyService {
             }
             if (size != null && size.isTextual()) {
                 summary.put("size", size.asText());
+            }
+            if (quality != null && quality.isTextual()) {
+                summary.put("quality", quality.asText());
             }
             if (prompt != null && prompt.isTextual()) {
                 summary.put("promptChars", prompt.asText().length());
@@ -1606,7 +1718,8 @@ public class AiProxyService {
             List<UUID> referenceAssetIds,
             String maskDataUrl,
             String imageContext,
-            String promptOptimizationMode
+            String promptOptimizationMode,
+            String imageResolution
     ) {
         public AgentImageEditJobRequest {
             referenceAssetIds = referenceAssetIds == null ? List.of() : List.copyOf(referenceAssetIds);
@@ -1649,6 +1762,12 @@ public class AiProxyService {
     private record ImageAspect(
             int width,
             int height
+    ) {
+    }
+
+    private record ImageOutputSettings(
+            String size,
+            boolean highQuality
     ) {
     }
 

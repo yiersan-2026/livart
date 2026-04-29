@@ -9,6 +9,7 @@ import org.springframework.util.StreamUtils;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -37,6 +38,16 @@ public class AssetController {
             @RequestParam(value = "canvasId", required = false) UUID canvasId
     ) {
         return ApiResponse.ok(assetService.upload(authContext.requireUserId(), canvasId, file));
+    }
+
+    @PostMapping("/{id}/rotate")
+    public ApiResponse<AssetDtos.AssetResponse> rotate(
+            @PathVariable UUID id,
+            @RequestBody AssetDtos.AssetRotationRequest request
+    ) {
+        String direction = request == null ? "" : request.direction();
+        Integer quarterTurns = request == null ? null : request.quarterTurns();
+        return ApiResponse.ok(assetService.rotate(authContext.requireUserId(), id, direction, quarterTurns));
     }
 
     @GetMapping("/{id}/content")

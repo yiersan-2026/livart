@@ -47,6 +47,7 @@ public final class AiProxyDtos {
             @NotBlank @Size(max = 4000) String prompt,
             @Size(max = 120) String contextImageId,
             @Size(max = 20) String aspectRatio,
+            @Size(max = 10) String imageResolution,
             @Size(max = 40) String requestedEditMode,
             @Valid
             @Size(max = 12)
@@ -86,6 +87,7 @@ public final class AiProxyDtos {
             @NotBlank @Size(max = 4000) String prompt,
             @Size(max = 120) String contextImageId,
             @Size(max = 20) String aspectRatio,
+            @Size(max = 10) String imageResolution,
             @Size(max = 40) String requestedEditMode,
             @Valid
             @Size(max = 12)
@@ -96,7 +98,7 @@ public final class AiProxyDtos {
             @Size(max = 80) String clientRunId
     ) {
         AgentPlanRequest toPlanRequest() {
-            return new AgentPlanRequest(prompt, contextImageId, aspectRatio, requestedEditMode, images);
+            return new AgentPlanRequest(prompt, contextImageId, aspectRatio, imageResolution, requestedEditMode, images);
         }
     }
 

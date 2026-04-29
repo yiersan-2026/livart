@@ -1,5 +1,5 @@
 
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useMemo } from 'react';
 import type { AgentPlan, AgentPlanStep, AgentToolId, CanvasItem, CanvasTool, CanvasTextStyle, ChatMessage, ImageAspectRatio } from '../types';
 import { 
   Loader2, Trash2, Type, 
@@ -9,7 +9,7 @@ import {
   Copy, Layers, Scissors, Check, X,
   Palette, Maximize2, Wand2,
   Download, Send, AlignLeft, AlignCenter, AlignRight, SlidersHorizontal,
-  Box, Eye, RefreshCw, Rotate3D, RotateCw
+  Box, Eye, RefreshCw, Rotate3D, RotateCcw, RotateCw
 } from 'lucide-react';
 import { getImageJobQueueMessage, type ImageGenerationResult, type ImageJobStatus, waitForImageJob } from '../services/gemini';
 import {
@@ -30,7 +30,7 @@ import {
   createAgentRun,
   createAgentRunClientId
 } from '../services/agentPlanner';
-import { ensureCanvasImageAsset } from '../services/canvasPersistence';
+import { ensureCanvasImageAsset, getCanvasItemAssetId, rotateCanvasImageAsset } from '../services/canvasPersistence';
 import { formatExecutionDuration } from '../services/taskTiming';
 import { buildImageResultDescription, generateImageTitleFromPrompt, getCanvasItemDisplayTitle } from '../services/imageTitle';
 import { getApiConfig, getImageModelDisplayName } from '../services/config';
@@ -709,22 +709,12 @@ const createCroppedImageDataUrl = async (item: CanvasItem, cropRect: CropRect) =
   };
 };
 
-const createClockwiseRotatedImageDataUrl = async (item: CanvasItem, source: string) => {
-  const image = await loadImageElement(source);
-  const sourceWidth = getCanvasDimension(image.naturalWidth || item.width);
-  const sourceHeight = getCanvasDimension(image.naturalHeight || item.height);
-  const outputCanvas = document.createElement('canvas');
-  outputCanvas.width = sourceHeight;
-  outputCanvas.height = sourceWidth;
-  const context = outputCanvas.getContext('2d');
-  if (!context) throw new Error('无法创建旋转画布');
+type ImageRotationDirection = 'left' | 'right';
+type PendingImageRotation = { itemId: string; quarterTurns: number };
 
-  context.translate(outputCanvas.width / 2, outputCanvas.height / 2);
-  context.rotate(Math.PI / 2);
-  context.drawImage(image, -sourceWidth / 2, -sourceHeight / 2, sourceWidth, sourceHeight);
-
-  return outputCanvas.toDataURL('image/png');
-};
+const normalizeImageQuarterTurns = (quarterTurns: number) => ((quarterTurns % 4) + 4) % 4;
+const getImageRotationDelta = (direction: ImageRotationDirection) => direction === 'right' ? 1 : -1;
+const shouldSwapImageRotationFrame = (quarterTurns: number) => normalizeImageQuarterTurns(quarterTurns) % 2 === 1;
 
 const getImageDimensions = async (src: string, fallbackWidth: number, fallbackHeight: number) => {
   try {
@@ -1093,6 +1083,8 @@ const Canvas: React.FC<CanvasProps> = ({
   const [cropDragState, setCropDragState] = useState<CropDragState | null>(null);
   const [downloadingImageId, setDownloadingImageId] = useState<string | null>(null);
   const [rotatingImageId, setRotatingImageId] = useState<string | null>(null);
+  const [rotateMenuItemId, setRotateMenuItemId] = useState<string | null>(null);
+  const [pendingRotation, setPendingRotation] = useState<PendingImageRotation | null>(null);
   const inlineEditingIdsRef = useRef<Set<string>>(new Set());
   const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const quickEditInputRef = useRef<HTMLInputElement | null>(null);
@@ -1101,8 +1093,10 @@ const Canvas: React.FC<CanvasProps> = ({
   const [textFontSearch, setTextFontSearch] = useState('');
   const maskStrokePointsRef = useRef<MaskPoint[]>([]);
   const imageToolbarRef = useRef<HTMLDivElement | null>(null);
+  const rotateButtonRef = useRef<HTMLButtonElement | null>(null);
   const [canvasViewportSize, setCanvasViewportSize] = useState({ width: 0, height: 0 });
   const [inlineEditorSize, setInlineEditorSize] = useState(DEFAULT_INLINE_IMAGE_EDITOR_SIZE);
+  const [rotateMenuOffsetLeft, setRotateMenuOffsetLeft] = useState<number | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const selectedItem = items.find(i => selectedIds.length === 1 && i.id === selectedIds[0]);
@@ -1117,6 +1111,23 @@ const Canvas: React.FC<CanvasProps> = ({
   const selectedItemIsQuickEditing = !!selectedItemCanQuickEdit && selectedItem?.id === quickEditItemId;
   const selectedItemIsMultiAngleEditing = selectedItem?.type === 'image' && selectedItem.id === multiAngleState?.itemId;
   const selectedItemIsCrop = selectedItem?.type === 'image' && selectedItem.id === cropItemId;
+  const selectedItemIsRotateMenuOpen = selectedItem?.type === 'image' && selectedItem.id === rotateMenuItemId;
+  const selectedItemPendingRotationQuarterTurns = selectedItemIsRotateMenuOpen && pendingRotation?.itemId === selectedItem?.id
+    ? normalizeImageQuarterTurns(pendingRotation.quarterTurns)
+    : 0;
+  const getRotationPreviewFrame = (item: CanvasItem) => (
+    item.type === 'image' && pendingRotation?.itemId === item.id && shouldSwapImageRotationFrame(pendingRotation.quarterTurns)
+      ? centerFrameOnRect(item, {
+        width: getCanvasDimension(item.height),
+        height: getCanvasDimension(item.width)
+      })
+      : item
+  );
+  const getRotationPreviewDirection = (item: CanvasItem) => (
+    item.type === 'image' && pendingRotation?.itemId === item.id
+      ? normalizeImageQuarterTurns(pendingRotation.quarterTurns)
+      : 0
+  );
   const selectedItemHasImageMaskTool = selectedItemIsLocalRedraw || selectedItemIsRemover;
   const selectedImageMaskMode: ImageMaskMode | null = selectedItemIsRemover
     ? 'remover'
@@ -1160,6 +1171,7 @@ const Canvas: React.FC<CanvasProps> = ({
     event: React.SyntheticEvent<HTMLImageElement>,
     item: CanvasItem
   ) => {
+    if (pendingRotation?.itemId === item.id) return;
     if (item.type !== 'image' || item.status !== 'completed') return;
     if (item.parentId) return;
 
@@ -1191,9 +1203,10 @@ const Canvas: React.FC<CanvasProps> = ({
     }
 
     const safeZoom = zoom || 1;
-    const imageLeft = pan.x + selectedItem.x * safeZoom;
-    const imageTop = pan.y + selectedItem.y * safeZoom;
-    const imageWidth = selectedItem.width * safeZoom;
+    const selectedItemFrame = getRotationPreviewFrame(selectedItem);
+    const imageLeft = pan.x + selectedItemFrame.x * safeZoom;
+    const imageTop = pan.y + selectedItemFrame.y * safeZoom;
+    const imageWidth = selectedItemFrame.width * safeZoom;
     const editorWidth = inlineEditorSize.width || DEFAULT_INLINE_IMAGE_EDITOR_SIZE.width;
     const editorHeight = Math.max(
       inlineEditorSize.height || DEFAULT_INLINE_IMAGE_EDITOR_SIZE.height,
@@ -1225,7 +1238,7 @@ const Canvas: React.FC<CanvasProps> = ({
       transform: `scale(${1 / safeZoom})`,
       transformOrigin: 'top left'
     };
-  }, [canvasViewportSize, inlineEditorSize, pan, selectedItem, zoom]);
+  }, [canvasViewportSize, inlineEditorSize, pan, pendingRotation, selectedItem, zoom]);
 
   const selectedQuickEditInputPosition = useMemo(() => {
     const viewportWidth = canvasViewportSize.width;
@@ -1398,11 +1411,39 @@ const Canvas: React.FC<CanvasProps> = ({
   }, [multiAngleState, selectedIds]);
 
   useEffect(() => {
+    if (!rotateMenuItemId || selectedIds.includes(rotateMenuItemId)) return;
+    setRotateMenuItemId(null);
+    setPendingRotation(null);
+  }, [rotateMenuItemId, selectedIds]);
+
+  useLayoutEffect(() => {
+    if (!selectedItemIsRotateMenuOpen) {
+      setRotateMenuOffsetLeft(null);
+      return;
+    }
+
+    const updateRotateMenuPosition = () => {
+      const toolbarElement = imageToolbarRef.current;
+      const rotateButtonElement = rotateButtonRef.current;
+      if (!toolbarElement || !rotateButtonElement) return;
+
+      const toolbarRect = toolbarElement.getBoundingClientRect();
+      const buttonRect = rotateButtonElement.getBoundingClientRect();
+      setRotateMenuOffsetLeft(buttonRect.left - toolbarRect.left + buttonRect.width / 2);
+    };
+
+    updateRotateMenuPosition();
+    window.addEventListener('resize', updateRotateMenuPosition);
+    return () => window.removeEventListener('resize', updateRotateMenuPosition);
+  }, [selectedItem?.id, selectedItemIsRotateMenuOpen]);
+
+  useEffect(() => {
     if (canvasTool !== 'text') return;
 
     setQuickEditItemId(null);
     setMultiAngleState(null);
     setMultiAngleDragState(null);
+    setRotateMenuItemId(null);
     setLocalRedrawItemId(null);
     setLocalRemoverItemId(null);
     setCropItemId(null);
@@ -1639,6 +1680,8 @@ const Canvas: React.FC<CanvasProps> = ({
     setCropItemId(null);
     setCropRect(null);
     setCropDragState(null);
+    setRotateMenuItemId(null);
+    setPendingRotation(null);
     setActiveTool('select');
   };
 
@@ -1732,6 +1775,7 @@ const Canvas: React.FC<CanvasProps> = ({
     setQuickEditItemId(null);
     setMultiAngleState(null);
     setMultiAngleDragState(null);
+    setRotateMenuItemId(null);
     if (cropItemId === item.id) {
       resetImageToolModes();
       return;
@@ -1750,6 +1794,7 @@ const Canvas: React.FC<CanvasProps> = ({
     setQuickEditItemId(null);
     setMultiAngleState(null);
     setMultiAngleDragState(null);
+    setRotateMenuItemId(null);
     onCanvasToolChange('select');
     setCropItemId(null);
     setCropRect(null);
@@ -1764,6 +1809,7 @@ const Canvas: React.FC<CanvasProps> = ({
     setQuickEditItemId(null);
     setMultiAngleState(null);
     setMultiAngleDragState(null);
+    setRotateMenuItemId(null);
     onCanvasToolChange('select');
     setCropItemId(null);
     setCropRect(null);
@@ -1836,6 +1882,17 @@ const Canvas: React.FC<CanvasProps> = ({
       itemId: item.id,
       ...DEFAULT_MULTI_ANGLE_VALUES
     });
+  };
+
+  const toggleRotateMenu = (item: CanvasItem) => {
+    if (item.type !== 'image' || item.status !== 'completed' || !item.content) return;
+
+    const isOpening = rotateMenuItemId !== item.id;
+    resetImageToolModes();
+    setQuickEditItemId(null);
+    clearInlineEditError(item.id);
+    setRotateMenuItemId(isOpening ? item.id : null);
+    setPendingRotation(null);
   };
 
   const handleApplyMultiAngle = (item: CanvasItem) => {
@@ -2145,32 +2202,71 @@ const Canvas: React.FC<CanvasProps> = ({
     }
   };
 
-  const handleRotateSelectedImage = async (item: CanvasItem) => {
-    const imageSource = getOriginalImageSrc(item) || getCanvasImageSrc(item, zoom);
-    if (!imageSource || item.status !== 'completed' || rotatingImageId === item.id) return;
+  const handleSelectRotationDirection = (item: CanvasItem, direction: ImageRotationDirection) => {
+    if (item.type !== 'image' || item.status !== 'completed' || rotatingImageId === item.id) return;
+    setPendingRotation(previous => {
+      const currentQuarterTurns = previous?.itemId === item.id ? previous.quarterTurns : 0;
+      return {
+        itemId: item.id,
+        quarterTurns: normalizeImageQuarterTurns(currentQuarterTurns + getImageRotationDelta(direction))
+      };
+    });
+    clearInlineEditError(item.id);
+  };
+
+  const handleCancelRotateSelectedImage = (item: CanvasItem) => {
+    setPendingRotation(prev => prev?.itemId === item.id ? null : prev);
+    setRotateMenuItemId(null);
+  };
+
+  const handleConfirmRotateSelectedImage = async (item: CanvasItem) => {
+    const quarterTurns = pendingRotation?.itemId === item.id
+      ? normalizeImageQuarterTurns(pendingRotation.quarterTurns)
+      : 0;
+    if (quarterTurns === 0 || item.status !== 'completed' || rotatingImageId === item.id) return;
 
     clearInlineEditError(item.id);
     setRotatingImageId(item.id);
 
     try {
-      const rotatedDataUrl = await createClockwiseRotatedImageDataUrl(item, imageSource);
-      const rotatedFrame = {
-        width: getCanvasDimension(item.height),
-        height: getCanvasDimension(item.width)
-      };
+      const persistedItem = getCanvasItemAssetId(item) ? item : await ensureCanvasImageAsset(item);
+      const assetId = getCanvasItemAssetId(persistedItem);
+      if (!assetId) {
+        throw new Error('图片缺少可用的资源 ID，无法旋转');
+      }
+
+      const rotatedAsset = await rotateCanvasImageAsset(assetId, quarterTurns);
+      const assetVersion = Date.now();
+      const relatedImageItems = items.filter(candidate => (
+        candidate.type === 'image' &&
+        getCanvasItemAssetId(candidate) === assetId
+      ));
+      const itemsToRotate = relatedImageItems.length > 0 ? relatedImageItems : [item];
 
       onBeforeCanvasMutation();
       resetImageToolModes();
-      onItemUpdate(item.id, {
-        ...centerFrameOnRect(item, rotatedFrame),
-        content: rotatedDataUrl,
-        assetId: undefined,
-        previewContent: undefined,
-        thumbnailContent: undefined,
-        maskData: undefined,
-        redrawMaskData: undefined,
-        removerMaskData: undefined,
-        compositeImage: undefined
+      itemsToRotate.forEach(candidate => {
+        const rotatedFrame = shouldSwapImageRotationFrame(quarterTurns)
+          ? {
+            width: getCanvasDimension(candidate.height),
+            height: getCanvasDimension(candidate.width)
+          }
+          : {
+            width: getCanvasDimension(candidate.width),
+            height: getCanvasDimension(candidate.height)
+          };
+        onItemUpdate(candidate.id, {
+          ...centerFrameOnRect(candidate, rotatedFrame),
+          content: rotatedAsset.urlPath || `/api/assets/${encodeURIComponent(assetId)}/content`,
+          assetId,
+          assetVersion,
+          previewContent: rotatedAsset.previewUrlPath || `/api/assets/${encodeURIComponent(assetId)}/preview`,
+          thumbnailContent: rotatedAsset.thumbnailUrlPath || `/api/assets/${encodeURIComponent(assetId)}/thumbnail`,
+          maskData: undefined,
+          redrawMaskData: undefined,
+          removerMaskData: undefined,
+          compositeImage: undefined
+        });
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : '旋转图片失败';
@@ -3833,74 +3929,89 @@ const Canvas: React.FC<CanvasProps> = ({
         style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: '0 0' }}
       >
         {/* 底层内容 */}
-        {items.map((item) => (
-          <div
-            key={item.id}
-            onMouseDown={(e) => startItemDrag(e, item.id)}
-            onContextMenu={(e) => handleItemContextMenu(e, item.id)}
-            className={`absolute ${
-              item.type === 'image'
-                ? selectedIds.includes(item.id) ? 'outline outline-2 outline-indigo-500' : ''
-                : item.type === 'text'
-                  ? `rounded-[2px] transition-[outline,background-color] ${
-                    selectedIds.includes(item.id) && item.content.trim()
-                      ? 'outline outline-1 outline-blue-500'
-                      : 'outline outline-1 outline-transparent'
+        {items.map((item) => {
+          const itemFrame = getRotationPreviewFrame(item);
+          const rotationPreviewDirection = getRotationPreviewDirection(item);
+          return (
+            <div
+              key={item.id}
+              onMouseDown={(e) => startItemDrag(e, item.id)}
+              onContextMenu={(e) => handleItemContextMenu(e, item.id)}
+              className={`absolute ${
+                item.type === 'image'
+                  ? selectedIds.includes(item.id) ? 'outline outline-2 outline-indigo-500' : ''
+                  : item.type === 'text'
+                    ? `rounded-[2px] transition-[outline,background-color] ${
+                      selectedIds.includes(item.id) && item.content.trim()
+                        ? 'outline outline-1 outline-blue-500'
+                        : 'outline outline-1 outline-transparent'
+                    }`
+                    : `rounded-[16px] transition-shadow duration-300 ${
+                      selectedIds.includes(item.id) ? 'ring-2 ring-indigo-500 shadow-2xl' : 'shadow-lg'
                   }`
-                  : `rounded-[16px] transition-shadow duration-300 ${
-                    selectedIds.includes(item.id) ? 'ring-2 ring-indigo-500 shadow-2xl' : 'shadow-lg'
-                }`
-            } ${item.type === 'workflow' ? 'border-2 border-dashed border-indigo-200' : ''}`}
-            style={{ 
-              left: item.x, top: item.y, width: item.width, height: item.height, 
-              zIndex: item.zIndex || 0,
-              backgroundColor: item.type === 'image' || item.type === 'text' ? 'transparent' : '#fff'
-            }}
-          >
-            <div className={`relative h-full w-full overflow-hidden ${item.type === 'image' || item.type === 'text' ? '' : 'rounded-[14px]'}`}>
-              {item.type === 'text' ? (
-                renderTextLayer(item)
-              ) : item.type === 'workflow' ? (
-                <div className="w-full h-full bg-white/30" />
-              ) : (() => {
-                const imageSrc = getCanvasImageSrc(item, zoom);
-                if (item.status === 'error') {
-                  return (
-                    <div className="flex h-full w-full flex-col items-center justify-center gap-2 border border-red-200 bg-red-50 px-4 text-center">
-                      <div className="text-sm font-bold text-red-600">生成失败</div>
-                      <div className="max-w-full break-words text-[11px] leading-relaxed text-red-500">
-                        {item.label || '图片生成失败，请重新尝试'}
+              } ${item.type === 'workflow' ? 'border-2 border-dashed border-indigo-200' : ''}`}
+              style={{
+                left: itemFrame.x,
+                top: itemFrame.y,
+                width: itemFrame.width,
+                height: itemFrame.height,
+                zIndex: item.zIndex || 0,
+                backgroundColor: item.type === 'image' || item.type === 'text' ? 'transparent' : '#fff'
+              }}
+            >
+              <div className={`relative h-full w-full overflow-hidden ${item.type === 'image' || item.type === 'text' ? '' : 'rounded-[14px]'}`}>
+                {item.type === 'text' ? (
+                  renderTextLayer(item)
+                ) : item.type === 'workflow' ? (
+                  <div className="w-full h-full bg-white/30" />
+                ) : (() => {
+                  const imageSrc = getCanvasImageSrc(item, zoom);
+                  if (item.status === 'error') {
+                    return (
+                      <div className="flex h-full w-full flex-col items-center justify-center gap-2 border border-red-200 bg-red-50 px-4 text-center">
+                        <div className="text-sm font-bold text-red-600">生成失败</div>
+                        <div className="max-w-full break-words text-[11px] leading-relaxed text-red-500">
+                          {item.label || '图片生成失败，请重新尝试'}
+                        </div>
                       </div>
+                    );
+                  }
+                  return imageSrc ? (
+                    <img
+                      src={imageSrc}
+                      onLoad={(event) => handleCanvasImageLoad(event, item)}
+                      className={rotationPreviewDirection !== 0
+                        ? 'absolute left-1/2 top-1/2 block object-contain pointer-events-none'
+                        : 'block w-full h-full object-contain pointer-events-none'}
+                      style={rotationPreviewDirection !== 0 ? {
+                        width: item.width,
+                        height: item.height,
+                        transform: `translate(-50%, -50%) rotate(${rotationPreviewDirection * 90}deg)`,
+                        transformOrigin: 'center'
+                      } : undefined}
+                    />
+                  ) : item.status === 'loading' ? (
+                    <div className="h-full w-full bg-zinc-50" />
+                  ) : (
+                    <div className="flex h-full w-full items-center justify-center bg-gray-50 text-xs font-bold text-gray-300">
+                      等待图片生成
                     </div>
                   );
-                }
-                return imageSrc ? (
-                  <img
-                    src={imageSrc}
-                    onLoad={(event) => handleCanvasImageLoad(event, item)}
-                    className="block w-full h-full object-contain pointer-events-none"
-                  />
-                ) : item.status === 'loading' ? (
-                  <div className="h-full w-full bg-zinc-50" />
-                ) : (
-                  <div className="flex h-full w-full items-center justify-center bg-gray-50 text-xs font-bold text-gray-300">
-                    等待图片生成
-                  </div>
-                );
-              })()}
-              {item.type === 'image' && item.status === 'loading' && (
-                <ImageGenerationSkeleton hasPreview={!!getCanvasImageSrc(item, zoom)} />
-              )}
-              {renderWorkflowDrawingLayer(item)}
-              {renderImageMaskLayer(item)}
-              {renderCropOverlay(item)}
-            </div>
+                })()}
+                {item.type === 'image' && item.status === 'loading' && (
+                  <ImageGenerationSkeleton hasPreview={!!getCanvasImageSrc(item, zoom)} />
+                )}
+                {renderWorkflowDrawingLayer(item)}
+                {renderImageMaskLayer(item)}
+                {renderCropOverlay(item)}
+              </div>
 
-            {item.type !== 'image' && item.type !== 'text' && selectedIds.length === 1 && selectedIds[0] === item.id && (
-              (['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'] as ResizeDirection[]).map(dir => renderResizeHandle(item.id, dir))
-            )}
-          </div>
-        ))}
+              {item.type !== 'image' && item.type !== 'text' && selectedIds.length === 1 && selectedIds[0] === item.id && (
+                (['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'] as ResizeDirection[]).map(dir => renderResizeHandle(item.id, dir))
+              )}
+            </div>
+          );
+        })}
 
         {snapGuides.map((guide, index) => (
           <div
@@ -4032,6 +4143,63 @@ const Canvas: React.FC<CanvasProps> = ({
                   </button>
                 </div>
               )}
+              {selectedItemIsRotateMenuOpen && (
+                <div
+                  className="absolute bottom-full mb-2 flex h-11 w-max -translate-x-1/2 items-center overflow-hidden rounded-[14px] border border-zinc-200 bg-white shadow-[0_14px_40px_-26px_rgba(0,0,0,0.5)]"
+                  style={{
+                    left: rotateMenuOffsetLeft ?? '50%'
+                  }}
+                >
+                  <button
+                    type="button"
+                    onClick={() => handleSelectRotationDirection(selectedItem, 'left')}
+                    disabled={selectedItemIsInlineEditing || rotatingImageId === selectedItem.id}
+                    className={`flex h-11 shrink-0 items-center gap-1.5 border-r border-zinc-100 px-3 text-xs font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
+                      selectedItemPendingRotationQuarterTurns === 3
+                        ? 'bg-zinc-900 text-white'
+                        : 'text-zinc-700 hover:bg-zinc-50 hover:text-zinc-950'
+                    }`}
+                    title="向左旋转 90°，可连续点击"
+                  >
+                    <RotateCcw size={15} />
+                    向左转
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSelectRotationDirection(selectedItem, 'right')}
+                    disabled={selectedItemIsInlineEditing || rotatingImageId === selectedItem.id}
+                    className={`flex h-11 shrink-0 items-center gap-1.5 border-r border-zinc-100 px-3 text-xs font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
+                      selectedItemPendingRotationQuarterTurns === 1
+                        ? 'bg-zinc-900 text-white'
+                        : 'text-zinc-700 hover:bg-zinc-50 hover:text-zinc-950'
+                    }`}
+                    title="向右旋转 90°，可连续点击"
+                  >
+                    <RotateCw size={15} />
+                    向右转
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleCancelRotateSelectedImage(selectedItem)}
+                    disabled={selectedItemIsInlineEditing || rotatingImageId === selectedItem.id}
+                    className="flex h-11 shrink-0 items-center gap-1.5 border-r border-zinc-100 px-3 text-xs font-bold text-zinc-500 transition-colors hover:bg-zinc-50 hover:text-zinc-950 disabled:cursor-not-allowed disabled:opacity-35"
+                    title="取消旋转预览，恢复原样"
+                  >
+                    <X size={15} />
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleConfirmRotateSelectedImage(selectedItem)}
+                    disabled={selectedItemIsInlineEditing || selectedItemPendingRotationQuarterTurns === 0 || rotatingImageId === selectedItem.id}
+                    className="flex h-11 shrink-0 items-center gap-1.5 bg-zinc-900 px-3 text-xs font-bold text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-400"
+                    title="确认后会旋转原始图片资源并重建所有 WebP 预览"
+                  >
+                    {rotatingImageId === selectedItem.id ? <Loader2 size={15} className="animate-spin" /> : <Check size={15} />}
+                    确定
+                  </button>
+                </div>
+              )}
               <div ref={imageToolbarRef} className="relative h-11 w-max overflow-hidden rounded-[14px] border border-zinc-200 bg-white pr-11 shadow-[0_14px_40px_-26px_rgba(0,0,0,0.5)]">
               <div className="flex h-full items-center pr-2">
                 <button
@@ -4062,11 +4230,16 @@ const Canvas: React.FC<CanvasProps> = ({
                   <Scissors size={15} />裁剪
                 </button>
                 <button
+                  ref={rotateButtonRef}
                   type="button"
-                  onClick={() => handleRotateSelectedImage(selectedItem)}
+                  onClick={() => toggleRotateMenu(selectedItem)}
                   disabled={selectedItemIsInlineEditing || selectedItem.status !== 'completed' || rotatingImageId === selectedItem.id}
-                  className="flex h-11 shrink-0 items-center gap-1.5 border-r border-zinc-100 px-3 text-xs font-bold text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 disabled:cursor-not-allowed disabled:opacity-35"
-                  title="顺时针旋转当前图片 90°"
+                  className={`flex h-11 shrink-0 items-center gap-1.5 border-r border-zinc-100 px-3 text-xs font-bold transition-colors ${
+                    selectedItemIsRotateMenuOpen
+                      ? 'bg-zinc-100 text-zinc-950'
+                      : 'text-zinc-700 hover:bg-zinc-50 hover:text-zinc-950'
+                  } disabled:cursor-not-allowed disabled:opacity-35`}
+                  title="选择向左或向右旋转当前图片 90°"
                 >
                   {rotatingImageId === selectedItem.id ? <Loader2 size={15} className="animate-spin" /> : <RotateCw size={15} />}
                   旋转
