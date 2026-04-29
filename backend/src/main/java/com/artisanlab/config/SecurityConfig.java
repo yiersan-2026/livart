@@ -78,6 +78,7 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         .requestMatchers(
                                 "/",
+                                "/share",
                                 "/index.html",
                                 "/index.css",
                                 "/assets/**",
