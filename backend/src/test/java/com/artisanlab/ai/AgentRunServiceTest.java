@@ -298,6 +298,9 @@ class AgentRunServiceTest {
                 "画面中所有可见元素",
                 "保持原先的身体姿态、头部朝向和眼神方向",
                 "不要让角色重新转头、转身或看向新镜头",
+                "不应继续直视当前画面",
+                "角色视线仍指向原始相机位置",
+                "direct eye contact with the new camera",
                 "相机位置发生变化"
         ).doesNotContain("前景主体");
     }

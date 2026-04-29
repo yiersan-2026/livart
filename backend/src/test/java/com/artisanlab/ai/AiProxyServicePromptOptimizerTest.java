@@ -26,4 +26,17 @@ class AiProxyServicePromptOptimizerTest {
 
         assertThat(selectedPrompt).contains("窗边的小猫");
     }
+
+    @Test
+    void appendsViewChangeGazeLockAfterOptimizerOutput() {
+        String guardedPrompt = AiProxyService.appendViewChangeGazeConstraints(
+                "以原图为完整三维场景，将观察点移动到右侧 60 度。"
+        );
+
+        assertThat(guardedPrompt).contains(
+                "不应继续直视当前画面",
+                "角色视线仍指向原始相机位置",
+                "direct eye contact with the new camera"
+        );
+    }
 }

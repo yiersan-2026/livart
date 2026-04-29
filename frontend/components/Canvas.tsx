@@ -504,6 +504,12 @@ const getMultiAngleViewDirectionInstruction = (state: MultiAngleState) => {
   return `${horizontalInstruction}\n${verticalInstruction}`;
 };
 
+const MULTI_ANGLE_GAZE_LOCK_INSTRUCTION = [
+  '关键视线约束：人物、动物或角色的身体、头部和眼睛都锁定在原图里的世界坐标中，不跟随新相机转动。',
+  '如果原图角色正对原始相机，当新相机移动到左侧、右侧或斜侧时，画面应看到侧脸或三分之四脸；角色视线仍指向原始相机位置，不应继续直视当前画面、当前观看者或新镜头。',
+  '禁止 looking at viewer、looking at new camera、direct eye contact with the new camera、subject turns head toward the new camera。'
+].join('');
+
 const buildMultiAnglePrompt = (item: CanvasItem, state: MultiAngleState) => {
   const zoomLabel = getMultiAngleZoomOption(state.zoom).label;
   return [
@@ -520,6 +526,7 @@ const buildMultiAnglePrompt = (item: CanvasItem, state: MultiAngleState) => {
     ,
     '把原图当作一个完整、固定的三维场景处理：画面中所有可见元素，包括人物、动物、商品、车辆、家具、道具、背景、地面/室内结构、建筑、光源、阴影和反射，都必须保持相对位置关系，并按照同一个新相机位姿产生一致透视变化。',
     '人物、动物或角色必须保持原先的身体姿态、头部朝向、表情、动作和眼神方向；不要让角色重新转头、转身或看向新镜头。即使原图角色正对原始镜头，新视角也只是从侧面观察这个固定姿态，不能让角色追随新相机。',
+    MULTI_ANGLE_GAZE_LOCK_INSTRUCTION,
     '不要只改变人物、商品、车辆或单个物体；不要让背景、地面、桌面、车轮、车门、墙面等仍停留在原视角；不要做左右镜像翻转。',
     '保持原图完整内容、各主要元素身份、结构比例、材质、颜色、服装/外观、背景风格、光影和画幅比例一致；只改变整张图的拍摄视角和透视，不要添加白边、相框、说明文字或无关新物体。'
   ].join('\n');

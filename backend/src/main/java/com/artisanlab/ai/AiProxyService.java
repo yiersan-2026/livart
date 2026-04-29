@@ -104,6 +104,9 @@ public class AiProxyService {
             "表情僵硬"
     );
     private static final String NEGATIVE_PROMPT_TEXT = "负面约束：避免%s。".formatted(String.join("、", NEGATIVE_PROMPT_TERMS));
+    static final String VIEW_CHANGE_GAZE_LOCK_TEXT = "硬性多角度视线约束：人物、动物或角色的身体、头部和眼睛都锁定在原图里的世界坐标中，不跟随新相机转动。"
+            + "如果原图角色正对原始相机，当新相机移动到左侧、右侧或斜侧时，画面应看到侧脸或三分之四脸；角色视线仍指向原始相机位置，"
+            + "不应继续直视当前画面、当前观看者或新镜头。禁止 looking at viewer、looking at new camera、direct eye contact with the new camera、subject turns head toward the new camera。";
 
     private final UserApiConfigService userApiConfigService;
     private final AssetService assetService;
@@ -843,7 +846,8 @@ public class AiProxyService {
                             "prompt-optimizer"
                     )
             );
-            String optimizedPrompt = appendNegativePromptConstraints(
+            String optimizedPrompt = finalizeOptimizedPrompt(
+                    mode,
                     selectPromptOptimizerOutput(optimizerOutput, trimmedPrompt)
             );
 
@@ -862,7 +866,7 @@ public class AiProxyService {
                     exception.code(),
                     safeMessage(exception)
             );
-            return appendNegativePromptConstraints(trimmedPrompt);
+            return finalizeOptimizedPrompt(mode, trimmedPrompt);
         } catch (RuntimeException exception) {
             log.warn(
                     "[prompt-optimizer] inline skipped mode={} duration={}ms error={}",
@@ -870,7 +874,7 @@ public class AiProxyService {
                     System.currentTimeMillis() - startedAt,
                     safeMessage(exception)
             );
-            return appendNegativePromptConstraints(trimmedPrompt);
+            return finalizeOptimizedPrompt(mode, trimmedPrompt);
         }
     }
 
@@ -1435,9 +1439,10 @@ public class AiProxyService {
                     - 根据用户给出的“整图视角/观察视角、旋转、倾斜、缩放”生成新的拍摄视角：画面中所有可见元素，包括人物、动物、商品、车辆、家具、道具、背景、地面/室内结构、建筑、光源、阴影和反射，都要按照同一个新相机位姿产生一致透视变化。
                     - 如果用户要求左侧视角或方位角为负，结果必须显示人物、车辆、家具、建筑、地面结构和所有可见物体的左侧面；如果要求右侧视角或方位角为正，结果必须显示所有可见物体的右侧面。不要做左右镜像翻转。
                     - 人物、动物或角色必须保持原先的身体姿态、头部朝向、表情、动作和眼神方向；不要让角色重新转头、转身或看向新镜头。即使原图角色正对原始镜头，新视角也只是从侧面观察这个固定姿态，不能让角色追随新相机。
+                    - %s
                     - 必须保留原图完整内容、各主要元素身份、结构比例、材质、颜色、服装/外观、核心特征、背景风格、相对位置关系和画幅比例。
                     - 允许为了整图新视角合理补全被遮挡侧面和透视细节，但不要只旋转某个元素、不要让背景/地面/桌面/车门/车轮/墙面停留在原视角，也不要改变画面元素类别、人物身份、品牌、服装、表情、材质和色彩。
-                    - 不要添加白边、相框、说明文字、坐标轴、3D 控制器或无关新物体。""".formatted(sharedRules);
+                    - 不要添加白边、相框、说明文字、坐标轴、3D 控制器或无关新物体。""".formatted(sharedRules, VIEW_CHANGE_GAZE_LOCK_TEXT);
         }
 
         return """
@@ -1536,6 +1541,21 @@ public class AiProxyService {
 
         String normalizedPrompt = trimmedPrompt.replaceAll("[。；;，,\\s]+$", "");
         return "%s。%s".formatted(normalizedPrompt, NEGATIVE_PROMPT_TEXT);
+    }
+
+    private String finalizeOptimizedPrompt(String mode, String prompt) {
+        String guardedPrompt = "view-change".equals(mode) ? appendViewChangeGazeConstraints(prompt) : prompt;
+        return appendNegativePromptConstraints(guardedPrompt == null ? "" : guardedPrompt);
+    }
+
+    static String appendViewChangeGazeConstraints(String prompt) {
+        String trimmedPrompt = prompt == null ? "" : prompt.trim();
+        if (trimmedPrompt.isBlank() || trimmedPrompt.contains("direct eye contact with the new camera")) {
+            return trimmedPrompt;
+        }
+
+        String normalizedPrompt = trimmedPrompt.replaceAll("[。；;，,\\s]+$", "");
+        return "%s。\n%s".formatted(normalizedPrompt, VIEW_CHANGE_GAZE_LOCK_TEXT);
     }
 
     private String buildPromptOptimizerInput(String prompt, String imageContext) {
