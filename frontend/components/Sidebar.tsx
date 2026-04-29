@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import type { ChatMessage, CanvasItem, ChatImageResultCard, ExternalSkillSummary, ImageAspectRatio } from '../types';
+import type { ActiveImageTaskInfo, ChatMessage, CanvasItem, ChatImageResultCard, ExternalSkillSummary, ImageAspectRatio } from '../types';
 import { ChevronDown, Download, Eye, Github, Loader2, Send, RotateCcw, RotateCw, ZoomIn, ZoomOut, X } from 'lucide-react';
 import { IMAGE_ASPECT_RATIO_OPTIONS } from '../services/imageSizing';
 import { getImagePreviewFitStyle, getLargestCanvasImageSrc, getOriginalImageSrc, getThumbnailImageSrc, hasUsableImageSource } from '../services/imageSources';
@@ -33,8 +33,7 @@ type AssistantAnswerBlock =
 interface SidebarProps {
   messages: ChatMessage[];
   isThinking: boolean;
-  activeTaskStartedAt?: number | null;
-  activeTaskCount?: number;
+  activeTasks?: ActiveImageTaskInfo[];
   onSendMessage: (text: string, aspectRatio: ImageAspectRatio, externalSkillId?: string) => void;
   contextImage: CanvasItem | null;
   promptSeed?: { id: string; imageId: string; prompt?: string } | null;
@@ -45,7 +44,7 @@ interface SidebarProps {
   onNavigateToImage: (item: CanvasItem) => void;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStartedAt = null, activeTaskCount = 0, onSendMessage, contextImage, promptSeed, inputResetKey = 0, imageItems, onClearContextImage, onNavigateToImage }) => {
+const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [], onSendMessage, contextImage, promptSeed, inputResetKey = 0, imageItems, onClearContextImage, onNavigateToImage }) => {
   const [inputValue, setInputValue] = React.useState('');
   const [selectedAspectRatio, setSelectedAspectRatio] = React.useState<ImageAspectRatio>('auto');
   const [externalSkills, setExternalSkills] = React.useState<ExternalSkillSummary[]>([]);
@@ -53,6 +52,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
   const [externalSkillLoadError, setExternalSkillLoadError] = React.useState('');
   const [isAspectRatioMenuOpen, setIsAspectRatioMenuOpen] = React.useState(false);
   const [isSkillMenuOpen, setIsSkillMenuOpen] = React.useState(false);
+  const [isActiveTaskListOpen, setIsActiveTaskListOpen] = React.useState(false);
   const [timerNow, setTimerNow] = React.useState(() => Date.now());
   const [imageViewer, setImageViewer] = React.useState<{ item: CanvasItem; title: string } | null>(null);
   const [imageViewerZoom, setImageViewerZoom] = React.useState(1);
@@ -88,6 +88,11 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
     () => externalSkills.find(skill => skill.id === selectedExternalSkillId) || null,
     [externalSkills, selectedExternalSkillId]
   );
+  const sortedActiveTasks = useMemo(
+    () => [...activeTasks].sort((firstTask, secondTask) => firstTask.startedAt - secondTask.startedAt),
+    [activeTasks]
+  );
+  const activeTaskCount = sortedActiveTasks.length;
 
   useEffect(() => {
     setInputValue('');
@@ -156,7 +161,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
   }, [messages, isThinking]);
 
   useEffect(() => {
-    if (!isThinking || !activeTaskStartedAt) return;
+    if (!isThinking || activeTaskCount === 0) return;
 
     setTimerNow(Date.now());
     const timerId = window.setInterval(() => {
@@ -164,7 +169,12 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
     }, 1000);
 
     return () => window.clearInterval(timerId);
-  }, [activeTaskStartedAt, isThinking]);
+  }, [activeTaskCount, isThinking]);
+
+  useEffect(() => {
+    if (activeTaskCount > 0) return;
+    setIsActiveTaskListOpen(false);
+  }, [activeTaskCount]);
 
   const resetImageViewerTransform = () => {
     setImageViewerZoom(1);
@@ -326,10 +336,6 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
       onClearContextImage();
     }
   };
-
-  const activeTaskDurationText = activeTaskStartedAt
-    ? formatExecutionDuration(timerNow - activeTaskStartedAt)
-    : '';
 
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
@@ -895,13 +901,34 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTaskStart
           })}
 
           {isThinking && (
-            <div className="flex items-center gap-3 text-black text-sm font-bold animate-pulse">
-              <Loader2 className="animate-spin" size={16} />
-              <span>
-                livart 正在生图{activeTaskCount > 1 ? `（${activeTaskCount} 个任务）` : '中'}...
-                {activeTaskDurationText && ` 最早任务已执行 ${activeTaskDurationText}`}
-                <span className="ml-1 text-gray-400">可继续提交新任务</span>
-              </span>
+            <div className="space-y-2 text-sm font-bold text-black">
+              <div className="flex flex-wrap items-center gap-2">
+                <Loader2 className="animate-spin" size={16} />
+                <span>livart 正在生图</span>
+                <button
+                  type="button"
+                  onClick={() => setIsActiveTaskListOpen(isOpen => !isOpen)}
+                  className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs font-black text-gray-900 transition-colors hover:bg-gray-100"
+                  aria-expanded={isActiveTaskListOpen}
+                >
+                  {activeTaskCount} 个任务
+                </button>
+                <span className="text-xs font-black text-gray-400">可继续提交新任务</span>
+              </div>
+              {isActiveTaskListOpen && (
+                <div className="rounded-2xl border border-gray-100 bg-white p-2">
+                  {sortedActiveTasks.map((task, index) => (
+                    <div key={task.key} className="flex items-center justify-between gap-3 rounded-xl px-2 py-2 text-xs">
+                      <span className="min-w-0 truncate font-black text-gray-700">
+                        {task.label || `图片任务 ${index + 1}`}
+                      </span>
+                      <span className="shrink-0 tabular-nums font-black text-gray-400">
+                        已执行 {formatExecutionDuration(timerNow - task.startedAt)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>

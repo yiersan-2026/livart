@@ -1,7 +1,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { PanelRightClose, PanelRight, Settings, FolderPlus, LogOut, Loader2, X, Download, ChevronDown, Users, Images, MemoryStick, Cpu, HardDrive } from 'lucide-react';
-import type { AgentPlan, CanvasItem, CanvasTool, ChatMessage, ImageAspectRatio } from './types';
+import type { ActiveImageTaskInfo, AgentPlan, CanvasItem, CanvasTool, ChatMessage, ImageAspectRatio } from './types';
 import AuthPanel from './components/AuthPanel';
 import Canvas from './components/Canvas';
 import Sidebar from './components/Sidebar';
@@ -166,6 +166,33 @@ const buildExecutionAnnouncement = (plan: AgentPlan) => {
 const buildImageJobQueueNotice = (job: ImageJobStatus, imageIndex?: number) => {
   const label = typeof imageIndex === 'number' ? `第 ${imageIndex + 1} 张图片` : '图片任务';
   return getImageJobQueueMessage(job, label);
+};
+
+const getAgentRunActiveTaskAction = (agentRun: Pick<AgentRun, 'plan' | 'taskType'>) => {
+  if (agentRun.plan.mode === 'background-removal') return '去背景';
+  if (agentRun.plan.mode === 'remover') return '删除物体';
+  if (agentRun.plan.mode === 'layer-subject' || agentRun.plan.mode === 'layer-background') return '图层拆分';
+  if (agentRun.plan.mode === 'view-change') return '多角度';
+  return agentRun.taskType === 'image-edit' ? '单图编辑' : '文生图';
+};
+
+const buildAgentRunActiveTaskLabel = (
+  agentRun: Pick<AgentRun, 'plan' | 'taskType' | 'displayTitle'>,
+  index: number,
+  total: number
+) => {
+  const title = ensureImageNoun(agentRun.displayTitle || agentRun.plan.displayTitle || '');
+  const action = getAgentRunActiveTaskAction(agentRun);
+  const indexLabel = total > 1 ? `第 ${index + 1} 张` : '';
+  return [indexLabel, action, title].filter(Boolean).join(' · ');
+};
+
+const buildCanvasItemActiveTaskLabel = (item: CanvasItem) => {
+  const stableTitle = item.label && !/(AI|排队|同步|生成中|编辑中|重绘中|删除中|去背景中|改视角中)/.test(item.label)
+    ? ensureImageNoun(item.label)
+    : '';
+  const action = item.parentId ? '图片编辑' : '图片生成';
+  return stableTitle ? `${action} · ${stableTitle}` : action;
 };
 
 const waitForMinimumDuration = async (startedAt: number, durationMs: number) => {
@@ -744,7 +771,7 @@ const CreateProjectModal: React.FC<CreateProjectModalProps> = ({
 function App() {
   const [items, setItems] = useState<CanvasItem[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([createWelcomeMessage()]);
-  const [activeTaskTimers, setActiveTaskTimers] = useState<Record<string, number>>({});
+  const [activeTaskTimers, setActiveTaskTimers] = useState<Record<string, ActiveImageTaskInfo>>({});
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: window.innerWidth / 4, y: window.innerHeight / 4 });
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -1260,7 +1287,8 @@ function App() {
 
     const startedAt = Date.now();
     const timerKeys = agentRun.jobs.map(job => imageJobTaskTimerKey(job.jobId));
-    timerKeys.forEach(timerKey => startTaskTimer(startedAt, timerKey));
+    const timerLabels = agentRun.jobs.map((_, index) => buildAgentRunActiveTaskLabel(agentRun, index, agentRun.jobs.length));
+    timerKeys.forEach((timerKey, index) => startTaskTimer(startedAt, timerKey, timerLabels[index]));
     let isTaskTimerActive = true;
     try {
       const editBaseImage = agentRun.taskType === 'image-edit'
@@ -1333,7 +1361,7 @@ function App() {
               isTaskTimerActive = false;
             }
             if (state === 'connected' && !isTaskTimerActive) {
-              timerKeys.forEach(timerKey => startTaskTimer(startedAt, timerKey));
+              timerKeys.forEach((timerKey, timerIndex) => startTaskTimer(startedAt, timerKey, timerLabels[timerIndex]));
               isTaskTimerActive = true;
             }
             if (state === 'reconnecting') {
@@ -1502,7 +1530,7 @@ function App() {
       resumedImageJobIdsRef.current.add(jobId);
       const restoredStartedAt = getRestoredImageJobStartedAt(item);
       const timerKey = imageJobTaskTimerKey(jobId);
-      startTaskTimer(restoredStartedAt, timerKey);
+      startTaskTimer(restoredStartedAt, timerKey, buildCanvasItemActiveTaskLabel(item));
 
       waitForImageJob(jobId, {
         onStatus: (jobStatus) => {
@@ -1862,16 +1890,31 @@ function App() {
     setMessages(prev => prev.map(message => message.id === messageId ? updater(message) : message));
   };
 
-  const startTaskTimer = (startedAt: number, key = fallbackTaskTimerKey(startedAt)) => {
+  const startTaskTimer = (startedAt: number, key = fallbackTaskTimerKey(startedAt), label = '图片任务') => {
     const normalizedStartedAt = Number.isFinite(startedAt) ? startedAt : Date.now();
-    setActiveTaskTimers(prev => (
-      prev[key] === normalizedStartedAt ? prev : { ...prev, [key]: normalizedStartedAt }
-    ));
+    const normalizedLabel = label.trim() || '图片任务';
+    setActiveTaskTimers(prev => {
+      const currentTask = prev[key];
+      if (
+        currentTask?.startedAt === normalizedStartedAt &&
+        currentTask.label === normalizedLabel
+      ) {
+        return prev;
+      }
+      return {
+        ...prev,
+        [key]: {
+          key,
+          startedAt: normalizedStartedAt,
+          label: normalizedLabel
+        }
+      };
+    });
   };
 
   const finishTaskTimer = (startedAt: number, key = '') => {
     setActiveTaskTimers(prev => {
-      const timerKey = key || Object.keys(prev).find(candidateKey => prev[candidateKey] === startedAt) || '';
+      const timerKey = key || Object.keys(prev).find(candidateKey => prev[candidateKey].startedAt === startedAt) || '';
       if (!timerKey || !(timerKey in prev)) return prev;
       const { [timerKey]: _removed, ...next } = prev;
       return next;
@@ -2008,6 +2051,7 @@ function App() {
     let failureActionLabel = 'AI Agent';
     let imageTaskStartedAt: number | null = null;
     let imageTaskTimerKeys: string[] = [];
+    let imageTaskTimerLabels: string[] = [];
     let isImageTaskTimerActive = false;
     const agentRunClientId = createAgentRunClientId();
     const planningMessageId = appendDraftMessage('正在分析你的意图...', 'assistant', {
@@ -2073,6 +2117,11 @@ function App() {
       const requestedEditMode = selectedImageEditMode && freshContextImage && selectedImageEditMode.imageId === freshContextImage.id
         ? selectedImageEditMode.mode
         : undefined;
+      if (requestedEditMode === 'remover') {
+        failureActionLabel = '删除物体';
+      } else if (requestedEditMode === 'local-redraw') {
+        failureActionLabel = '局部重绘';
+      }
 
       let persistedPlanCandidateImages = planCandidateImages;
       if (planCandidateImages.length > 0) {
@@ -2088,19 +2137,22 @@ function App() {
       if (requestedEditMode && freshContextImage) {
         const localMaskData = getImageEditMaskData(freshContextImage, requestedEditMode);
         if (!localMaskData) {
-          throw new Error(requestedEditMode === 'remover' ? '请先用画笔涂抹需要删除的物体' : '请先用画笔涂抹需要局部重绘的区域');
-        }
-        maskDataUrl = await createTransparentEditMask(
-          localMaskData,
-          freshContextImage.content,
-          freshContextImage.width,
-          freshContextImage.height,
-          requestedEditMode === 'remover'
-            ? { outlineDilationRadius: 6, editableDilationRadius: 5 }
-            : undefined
-        ) || '';
-        if (!maskDataUrl) {
-          throw new Error(requestedEditMode === 'remover' ? '请先用画笔涂抹需要删除的物体' : '请先用画笔涂抹需要局部重绘的区域');
+          if (requestedEditMode === 'local-redraw') {
+            throw new Error('请先用画笔涂抹需要局部重绘的区域');
+          }
+        } else {
+          maskDataUrl = await createTransparentEditMask(
+            localMaskData,
+            freshContextImage.content,
+            freshContextImage.width,
+            freshContextImage.height,
+            requestedEditMode === 'remover'
+              ? { outlineDilationRadius: 6, editableDilationRadius: 5 }
+              : undefined
+          ) || '';
+          if (!maskDataUrl) {
+            throw new Error(requestedEditMode === 'remover' ? '无法生成删除蒙版，请重新涂抹后再试' : '请先用画笔涂抹需要局部重绘的区域');
+          }
         }
       }
 
@@ -2207,7 +2259,8 @@ function App() {
       }
       imageTaskStartedAt = Date.now();
       imageTaskTimerKeys = agentRun.jobs.map(job => imageJobTaskTimerKey(job.jobId));
-      imageTaskTimerKeys.forEach(timerKey => startTaskTimer(imageTaskStartedAt as number, timerKey));
+      imageTaskTimerLabels = agentRun.jobs.map((_, index) => buildAgentRunActiveTaskLabel(agentRun, index, agentRun.jobs.length));
+      imageTaskTimerKeys.forEach((timerKey, index) => startTaskTimer(imageTaskStartedAt as number, timerKey, imageTaskTimerLabels[index]));
       isImageTaskTimerActive = true;
 
       const fallbackWidth = editBaseImage ? editBaseImage.width : DEFAULT_GENERATED_IMAGE_LONG_SIDE;
@@ -2280,7 +2333,7 @@ function App() {
               updateExecutionMessage('等待重连，重连后会自动更新图片结果。', 'waiting-reconnect');
             } else {
               if (imageTaskStartedAt !== null && !isImageTaskTimerActive) {
-                imageTaskTimerKeys.forEach(timerKey => startTaskTimer(imageTaskStartedAt as number, timerKey));
+                imageTaskTimerKeys.forEach((timerKey, timerIndex) => startTaskTimer(imageTaskStartedAt as number, timerKey, imageTaskTimerLabels[timerIndex]));
                 isImageTaskTimerActive = true;
               }
             }
@@ -2501,12 +2554,8 @@ function App() {
     }
   ];
 
-  const activeTaskStartedAts = Object.values(activeTaskTimers);
-  const activeTaskCount = activeTaskStartedAts.length;
-  const isThinking = activeTaskCount > 0;
-  const activeTaskStartedAt = activeTaskCount > 0
-    ? Math.min(...activeTaskStartedAts)
-    : null;
+  const activeTasks = Object.values(activeTaskTimers).sort((firstTask, secondTask) => firstTask.startedAt - secondTask.startedAt);
+  const isThinking = activeTasks.length > 0;
 
   if (!isAuthReady) {
     return (
@@ -2722,7 +2771,6 @@ function App() {
           onBeforeCanvasMutation={flushCanvasHistory}
           selectedIds={selectedIds}
           setSelectedIds={handleCanvasSelectionChange}
-          onImagePromptRequest={focusImageInSidebarInput}
         />
 
         <CanvasUtilityDock
@@ -2759,8 +2807,7 @@ function App() {
         <Sidebar
           messages={messages}
           isThinking={isThinking}
-          activeTaskStartedAt={activeTaskStartedAt}
-          activeTaskCount={activeTaskCount}
+          activeTasks={activeTasks}
           onSendMessage={handleSidebarSendMessage}
           contextImage={contextImage}
           promptSeed={sidebarPromptSeed}

@@ -9,7 +9,7 @@ import {
   Copy, Layers, Scissors, Check, X,
   Palette, Maximize2, Wand2,
   Download, Send, AlignLeft, AlignCenter, AlignRight, SlidersHorizontal,
-  Box, Eye, RefreshCw, Rotate3D
+  Box, Eye, RefreshCw, Rotate3D, RotateCw
 } from 'lucide-react';
 import { getImageJobQueueMessage, type ImageGenerationResult, type ImageJobStatus, waitForImageJob } from '../services/gemini';
 import {
@@ -53,9 +53,8 @@ interface CanvasProps {
   onChatMessage: (text: string, role: 'user' | 'assistant', options?: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan' | 'agentRunId' | 'agentRunStatus'>) => void;
   onChatDraftMessage: (text: string, role: 'user' | 'assistant', options?: Pick<ChatMessage, 'imageIds' | 'imageResultCards' | 'durationMs' | 'agentPlan' | 'agentRunId' | 'agentRunStatus'>) => string;
   onChatMessageUpdate: (messageId: string, updater: (message: ChatMessage) => ChatMessage) => void;
-  onImageTaskStart: (startedAt: number) => void;
-  onImageTaskFinish: (startedAt: number) => void;
-  onImagePromptRequest: (item: CanvasItem, prompt?: string, mode?: 'local-redraw' | 'remover') => void;
+  onImageTaskStart: (startedAt: number, key?: string, label?: string) => void;
+  onImageTaskFinish: (startedAt: number, key?: string) => void;
   onBeforeCanvasMutation: () => void;
   canvasTool: CanvasTool;
   onCanvasToolChange: (tool: CanvasTool) => void;
@@ -133,6 +132,7 @@ type SnapCandidate = {
 };
 
 const REMOVER_PROMPT = '把圈起来的地方删除掉。';
+const LOCAL_REDRAW_PROMPT = '自然重绘用户涂抹的局部区域，保持未涂抹区域完全不变，并让新内容与原图的光影、材质、透视和风格自然一致。';
 const BACKGROUND_REMOVAL_PROMPT = '先识别图片中的主要主体：画面最主要的人物、商品、动物、车辆或成组前景对象；主体包含其穿戴、手持、贴附和与主体直接组成整体的部分。只保留主体，把主体以外的一切背景和无关物体替换为纯白色背景（#FFFFFF），不要透明背景，不要浅灰、米白或渐变。不要改变主体 RGB 像素，不要重绘、修复、补全、美化、移动或缩放主体；严格保留原图中已经可见的主体像素、裁切范围、构图、脸、表情、姿态、服装、颜色、纹理、发丝和边缘细节；原图里被裁切到画面外的身体、头发、衣服不要补出来。输出白底图片。';
 const LAYER_SPLIT_SUBJECT_PROMPT = '图层拆分：请把这张图拆出“主体层”。先识别画面主要前景主体，主体包含其穿戴、手持、贴附和直接组成整体的部分；输出同画幅主体图层，主体以外区域必须是透明 alpha，不要生成新背景，不要改变主体身份、结构、比例、颜色、材质、边缘、光影和原有裁切。';
 const LAYER_SPLIT_BACKGROUND_PROMPT = '图层拆分：请把这张图拆出“背景层”。先识别画面主要前景主体，然后移除主体及其接触阴影、遮挡残影和边缘碎片；用周围背景的纹理、透视、光影、反射、噪点和景深自然补全，保持原图画幅、镜头视角和背景风格不变，不要新增主体或新场景。';
@@ -686,6 +686,23 @@ const createCroppedImageDataUrl = async (item: CanvasItem, cropRect: CropRect) =
   };
 };
 
+const createClockwiseRotatedImageDataUrl = async (item: CanvasItem, source: string) => {
+  const image = await loadImageElement(source);
+  const sourceWidth = getCanvasDimension(image.naturalWidth || item.width);
+  const sourceHeight = getCanvasDimension(image.naturalHeight || item.height);
+  const outputCanvas = document.createElement('canvas');
+  outputCanvas.width = sourceHeight;
+  outputCanvas.height = sourceWidth;
+  const context = outputCanvas.getContext('2d');
+  if (!context) throw new Error('无法创建旋转画布');
+
+  context.translate(outputCanvas.width / 2, outputCanvas.height / 2);
+  context.rotate(Math.PI / 2);
+  context.drawImage(image, -sourceWidth / 2, -sourceHeight / 2, sourceWidth, sourceHeight);
+
+  return outputCanvas.toDataURL('image/png');
+};
+
 const getImageDimensions = async (src: string, fallbackWidth: number, fallbackHeight: number) => {
   try {
     const image = await loadImageElement(src);
@@ -1014,7 +1031,7 @@ const ImageGenerationSkeleton: React.FC<{ hasPreview: boolean }> = ({ hasPreview
 );
 
 const Canvas: React.FC<CanvasProps> = ({ 
-  items, zoom, onZoomChange, pan, onPanChange, backgroundColor, onItemUpdate, onItemDelete, onItemDeleteMultiple, onItemAdd, onAddTextAt, onAddImageAt, onAddToChat, onChatMessage, onChatDraftMessage, onChatMessageUpdate, onImageTaskStart, onImageTaskFinish, onImagePromptRequest, onBeforeCanvasMutation, canvasTool, onCanvasToolChange, selectedIds, setSelectedIds
+  items, zoom, onZoomChange, pan, onPanChange, backgroundColor, onItemUpdate, onItemDelete, onItemDeleteMultiple, onItemAdd, onAddTextAt, onAddImageAt, onAddToChat, onChatMessage, onChatDraftMessage, onChatMessageUpdate, onImageTaskStart, onImageTaskFinish, onBeforeCanvasMutation, canvasTool, onCanvasToolChange, selectedIds, setSelectedIds
 }) => {
   const [dragState, setDragState] = useState<{ id: string, startX: number, startY: number } | null>(null);
   const [resizeState, setResizeState] = useState<{ 
@@ -1052,6 +1069,7 @@ const Canvas: React.FC<CanvasProps> = ({
   const [cropRect, setCropRect] = useState<CropRect | null>(null);
   const [cropDragState, setCropDragState] = useState<CropDragState | null>(null);
   const [downloadingImageId, setDownloadingImageId] = useState<string | null>(null);
+  const [rotatingImageId, setRotatingImageId] = useState<string | null>(null);
   const inlineEditingIdsRef = useRef<Set<string>>(new Set());
   const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const quickEditInputRef = useRef<HTMLInputElement | null>(null);
@@ -1717,7 +1735,6 @@ const Canvas: React.FC<CanvasProps> = ({
     setLocalRedrawItemId(nextId);
     if (nextId) setLocalRemoverItemId(null);
     setActiveTool(nextId ? 'brush' : 'select');
-    if (nextId) onImagePromptRequest(item, undefined, 'local-redraw');
   };
 
   const toggleRemoverMode = (item: CanvasItem) => {
@@ -1732,7 +1749,32 @@ const Canvas: React.FC<CanvasProps> = ({
     setLocalRemoverItemId(nextId);
     if (nextId) setLocalRedrawItemId(null);
     setActiveTool(nextId ? 'brush' : 'select');
-    if (nextId) onImagePromptRequest(item, REMOVER_PROMPT, 'remover');
+  };
+
+  const applySelectedImageMaskTool = (item: CanvasItem) => {
+    if (!selectedImageMaskMode || item.id !== selectedItem?.id || selectedItemIsInlineEditing) return;
+
+    const currentMaskData = getCurrentMaskDataForItem(
+      item.id,
+      selectedImageMaskMode,
+      getImageMaskDataForMode(item, selectedImageMaskMode)
+    );
+    if (!currentMaskData) {
+      setInlineEditErrors(prev => ({
+        ...prev,
+        [item.id]: selectedImageMaskMode === 'remover'
+          ? '请先用画笔涂抹需要擦除的区域'
+          : '请先用画笔涂抹需要编辑的区域'
+      }));
+      return;
+    }
+
+    onItemUpdate(item.id, getImageMaskUpdateForMode(selectedImageMaskMode, currentMaskData));
+    clearInlineEditError(item.id);
+    void handleInlineImageRedraw(undefined, {
+      item,
+      prompt: selectedImageMaskMode === 'remover' ? REMOVER_PROMPT : LOCAL_REDRAW_PROMPT
+    });
   };
 
   const applyQuickEditPrompt = (item: CanvasItem, prompt: string) => {
@@ -1880,7 +1922,7 @@ const Canvas: React.FC<CanvasProps> = ({
       updateSplitPlan('optimize-layer-split', '规划拆层', '主体层和背景层指令已准备完成。', 'completed');
       updateSplitPlan('run-layer-split', '执行拆层', '正在并行提交两个图片编辑任务。', 'running');
       imageTaskStartedAt = Date.now();
-      onImageTaskStart(imageTaskStartedAt);
+      onImageTaskStart(imageTaskStartedAt, undefined, `图层拆分 · ${ensureImageNoun(sourceTitle)}`);
 
       const runLayerSplitJob = async (placeholder: CanvasItem) => {
         const role = placeholder.layerRole === 'background' ? 'background' : 'subject';
@@ -2077,6 +2119,41 @@ const Canvas: React.FC<CanvasProps> = ({
       setInlineEditErrors(prev => ({ ...prev, [item.id]: message }));
     } finally {
       setDownloadingImageId(prev => prev === item.id ? null : prev);
+    }
+  };
+
+  const handleRotateSelectedImage = async (item: CanvasItem) => {
+    const imageSource = getOriginalImageSrc(item) || getCanvasImageSrc(item, zoom);
+    if (!imageSource || item.status !== 'completed' || rotatingImageId === item.id) return;
+
+    clearInlineEditError(item.id);
+    setRotatingImageId(item.id);
+
+    try {
+      const rotatedDataUrl = await createClockwiseRotatedImageDataUrl(item, imageSource);
+      const rotatedFrame = {
+        width: getCanvasDimension(item.height),
+        height: getCanvasDimension(item.width)
+      };
+
+      onBeforeCanvasMutation();
+      resetImageToolModes();
+      onItemUpdate(item.id, {
+        ...centerFrameOnRect(item, rotatedFrame),
+        content: rotatedDataUrl,
+        assetId: undefined,
+        previewContent: undefined,
+        thumbnailContent: undefined,
+        maskData: undefined,
+        redrawMaskData: undefined,
+        removerMaskData: undefined,
+        compositeImage: undefined
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '旋转图片失败';
+      setInlineEditErrors(prev => ({ ...prev, [item.id]: message }));
+    } finally {
+      setRotatingImageId(prev => prev === item.id ? null : prev);
     }
   };
 
@@ -2568,7 +2645,7 @@ const Canvas: React.FC<CanvasProps> = ({
         throw new Error('Agent 没有创建可执行的图片任务');
       }
       imageTaskStartedAt = Date.now();
-      onImageTaskStart(imageTaskStartedAt);
+      onImageTaskStart(imageTaskStartedAt, undefined, '视觉逻辑生成');
       const imageResult = await waitForImageJob(job.jobId, {
         onConnectionState: (state) => {
           if (state === 'reconnecting') {
@@ -2657,6 +2734,7 @@ const Canvas: React.FC<CanvasProps> = ({
     const useLocalMask = !!localMaskMode;
     const startedAt = Date.now();
     let imageTaskStartedAt: number | null = null;
+    let imageTaskTimerKey = '';
     let resultItemId: string | null = null;
     let unsubscribeAgentRunEvents: () => void = () => {};
     const agentRunClientId = createAgentRunClientId();
@@ -2675,6 +2753,16 @@ const Canvas: React.FC<CanvasProps> = ({
           : localRedrawItemId === targetItem.id
             ? 'tool.image.local-redraw'
             : 'tool.image.edit';
+    const inlineTaskActionLabel = isViewChangeMode
+      ? '多角度'
+      : isBackgroundRemovalMode
+        ? '去背景'
+        : isRemoverMode
+          ? '删除物体'
+          : useLocalMask
+            ? '局部重绘'
+            : '快捷编辑';
+    const inlineTaskLabel = `${inlineTaskActionLabel} · ${ensureImageNoun(getCanvasItemDisplayTitle(targetItem))}`;
     let inlineAgentPlan = buildAgentDraftPlan({
       taskType: 'image-edit',
       mode: inlineAgentMode,
@@ -2716,11 +2804,19 @@ const Canvas: React.FC<CanvasProps> = ({
         )
         : undefined;
 
-      if (useLocalMask && !currentMaskData) {
-        throw new Error(isRemoverMode ? '请先用画笔涂抹需要删除的物体' : '请先用画笔涂抹需要局部重绘的区域');
+      if (localMaskMode === 'local-redraw' && !currentMaskData) {
+        throw new Error('请先用画笔涂抹需要局部重绘的区域');
       }
 
-      const agentPrompt = useLocalMask
+      if (
+        localMaskMode === 'remover' &&
+        !currentMaskData &&
+        (!rawPrompt || rawPrompt === REMOVER_PROMPT)
+      ) {
+        throw new Error('请先用画笔涂抹需要擦除的区域，或描述要删除的具体物体');
+      }
+
+      const agentPrompt = useLocalMask && currentMaskData
         ? isRemoverMode
           ? `${prompt}。只删除或修复用户用蒙版涂抹的局部区域，未被蒙版覆盖的区域必须保持原图不变。`
           : `${prompt}。只修改用户用蒙版涂抹的局部区域，未被蒙版覆盖的区域必须保持原图不变。`
@@ -2742,7 +2838,7 @@ const Canvas: React.FC<CanvasProps> = ({
       }
 
       let maskDataUrl: string | null | undefined;
-      if (localMaskMode) {
+      if (localMaskMode && currentMaskData) {
         const persistedTargetForMask = persistentAgentImages.find(item => item.id === targetItem.id) || targetItem;
         maskDataUrl = await createTransparentEditMask(
           currentMaskData!,
@@ -2754,7 +2850,7 @@ const Canvas: React.FC<CanvasProps> = ({
             : undefined
         );
         if (!maskDataUrl) {
-          throw new Error(isRemoverMode ? '请先用画笔涂抹需要删除的物体' : '请先用画笔涂抹需要局部重绘的区域');
+          throw new Error(isRemoverMode ? '无法生成删除蒙版，请重新涂抹后再试' : '请先用画笔涂抹需要局部重绘的区域');
         }
         onItemUpdate(targetItem.id, getImageMaskUpdateForMode(localMaskMode, currentMaskData!));
       }
@@ -2792,7 +2888,8 @@ const Canvas: React.FC<CanvasProps> = ({
       });
       syncInlineAgentPlanMessage(waitPlan, '等待生成：图片任务已提交，正在等待上游返回结果。');
       imageTaskStartedAt = Date.now();
-      onImageTaskStart(imageTaskStartedAt);
+      imageTaskTimerKey = `image-job:${job.jobId}`;
+      onImageTaskStart(imageTaskStartedAt, imageTaskTimerKey, inlineTaskLabel);
       const persistentById = new Map(persistentAgentImages.map(item => [item.id, item]));
       const editBaseItem = persistentById.get(agentRun.baseImageId) || persistentById.get(targetItem.id) || targetItem;
       const persistentReferenceImages = agentRun.referenceImageIds
@@ -2991,7 +3088,7 @@ const Canvas: React.FC<CanvasProps> = ({
     } finally {
       unsubscribeAgentRunEvents();
       if (imageTaskStartedAt !== null) {
-        onImageTaskFinish(imageTaskStartedAt);
+        onImageTaskFinish(imageTaskStartedAt, imageTaskTimerKey);
       }
       setInlineEditingForItem(targetItem.id, false);
       setInlineEditingStartedAt(prev => {
@@ -3856,7 +3953,62 @@ const Canvas: React.FC<CanvasProps> = ({
               }}
               onMouseDown={(event) => event.stopPropagation()}
             >
-            <div ref={imageToolbarRef} className="relative h-11 w-max overflow-hidden rounded-[14px] border border-zinc-200 bg-white pr-11 shadow-[0_14px_40px_-26px_rgba(0,0,0,0.5)]">
+              <div className="relative">
+              {selectedItemHasImageMaskTool && (
+                <div className="absolute bottom-full left-1/2 mb-2 flex h-11 w-max -translate-x-1/2 items-center overflow-hidden rounded-[14px] border border-zinc-200 bg-white shadow-[0_14px_40px_-26px_rgba(0,0,0,0.5)]">
+                  <span className={`flex h-11 shrink-0 items-center border-r border-zinc-100 px-3 text-[11px] font-bold ${selectedItemIsRemover ? 'text-red-600' : 'text-blue-600'}`}>
+                    {selectedItemIsRemover ? '删除范围' : '重绘范围'}
+                  </span>
+                  <button type="button" onClick={() => setActiveTool('select')} className={`flex h-11 shrink-0 items-center border-r border-zinc-100 px-3 transition-colors ${activeTool === 'select' ? 'bg-zinc-100 text-zinc-950' : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-950'}`} title="选择/移动">
+                    <MousePointer2 size={16} />
+                  </button>
+                  <button type="button" onClick={() => setActiveTool('brush')} className={`flex h-11 shrink-0 items-center border-r border-zinc-100 px-3 transition-colors ${activeTool === 'brush' ? 'bg-zinc-100 text-zinc-950' : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-950'}`} title="涂抹区域">
+                    <Pencil size={16} />
+                  </button>
+                  <button type="button" onClick={() => setActiveTool('eraser')} className={`flex h-11 shrink-0 items-center border-r border-zinc-100 px-3 transition-colors ${activeTool === 'eraser' ? 'bg-zinc-100 text-zinc-950' : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-950'}`} title="擦除蒙版">
+                    <Eraser size={16} />
+                  </button>
+                  <div className="flex h-11 shrink-0 items-center border-r border-zinc-100 px-3">
+                    <input
+                      type="range"
+                      min={4}
+                      max={64}
+                      value={brushSize}
+                      onChange={(event) => setBrushSize(Number(event.target.value))}
+                      className={`h-1 w-24 ${selectedItemIsRemover ? 'accent-red-500' : 'accent-zinc-800'}`}
+                      title="画笔大小"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (selectedImageMaskMode) {
+                        onItemUpdate(selectedItem.id, getImageMaskUpdateForMode(selectedImageMaskMode, undefined));
+                      }
+                    }}
+                    className="flex h-11 shrink-0 items-center border-r border-zinc-100 px-3 text-xs font-bold text-zinc-500 transition-colors hover:bg-red-50 hover:text-red-500"
+                  >
+                    清除
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applySelectedImageMaskTool(selectedItem)}
+                    disabled={selectedItemIsInlineEditing || selectedItem.status === 'loading' || !selectedImageMaskData}
+                    className={`flex h-11 shrink-0 items-center gap-1.5 px-3 text-xs font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
+                      selectedItemIsRemover
+                        ? 'bg-red-600 text-white hover:bg-red-500'
+                        : 'bg-zinc-900 text-white hover:bg-zinc-800'
+                    }`}
+                    title={selectedItemIsRemover ? '执行擦除并补全背景' : '执行局部重绘'}
+                  >
+                    {selectedItemIsInlineEditing
+                      ? <Loader2 size={15} className="animate-spin" />
+                      : selectedItemIsRemover ? <Trash2 size={15} /> : <Sparkles size={15} />}
+                    {selectedItemIsRemover ? '执行擦除' : '执行重绘'}
+                  </button>
+                </div>
+              )}
+              <div ref={imageToolbarRef} className="relative h-11 w-max overflow-hidden rounded-[14px] border border-zinc-200 bg-white pr-11 shadow-[0_14px_40px_-26px_rgba(0,0,0,0.5)]">
               <div className="flex h-full items-center pr-2">
                 <button
                   type="button"
@@ -3884,6 +4036,16 @@ const Canvas: React.FC<CanvasProps> = ({
                   title="拖动裁剪框，保存为新的派生图片节点"
                 >
                   <Scissors size={15} />裁剪
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleRotateSelectedImage(selectedItem)}
+                  disabled={selectedItemIsInlineEditing || selectedItem.status !== 'completed' || rotatingImageId === selectedItem.id}
+                  className="flex h-11 shrink-0 items-center gap-1.5 border-r border-zinc-100 px-3 text-xs font-bold text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 disabled:cursor-not-allowed disabled:opacity-35"
+                  title="顺时针旋转当前图片 90°"
+                >
+                  {rotatingImageId === selectedItem.id ? <Loader2 size={15} className="animate-spin" /> : <RotateCw size={15} />}
+                  旋转
                 </button>
                 <button
                   type="button"
@@ -3986,44 +4148,6 @@ const Canvas: React.FC<CanvasProps> = ({
                     </button>
                   </>
                 )}
-                {selectedItemHasImageMaskTool && (
-                  <>
-                    <span className={`flex h-11 shrink-0 items-center border-r border-zinc-100 px-3 text-[11px] font-bold ${selectedItemIsRemover ? 'text-red-600' : 'text-blue-600'}`}>
-                      {selectedItemIsRemover ? '删除范围' : '重绘范围'}
-                    </span>
-                    <button type="button" onClick={() => setActiveTool('select')} className={`flex h-11 shrink-0 items-center border-r border-zinc-100 px-3 transition-colors ${activeTool === 'select' ? 'bg-zinc-100 text-zinc-950' : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-950'}`} title="选择/移动">
-                      <MousePointer2 size={16} />
-                    </button>
-                    <button type="button" onClick={() => setActiveTool('brush')} className={`flex h-11 shrink-0 items-center border-r border-zinc-100 px-3 transition-colors ${activeTool === 'brush' ? 'bg-zinc-100 text-zinc-950' : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-950'}`} title="涂抹区域">
-                      <Pencil size={16} />
-                    </button>
-                    <button type="button" onClick={() => setActiveTool('eraser')} className={`flex h-11 shrink-0 items-center border-r border-zinc-100 px-3 transition-colors ${activeTool === 'eraser' ? 'bg-zinc-100 text-zinc-950' : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-950'}`} title="擦除蒙版">
-                      <Eraser size={16} />
-                    </button>
-                    <div className="flex h-11 shrink-0 items-center border-r border-zinc-100 px-3">
-                      <input
-                        type="range"
-                        min={4}
-                        max={64}
-                        value={brushSize}
-                        onChange={(event) => setBrushSize(Number(event.target.value))}
-                        className={`h-1 w-24 ${selectedItemIsRemover ? 'accent-red-500' : 'accent-zinc-800'}`}
-                        title="画笔大小"
-                      />
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (selectedImageMaskMode) {
-                          onItemUpdate(selectedItem.id, getImageMaskUpdateForMode(selectedImageMaskMode, undefined));
-                        }
-                      }}
-                      className="flex h-11 shrink-0 items-center border-r border-zinc-100 px-3 text-xs font-bold text-zinc-500 transition-colors hover:bg-red-50 hover:text-red-500"
-                    >
-                      清除
-                    </button>
-                  </>
-                )}
               </div>
               <button
                 type="button"
@@ -4034,6 +4158,7 @@ const Canvas: React.FC<CanvasProps> = ({
               >
                 {downloadingImageId === selectedItem.id ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
               </button>
+              </div>
             </div>
             {renderMultiAnglePanel()}
             {selectedInlineEditError && (

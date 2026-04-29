@@ -131,6 +131,12 @@ export interface ChatImageResultCard {
   description?: string;
 }
 
+export interface ActiveImageTaskInfo {
+  key: string;
+  startedAt: number;
+  label: string;
+}
+
 export interface ExternalSkillSummary {
   id: string;
   name: string;

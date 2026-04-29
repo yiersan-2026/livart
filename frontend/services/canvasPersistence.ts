@@ -56,11 +56,9 @@ interface PersistedCanvasImageValue {
 }
 
 let currentCanvasId: string | null = null;
-const dataUrlUploadCache = new Map<string, Promise<AssetResponse>>();
 
 export const resetCanvasPersistenceSession = () => {
   currentCanvasId = null;
-  dataUrlUploadCache.clear();
 };
 
 const isDataImageUrl = (value: unknown): value is string => {
@@ -114,32 +112,23 @@ const getExtensionFromMime = (mimeType: string) => {
 };
 
 const uploadDataImage = async (dataUrl: string, filenameSeed: string) => {
-  const cached = dataUrlUploadCache.get(dataUrl);
-  if (cached) return cached;
+  const blob = await fetch(dataUrl).then(response => response.blob());
+  const filename = `${filenameSeed}${getExtensionFromMime(blob.type || 'image/png')}`;
+  const file = new File([blob], filename, { type: blob.type || 'image/png' });
+  const formData = new FormData();
+  formData.append('file', file);
+  if (currentCanvasId) {
+    formData.append('canvasId', currentCanvasId);
+  }
 
-  const uploadPromise = (async () => {
-    const blob = await fetch(dataUrl).then(response => response.blob());
-    const filename = `${filenameSeed}${getExtensionFromMime(blob.type || 'image/png')}`;
-    const file = new File([blob], filename, { type: blob.type || 'image/png' });
-    const formData = new FormData();
-    formData.append('file', file);
-    if (currentCanvasId) {
-      formData.append('canvasId', currentCanvasId);
-    }
-
-    const response = await fetch('/api/assets', {
-      method: 'POST',
-      headers: {
-        ...authHeaders()
-      },
-      body: formData
-    });
-    const asset = await unwrapApiResponse<AssetResponse>(response);
-    return asset;
-  })();
-
-  dataUrlUploadCache.set(dataUrl, uploadPromise);
-  return uploadPromise;
+  const response = await fetch('/api/assets', {
+    method: 'POST',
+    headers: {
+      ...authHeaders()
+    },
+    body: formData
+  });
+  return unwrapApiResponse<AssetResponse>(response);
 };
 
 const persistRawImageValue = async (value: string | undefined, filenameSeed: string) => {
