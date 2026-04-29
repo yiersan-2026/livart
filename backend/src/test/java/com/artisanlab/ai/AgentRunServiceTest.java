@@ -263,6 +263,45 @@ class AgentRunServiceTest {
         verify(aiProxyService).createImageEditJobFromAgent(eq(userId), any());
     }
 
+    @Test
+    void viewChangePromptKeepsSubjectPoseAndGazeFixedInScene() throws IOException {
+        AgentPlannerService plannerService = mock(AgentPlannerService.class);
+        AiProxyService aiProxyService = mock(AiProxyService.class);
+        ImageJobEventBroadcaster eventBroadcaster = mock(ImageJobEventBroadcaster.class);
+        ExternalSkillService externalSkillService = mock(ExternalSkillService.class);
+        when(externalSkillService.requirePromptGuidance(any())).thenReturn("");
+        AgentRunService service = new AgentRunService(plannerService, aiProxyService, eventBroadcaster, externalSkillService);
+        UUID userId = UUID.randomUUID();
+        UUID assetId = UUID.randomUUID();
+        AiProxyDtos.AgentRunRequest request = new AiProxyDtos.AgentRunRequest(
+                "相机移动到原图左侧 45 度，从左侧看向固定不动的完整场景",
+                "base",
+                "auto",
+                "",
+                List.of(new AiProxyDtos.ImageReferenceCandidate("base", "人物车内图", 1, 512, 768, assetId.toString())),
+                "",
+                "tool.image.change-view",
+                "",
+                "run-view-change"
+        );
+        AiProxyDtos.AgentPlanResponse plan = executePlan("image-edit", "view-change", 1, "base", List.of(), "auto");
+
+        when(plannerService.createForcedToolPlan(any(), eq("tool.image.change-view"))).thenReturn(plan);
+        when(aiProxyService.createImageEditJobFromAgent(eq(userId), any())).thenReturn(job("view-change-job"));
+
+        service.run(userId, request);
+
+        ArgumentCaptor<AiProxyService.AgentImageEditJobRequest> captor = ArgumentCaptor.forClass(AiProxyService.AgentImageEditJobRequest.class);
+        verify(aiProxyService).createImageEditJobFromAgent(eq(userId), captor.capture());
+        AiProxyService.AgentImageEditJobRequest jobRequest = captor.getValue();
+        assertThat(jobRequest.prompt()).contains(
+                "画面中所有可见元素",
+                "保持原先的身体姿态、头部朝向和眼神方向",
+                "不要让角色重新转头、转身或看向新镜头",
+                "相机位置发生变化"
+        ).doesNotContain("前景主体");
+    }
+
     private static AiProxyDtos.AgentPlanResponse executePlan(
             String taskType,
             String mode,

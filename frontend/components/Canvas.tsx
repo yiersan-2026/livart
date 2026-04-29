@@ -479,12 +479,29 @@ const getMultiAngleZoomOption = (value: number) => (
 );
 
 const getMultiAngleModeLabel = (mode: MultiAngleMode) => (
-  mode === 'subject' ? '画面转向' : '观察视角'
+  mode === 'subject' ? '整图视角' : '观察视角'
 );
 
 const getMultiAngleSummary = (state: MultiAngleState) => {
   const zoomLabel = getMultiAngleZoomOption(state.zoom).label;
   return `${getMultiAngleModeLabel(state.mode)} 方位 ${state.rotation}°，俯仰 ${state.tilt}°，${zoomLabel}`;
+};
+
+const getMultiAngleViewDirectionInstruction = (state: MultiAngleState) => {
+  const rotationMagnitude = Math.abs(state.rotation);
+  const horizontalInstruction = state.rotation < 0
+    ? `相机移动到原图左侧 ${rotationMagnitude} 度，从左侧看向固定不动的完整场景；结果必须能看到人物、车辆、家具、建筑、地面结构和所有可见物体的左侧面，右侧面相对减少或被遮挡。`
+    : state.rotation > 0
+      ? `相机移动到原图右侧 ${rotationMagnitude} 度，从右侧看向固定不动的完整场景；结果必须能看到人物、车辆、家具、建筑、地面结构和所有可见物体的右侧面，左侧面相对减少或被遮挡。`
+      : '相机保持在原图正前方，不做左右侧向移动，所有物体仍保持正面视角。';
+  const tiltMagnitude = Math.abs(state.tilt);
+  const verticalInstruction = state.tilt > 0
+    ? `相机升高 ${tiltMagnitude} 度，从更高位置俯看完整场景，所有物体的顶部、遮挡关系、投影和反射都要符合俯视透视。`
+    : state.tilt < 0
+      ? `相机降低 ${tiltMagnitude} 度，从更低位置仰看完整场景，所有物体的底部、遮挡关系、投影和反射都要符合仰视透视。`
+      : '相机高度保持原图水平视线，不做上下俯仰变化。';
+
+  return `${horizontalInstruction}\n${verticalInstruction}`;
 };
 
 const buildMultiAnglePrompt = (item: CanvasItem, state: MultiAngleState) => {
@@ -496,12 +513,15 @@ const buildMultiAnglePrompt = (item: CanvasItem, state: MultiAngleState) => {
     `最终 3D 球面观察点停留位置：方位角 ${state.rotation} 度，俯仰角 ${state.tilt} 度`,
     `观察轨道范围：左右各 90 度，上方最高 60 度，下方最低 -30 度；当前数值表示用户把观察点拖到受限球面上的最终位置`,
     `镜头缩放：${zoomLabel}`,
+    getMultiAngleViewDirectionInstruction(state),
     state.mode === 'subject'
-      ? '请理解为整张原图所在的三维场景相对镜头转向，人物、物体、车辆、地面、建筑、背景和光影都要随同一视角统一变化，不是只旋转或重绘主角。'
-      : '请理解为观察点沿包围整张图片内容的球面轨道移动，观察点停在当前球面坐标后看向完整画面中心，生成整个场景的新视角，不是只围绕人物或单个主体。'
+      ? '请理解为相机围绕固定不动的整张原图三维场景移动，不是把人物、物体或背景单独旋转，也不是围绕某个局部焦点重绘。'
+      : '请理解为观察点沿包围整张图片内容的球面轨道移动，观察点停在当前球面坐标后看向完整画面中心，生成整个场景的新视角，不是只围绕人物或单个物体。'
     ,
-    '把原图当作一个完整场景处理：前景主体、背景、道具、地面/室内结构、车辆、建筑、光源、阴影和反射必须保持相对位置关系，并按照新的镜头角度产生一致透视变化。',
-    '保持原图完整内容、主体身份、结构比例、材质、颜色、服装/外观、背景风格、光影和画幅比例一致；只改变整张图的视角和透视，不要添加白边、相框、说明文字或无关新物体。'
+    '把原图当作一个完整、固定的三维场景处理：画面中所有可见元素，包括人物、动物、商品、车辆、家具、道具、背景、地面/室内结构、建筑、光源、阴影和反射，都必须保持相对位置关系，并按照同一个新相机位姿产生一致透视变化。',
+    '人物、动物或角色必须保持原先的身体姿态、头部朝向、表情、动作和眼神方向；不要让角色重新转头、转身或看向新镜头。即使原图角色正对原始镜头，新视角也只是从侧面观察这个固定姿态，不能让角色追随新相机。',
+    '不要只改变人物、商品、车辆或单个物体；不要让背景、地面、桌面、车轮、车门、墙面等仍停留在原视角；不要做左右镜像翻转。',
+    '保持原图完整内容、各主要元素身份、结构比例、材质、颜色、服装/外观、背景风格、光影和画幅比例一致；只改变整张图的拍摄视角和透视，不要添加白边、相框、说明文字或无关新物体。'
   ].join('\n');
 };
 
@@ -3152,22 +3172,6 @@ const Canvas: React.FC<CanvasProps> = ({
           </button>
         </div>
 
-        <div className="mb-3 grid grid-cols-2 rounded-full bg-white/70 p-1 text-xs font-black">
-          {(['subject', 'camera'] as MultiAngleMode[]).map(mode => (
-            <button
-              key={mode}
-              type="button"
-              onClick={() => updateMultiAngleState({ mode })}
-              className={`flex h-9 items-center justify-center gap-1.5 rounded-full transition-all ${
-                multiAngleState.mode === mode ? 'bg-zinc-950 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-950'
-              }`}
-            >
-              {mode === 'subject' ? <Box size={14} /> : <Eye size={14} />}
-              {mode === 'subject' ? '画面' : '眼睛'}
-            </button>
-          ))}
-        </div>
-
         <div
           className="relative mb-4 flex h-56 cursor-grab items-center justify-center overflow-hidden rounded-[20px] bg-[#f3f1ea] active:cursor-grabbing"
           onMouseDown={(event) => {
@@ -3180,7 +3184,7 @@ const Canvas: React.FC<CanvasProps> = ({
               startTilt: multiAngleState.tilt
             });
           }}
-          title={multiAngleState.mode === 'camera' ? '拖动外层球面调整眼睛观察位置' : '拖动整张图片内容调整画面转向'}
+          title={multiAngleState.mode === 'camera' ? '拖动外层球面调整眼睛观察位置' : '拖动相机方位改变整图视角'}
         >
           <div className="absolute inset-0 opacity-90 [background-image:radial-gradient(circle_at_50%_26%,rgba(255,255,255,0.98),rgba(255,255,255,0)_34%),linear-gradient(180deg,rgba(255,255,255,0.72),rgba(232,229,219,0.72))]" />
           <div className="absolute bottom-8 h-9 w-40 rounded-[50%] bg-zinc-950/8 blur-md" />
@@ -3209,7 +3213,7 @@ const Canvas: React.FC<CanvasProps> = ({
                 <div className="absolute left-1/2 top-1/2 flex items-center justify-center rounded-md border border-zinc-300 bg-zinc-50 text-xs font-black text-zinc-400" style={{ width: 76, height: subjectDepth * 2, transform: 'translate(-50%, -50%) rotateX(-90deg) translateZ(38px)' }}>B</div>
               </div>
               <div className="absolute bottom-1 left-1/2 -translate-x-1/2 rounded-full bg-white/80 px-2 py-0.5 text-[10px] font-black text-zinc-600">
-                旋转画面
+                整图视角
               </div>
             </div>
           ) : (
