@@ -9,8 +9,9 @@ import {
   Copy, Layers, Scissors, Check, X,
   Palette, Maximize2, Wand2,
   Download, Send, AlignLeft, AlignCenter, AlignRight, SlidersHorizontal,
-  Box, Eye, RefreshCw, Rotate3D, RotateCcw, RotateCw
+  Box, Eye, RefreshCw, Rotate3D, RotateCcw, RotateCw, Share2
 } from 'lucide-react';
+import { QRCodeCanvas } from 'qrcode.react';
 import { getImageJobQueueMessage, type ImageGenerationResult, type ImageJobStatus, waitForImageJob } from '../services/gemini';
 import {
   centerFrameOnRect,
@@ -34,6 +35,7 @@ import { ensureCanvasImageAsset, getCanvasItemAssetId, rotateCanvasImageAsset } 
 import { formatExecutionDuration } from '../services/taskTiming';
 import { buildImageResultDescription, generateImageTitleFromPrompt, getCanvasItemDisplayTitle } from '../services/imageTitle';
 import { getApiConfig, getImageModelDisplayName } from '../services/config';
+import { buildLivartImageSharePageUrl, LIVART_SHARE_PROMOTION_TEXT } from '../services/shareLinks';
 import ThreeEyes from './ThreeEyes';
 
 interface CanvasProps {
@@ -510,6 +512,16 @@ const MULTI_ANGLE_GAZE_LOCK_INSTRUCTION = [
   '禁止 looking at viewer、looking at new camera、direct eye contact with the new camera、subject turns head toward the new camera。'
 ].join('');
 
+const getMultiAngleFramingInstruction = (state: MultiAngleState) => {
+  if (state.zoom <= 0) {
+    return '镜头景别要求：用户选择远景时，可以在保持原图主次关系的前提下适度拉远；但不能无限扩大视野，不能把主体缩到很小，也不要额外生成大量原图外背景。';
+  }
+  if (state.zoom >= 2) {
+    return '镜头景别要求：用户选择特写时，结果必须比原图略微更近或至少保持原图特写景别；禁止拉远镜头，禁止扩大视野，禁止把特写变成近景、中景或远景。';
+  }
+  return '镜头景别锁定：严格保持原图镜头焦段、FOV 视野范围、主体占画面比例、裁切边界、景深和背景可见范围；只改变相机方位/俯仰导致的透视，不改变镜头远近。禁止扩大视野，禁止露出比原图更多的背景，禁止把特写变成近景、中景或远景。';
+};
+
 const buildMultiAnglePrompt = (item: CanvasItem, state: MultiAngleState) => {
   const zoomLabel = getMultiAngleZoomOption(state.zoom).label;
   return [
@@ -519,6 +531,7 @@ const buildMultiAnglePrompt = (item: CanvasItem, state: MultiAngleState) => {
     `最终 3D 球面观察点停留位置：方位角 ${state.rotation} 度，俯仰角 ${state.tilt} 度`,
     `观察轨道范围：左右各 90 度，上方最高 60 度，下方最低 -30 度；当前数值表示用户把观察点拖到受限球面上的最终位置`,
     `镜头缩放：${zoomLabel}`,
+    getMultiAngleFramingInstruction(state),
     getMultiAngleViewDirectionInstruction(state),
     state.mode === 'subject'
       ? '请理解为相机围绕固定不动的整张原图三维场景移动，不是把人物、物体或背景单独旋转，也不是围绕某个局部焦点重绘。'
@@ -528,7 +541,7 @@ const buildMultiAnglePrompt = (item: CanvasItem, state: MultiAngleState) => {
     '人物、动物或角色必须保持原先的身体姿态、头部朝向、表情、动作和眼神方向；不要让角色重新转头、转身或看向新镜头。即使原图角色正对原始镜头，新视角也只是从侧面观察这个固定姿态，不能让角色追随新相机。',
     MULTI_ANGLE_GAZE_LOCK_INSTRUCTION,
     '不要只改变人物、商品、车辆或单个物体；不要让背景、地面、桌面、车轮、车门、墙面等仍停留在原视角；不要做左右镜像翻转。',
-    '保持原图完整内容、各主要元素身份、结构比例、材质、颜色、服装/外观、背景风格、光影和画幅比例一致；只改变整张图的拍摄视角和透视，不要添加白边、相框、说明文字或无关新物体。'
+    '保持原图完整内容、各主要元素身份、结构比例、材质、颜色、服装/外观、背景风格、光影、画幅比例和原始景别一致；只改变整张图的拍摄视角和透视，不要添加白边、相框、说明文字或无关新物体。'
   ].join('\n');
 };
 
@@ -1035,6 +1048,101 @@ const triggerBrowserDownload = (href: string, filename: string) => {
   link.remove();
 };
 
+const toAbsoluteImageShareUrl = (source: string) => {
+  if (!source || source.startsWith('data:')) return '';
+  try {
+    return new URL(source, window.location.origin).toString();
+  } catch {
+    return '';
+  }
+};
+
+const getImageShareUrl = (item: CanvasItem) => (
+  toAbsoluteImageShareUrl(getOriginalImageSrc(item) || getLargestCanvasImageSrc(item) || getCanvasImageSrc(item))
+);
+
+const buildImageShareTitle = (item: CanvasItem) => `${getCanvasItemDisplayTitle(item)} - livart`;
+
+const buildImageShareMessage = (item: CanvasItem) => `${buildImageShareTitle(item)}\n${LIVART_SHARE_PROMOTION_TEXT}`;
+
+const buildImageSharePageUrl = (item: CanvasItem, imageUrl: string) => buildLivartImageSharePageUrl({
+  imageUrl,
+  title: buildImageShareTitle(item)
+});
+
+const buildImageShareClipboardText = (item: CanvasItem, pageUrl: string) => `${buildImageShareMessage(item)}\n${pageUrl}`;
+
+type WeChatShareScene = 'friend' | 'timeline';
+
+const buildShareQuery = (params: Record<string, string>) => (
+  new URLSearchParams(
+    Object.entries(params).filter(([, value]) => value.trim().length > 0)
+  ).toString()
+);
+
+const buildWeiboShareUrl = (shareUrl: string, title: string, imageUrl: string) => (
+  `https://service.weibo.com/share/share.php?${buildShareQuery({
+    url: shareUrl,
+    title,
+    pic: imageUrl
+  })}`
+);
+
+const openExternalShareWindow = (url: string) => {
+  window.open(url, '_blank', 'noopener,noreferrer,width=720,height=640');
+};
+
+const isMobileShareClient = () => (
+  /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || window.innerWidth <= 768
+);
+
+const isWeChatBrowser = () => /MicroMessenger/i.test(navigator.userAgent);
+
+const getWeChatShareSceneLabel = (scene: WeChatShareScene) => (
+  scene === 'timeline' ? '朋友圈' : '微信好友'
+);
+
+const copyTextToClipboard = async (text: string) => {
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand('copy');
+  textarea.remove();
+  if (!copied) throw new Error('复制链接失败');
+};
+
+const shareItemClassName = 'flex h-[58px] flex-col items-center justify-center gap-1 rounded-xl p-1.5 text-[10px] font-black text-zinc-500 transition-colors hover:bg-zinc-50';
+
+const CustomShareButton: React.FC<{
+  label: string;
+  badge: string;
+  badgeClassName: string;
+  title: string;
+  onClick: () => void;
+}> = ({ label, badge, badgeClassName, title, onClick }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    className={shareItemClassName}
+    title={title}
+    aria-label={title}
+  >
+    <span className={`flex h-[30px] w-[30px] items-center justify-center rounded-full text-[10px] font-black text-white ${badgeClassName}`}>
+      {badge}
+    </span>
+    <span>{label}</span>
+  </button>
+);
+
 const ImageGenerationSkeleton: React.FC<{ hasPreview: boolean }> = ({ hasPreview }) => (
   <div className={`image-generation-skeleton absolute inset-0 h-full w-full overflow-hidden ${hasPreview ? 'bg-white/72 backdrop-blur-[2px]' : 'bg-zinc-100'}`}>
     <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(244,244,245,0.92)_0%,rgba(228,228,231,0.9)_42%,rgba(250,250,250,0.95)_100%)]" />
@@ -1082,6 +1190,9 @@ const Canvas: React.FC<CanvasProps> = ({
   const [cropRect, setCropRect] = useState<CropRect | null>(null);
   const [cropDragState, setCropDragState] = useState<CropDragState | null>(null);
   const [downloadingImageId, setDownloadingImageId] = useState<string | null>(null);
+  const [shareMenuItemId, setShareMenuItemId] = useState<string | null>(null);
+  const [shareCopyNotice, setShareCopyNotice] = useState('');
+  const [wechatShareScene, setWechatShareScene] = useState<WeChatShareScene | null>(null);
   const [rotatingImageId, setRotatingImageId] = useState<string | null>(null);
   const [rotateMenuItemId, setRotateMenuItemId] = useState<string | null>(null);
   const [pendingRotation, setPendingRotation] = useState<PendingImageRotation | null>(null);
@@ -1112,6 +1223,13 @@ const Canvas: React.FC<CanvasProps> = ({
   const selectedItemIsMultiAngleEditing = selectedItem?.type === 'image' && selectedItem.id === multiAngleState?.itemId;
   const selectedItemIsCrop = selectedItem?.type === 'image' && selectedItem.id === cropItemId;
   const selectedItemIsRotateMenuOpen = selectedItem?.type === 'image' && selectedItem.id === rotateMenuItemId;
+  const selectedItemIsShareMenuOpen = selectedItem?.type === 'image' && selectedItem.id === shareMenuItemId;
+  const selectedImageShareUrl = selectedItem?.type === 'image' ? getImageShareUrl(selectedItem) : '';
+  const selectedImageShareTitle = selectedItem?.type === 'image' ? buildImageShareTitle(selectedItem) : 'livart 图片';
+  const selectedImageShareMessage = selectedItem?.type === 'image' ? buildImageShareMessage(selectedItem) : LIVART_SHARE_PROMOTION_TEXT;
+  const selectedImageSharePageUrl = selectedItem?.type === 'image' && selectedImageShareUrl
+    ? buildImageSharePageUrl(selectedItem, selectedImageShareUrl)
+    : '';
   const selectedItemPendingRotationQuarterTurns = selectedItemIsRotateMenuOpen && pendingRotation?.itemId === selectedItem?.id
     ? normalizeImageQuarterTurns(pendingRotation.quarterTurns)
     : 0;
@@ -1416,6 +1534,13 @@ const Canvas: React.FC<CanvasProps> = ({
     setPendingRotation(null);
   }, [rotateMenuItemId, selectedIds]);
 
+  useEffect(() => {
+    if (!shareMenuItemId || selectedIds.includes(shareMenuItemId)) return;
+    setShareMenuItemId(null);
+    setShareCopyNotice('');
+    setWechatShareScene(null);
+  }, [shareMenuItemId, selectedIds]);
+
   useLayoutEffect(() => {
     if (!selectedItemIsRotateMenuOpen) {
       setRotateMenuOffsetLeft(null);
@@ -1682,6 +1807,9 @@ const Canvas: React.FC<CanvasProps> = ({
     setCropDragState(null);
     setRotateMenuItemId(null);
     setPendingRotation(null);
+    setShareMenuItemId(null);
+    setShareCopyNotice('');
+    setWechatShareScene(null);
     setActiveTool('select');
   };
 
@@ -1776,6 +1904,9 @@ const Canvas: React.FC<CanvasProps> = ({
     setMultiAngleState(null);
     setMultiAngleDragState(null);
     setRotateMenuItemId(null);
+    setShareMenuItemId(null);
+    setShareCopyNotice('');
+    setWechatShareScene(null);
     if (cropItemId === item.id) {
       resetImageToolModes();
       return;
@@ -1795,6 +1926,9 @@ const Canvas: React.FC<CanvasProps> = ({
     setMultiAngleState(null);
     setMultiAngleDragState(null);
     setRotateMenuItemId(null);
+    setShareMenuItemId(null);
+    setShareCopyNotice('');
+    setWechatShareScene(null);
     onCanvasToolChange('select');
     setCropItemId(null);
     setCropRect(null);
@@ -1810,6 +1944,9 @@ const Canvas: React.FC<CanvasProps> = ({
     setMultiAngleState(null);
     setMultiAngleDragState(null);
     setRotateMenuItemId(null);
+    setShareMenuItemId(null);
+    setShareCopyNotice('');
+    setWechatShareScene(null);
     onCanvasToolChange('select');
     setCropItemId(null);
     setCropRect(null);
@@ -1893,6 +2030,88 @@ const Canvas: React.FC<CanvasProps> = ({
     clearInlineEditError(item.id);
     setRotateMenuItemId(isOpening ? item.id : null);
     setPendingRotation(null);
+  };
+
+  const toggleShareMenu = (item: CanvasItem) => {
+    if (item.type !== 'image' || item.status !== 'completed' || !getImageShareUrl(item)) return;
+
+    const isOpening = shareMenuItemId !== item.id;
+    resetImageToolModes();
+    setQuickEditItemId(null);
+    clearInlineEditError(item.id);
+    setShareCopyNotice('');
+    setWechatShareScene(null);
+    setShareMenuItemId(isOpening ? item.id : null);
+  };
+
+  const handleCopyImageShareLink = async (item: CanvasItem, copiedNotice = '图片链接已复制') => {
+    const shareUrl = getImageShareUrl(item);
+    if (!shareUrl) {
+      setInlineEditErrors(prev => ({ ...prev, [item.id]: '这张图片还没有可分享链接，请先等待上传或生成完成。' }));
+      return;
+    }
+
+    try {
+      await copyTextToClipboard(buildImageShareClipboardText(item, buildImageSharePageUrl(item, shareUrl)));
+      clearInlineEditError(item.id);
+      setShareCopyNotice(copiedNotice);
+      window.setTimeout(() => {
+        setShareCopyNotice(currentNotice => currentNotice === copiedNotice ? '' : currentNotice);
+      }, 1800);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '复制链接失败';
+      setInlineEditErrors(prev => ({ ...prev, [item.id]: message }));
+      setShareCopyNotice('');
+    }
+  };
+
+  const handleNativeImageShare = async (item: CanvasItem, fallbackNotice = '分享文案已复制') => {
+    const shareUrl = getImageShareUrl(item);
+    if (!shareUrl) {
+      setInlineEditErrors(prev => ({ ...prev, [item.id]: '这张图片还没有可分享链接，请先等待上传或生成完成。' }));
+      return false;
+    }
+
+    if (navigator.share) {
+      try {
+        const pageUrl = buildImageSharePageUrl(item, shareUrl);
+        await navigator.share({
+          title: buildImageShareTitle(item),
+          text: LIVART_SHARE_PROMOTION_TEXT,
+          url: pageUrl
+        });
+        setShareCopyNotice('已打开微信分享');
+        window.setTimeout(() => {
+          setShareCopyNotice(currentNotice => currentNotice === '已打开微信分享' ? '' : currentNotice);
+        }, 1800);
+        return true;
+      } catch (error) {
+        const errorName = error instanceof Error ? error.name : '';
+        if (errorName === 'AbortError' || errorName === 'NotAllowedError') return false;
+      }
+    }
+
+    await handleCopyImageShareLink(item, fallbackNotice);
+    return false;
+  };
+
+  const handleWechatImageShare = async (item: CanvasItem, scene: WeChatShareScene) => {
+    setWechatShareScene(scene);
+
+    if (isWeChatBrowser()) {
+      await handleCopyImageShareLink(item, `已复制，请点右上角分享到${getWeChatShareSceneLabel(scene)}`);
+      return;
+    }
+
+    if (isMobileShareClient()) {
+      const shared = await handleNativeImageShare(item, `已复制，可粘贴到${getWeChatShareSceneLabel(scene)}`);
+      if (!shared) {
+        window.location.href = 'weixin://';
+      }
+      return;
+    }
+
+    setShareCopyNotice('');
   };
 
   const handleApplyMultiAngle = (item: CanvasItem) => {
@@ -4200,7 +4419,94 @@ const Canvas: React.FC<CanvasProps> = ({
                   </button>
                 </div>
               )}
-              <div ref={imageToolbarRef} className="relative h-11 w-max overflow-hidden rounded-[14px] border border-zinc-200 bg-white pr-11 shadow-[0_14px_40px_-26px_rgba(0,0,0,0.5)]">
+              {selectedItemIsShareMenuOpen && selectedImageShareUrl && selectedImageSharePageUrl && (
+                <div className="absolute bottom-full right-0 z-[2000001] mb-2 w-[25rem] max-w-[calc(100vw-2rem)] rounded-2xl border border-zinc-200 bg-white p-3 shadow-[0_24px_80px_-36px_rgba(0,0,0,0.55)]">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-xs font-black text-zinc-900">分享图片</div>
+                      <div className="mt-0.5 truncate text-[10px] font-bold text-zinc-400">{selectedImageShareTitle}</div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShareMenuItemId(null);
+                        setShareCopyNotice('');
+                        setWechatShareScene(null);
+                      }}
+                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-zinc-400 transition-colors hover:bg-zinc-50 hover:text-zinc-900"
+                      title="关闭分享"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                  <div className="mb-3 rounded-xl bg-zinc-50 px-3 py-2 text-[11px] font-bold leading-5 text-zinc-600">
+                    {LIVART_SHARE_PROMOTION_TEXT}
+                  </div>
+                  <div className="mb-1 text-[10px] font-black text-zinc-400">微信 / 微博</div>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    <CustomShareButton
+                      label="微信好友"
+                      badge="友"
+                      badgeClassName="bg-[#07c160]"
+                      title="分享到微信好友"
+                      onClick={() => void handleWechatImageShare(selectedItem, 'friend')}
+                    />
+                    <CustomShareButton
+                      label="朋友圈"
+                      badge="圈"
+                      badgeClassName="bg-[#10b981]"
+                      title="分享到朋友圈"
+                      onClick={() => void handleWechatImageShare(selectedItem, 'timeline')}
+                    />
+                    <CustomShareButton
+                      label="微博"
+                      badge="博"
+                      badgeClassName="bg-[#e6162d]"
+                      title="分享到微博"
+                      onClick={() => openExternalShareWindow(buildWeiboShareUrl(selectedImageSharePageUrl, selectedImageShareMessage, selectedImageShareUrl))}
+                    />
+                  </div>
+                  {wechatShareScene && (
+                    <div className="mt-3 rounded-2xl border border-emerald-100 bg-emerald-50/70 p-3">
+                      <div className="flex items-start gap-3">
+                        <div className="rounded-xl bg-white p-2">
+                          <QRCodeCanvas value={selectedImageSharePageUrl} size={118} includeMargin />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs font-black text-emerald-900">
+                            微信扫一扫：分享到{getWeChatShareSceneLabel(wechatShareScene)}
+                          </div>
+                          <div className="mt-1 text-[11px] font-bold leading-5 text-emerald-700">
+                            {isWeChatBrowser()
+                              ? `当前已在微信内，已复制分享文案；请点击右上角“…”分享到${getWeChatShareSceneLabel(wechatShareScene)}。`
+                              : `手机微信扫码打开图片后，点击右上角“…”分享到${getWeChatShareSceneLabel(wechatShareScene)}。`}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => void handleCopyImageShareLink(selectedItem, `已复制，可粘贴到${getWeChatShareSceneLabel(wechatShareScene)}`)}
+                            className="mt-2 inline-flex h-7 items-center gap-1.5 rounded-lg bg-emerald-600 px-2.5 text-[10px] font-black text-white transition-colors hover:bg-emerald-500"
+                          >
+                            <Copy size={12} />
+                            复制文案
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyImageShareLink(selectedItem)}
+                    className="mt-3 flex h-9 w-full items-center justify-center gap-2 rounded-xl bg-zinc-900 px-3 text-xs font-black text-white transition-colors hover:bg-zinc-800 active:scale-[0.99]"
+                  >
+                    <Copy size={14} />
+                    {shareCopyNotice || '复制分享文案'}
+                  </button>
+                  <div className="mt-2 text-[10px] font-medium leading-4 text-zinc-400">
+                    PC 端微信按 social-share 的二维码方案处理；移动端会尝试唤起微信分享，失败时复制文案。
+                  </div>
+                </div>
+              )}
+              <div ref={imageToolbarRef} className="relative h-11 w-max overflow-hidden rounded-[14px] border border-zinc-200 bg-white pr-[88px] shadow-[0_14px_40px_-26px_rgba(0,0,0,0.5)]">
               <div className="flex h-full items-center pr-2">
                 <button
                   type="button"
@@ -4346,6 +4652,19 @@ const Canvas: React.FC<CanvasProps> = ({
                   </>
                 )}
               </div>
+              <button
+                type="button"
+                onClick={() => toggleShareMenu(selectedItem)}
+                disabled={!selectedImageShareUrl || selectedItem.status !== 'completed'}
+                className={`absolute right-11 top-0 flex h-11 w-11 items-center justify-center border-l border-zinc-100 text-xs font-bold transition-colors active:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-35 ${
+                  selectedItemIsShareMenuOpen
+                    ? 'bg-zinc-100 text-zinc-950'
+                    : 'text-zinc-700 hover:bg-zinc-50 hover:text-zinc-950'
+                }`}
+                title={selectedImageShareUrl ? '分享当前选中的图片' : '这张图片还没有可分享链接'}
+              >
+                <Share2 size={15} />
+              </button>
               <button
                 type="button"
                 onClick={() => handleDownloadSelectedImage(selectedItem)}

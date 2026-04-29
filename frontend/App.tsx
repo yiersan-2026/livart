@@ -2581,7 +2581,7 @@ function App() {
 
   return (
     <div className="flex h-screen bg-[#fcfcfc] overflow-hidden font-sans text-gray-900">
-      <div className="flex-1 relative flex flex-col">
+      <div className="relative hidden flex-1 flex-col md:flex">
         <div className="absolute left-4 top-4 z-30 flex items-center gap-2">
           <div className="flex items-center gap-1.5 rounded-2xl border border-gray-100 bg-white/90 p-1 shadow-[0_18px_48px_-28px_rgba(0,0,0,0.35)] backdrop-blur-2xl">
             <button
@@ -2813,7 +2813,7 @@ function App() {
         />
       </div>
 
-      <div className={`transition-all duration-300 ease-in-out ${showSidebar ? 'w-96 opacity-100 translate-x-0' : 'w-0 opacity-0 translate-x-full overflow-hidden'}`}>
+      <div className={`h-full w-full shrink-0 opacity-100 translate-x-0 transition-all duration-300 ease-in-out ${showSidebar ? 'md:w-96 md:opacity-100 md:translate-x-0' : 'md:w-0 md:opacity-0 md:translate-x-full md:overflow-hidden'}`}>
         <Sidebar
           messages={messages}
           isThinking={isThinking}

@@ -36,7 +36,23 @@ class AiProxyServicePromptOptimizerTest {
         assertThat(guardedPrompt).contains(
                 "不应继续直视当前画面",
                 "角色视线仍指向原始相机位置",
-                "direct eye contact with the new camera"
+                "direct eye contact with the new camera",
+                "保持原图镜头焦段",
+                "禁止扩大视野",
+                "禁止把特写变成近景、中景或远景"
+        );
+    }
+
+    @Test
+    void appendsViewChangeFramingLockEvenWhenOptimizerAlreadyContainsGazeLock() {
+        String guardedPrompt = AiProxyService.appendViewChangeGazeConstraints(
+                "以原图为完整三维场景，将观察点移动到右侧 60 度，禁止 direct eye contact with the new camera。"
+        );
+
+        assertThat(guardedPrompt).contains(
+                "direct eye contact with the new camera",
+                "禁止扩大视野",
+                "主体占画面比例"
         );
     }
 }

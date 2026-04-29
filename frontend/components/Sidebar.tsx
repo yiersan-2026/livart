@@ -48,6 +48,9 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
   const [inputValue, setInputValue] = React.useState('');
   const [selectedAspectRatio, setSelectedAspectRatio] = React.useState<ImageAspectRatio>('auto');
   const [selectedImageResolution, setSelectedImageResolution] = React.useState<ImageResolution>('2k');
+  const [isMobileLayout, setIsMobileLayout] = React.useState(() => (
+    typeof window !== 'undefined' ? window.matchMedia('(max-width: 767px)').matches : false
+  ));
   const [externalSkills, setExternalSkills] = React.useState<ExternalSkillSummary[]>([]);
   const [selectedExternalSkillId, setSelectedExternalSkillId] = React.useState('');
   const [externalSkillLoadError, setExternalSkillLoadError] = React.useState('');
@@ -100,6 +103,19 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
     [activeTasks]
   );
   const activeTaskCount = sortedActiveTasks.length;
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia('(max-width: 767px)');
+    const handleChange = () => setIsMobileLayout(mediaQuery.matches);
+    handleChange();
+    mediaQuery.addEventListener('change', handleChange);
+    return () => mediaQuery.removeEventListener('change', handleChange);
+  }, []);
+
+  useEffect(() => {
+    if (!isMobileLayout) return;
+    setIsSkillMenuOpen(false);
+  }, [isMobileLayout]);
 
   useEffect(() => {
     setInputValue('');
@@ -357,7 +373,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
       prompt,
       selectedAspectRatio,
       selectedImageResolution,
-      ENABLE_EXTERNAL_SKILLS ? selectedExternalSkillId || undefined : undefined
+      ENABLE_EXTERNAL_SKILLS && !isMobileLayout ? selectedExternalSkillId || undefined : undefined
     );
     setIsAspectRatioMenuOpen(false);
     setIsResolutionMenuOpen(false);
@@ -866,8 +882,8 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
 
   return (
     <>
-      <div className="w-96 bg-white border-l border-gray-200 h-full flex flex-col z-50 overflow-hidden">
-        <div className="p-4 border-b border-gray-50 bg-gray-50/30 flex items-center gap-2">
+      <div className="h-full w-full bg-white flex flex-col z-50 overflow-hidden md:w-96 md:border-l md:border-gray-200">
+        <div className="hidden p-4 border-b border-gray-50 bg-gray-50/30 items-center gap-2 md:flex">
           <LivartLogo size={32} className="shrink-0" />
           <div>
             <h2 className="font-black text-gray-800 tracking-tight">livart 对话</h2>
@@ -875,7 +891,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
           </div>
         </div>
 
-        <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-6 scrollbar-hide">
+        <div ref={scrollRef} className="flex-1 overflow-y-auto p-3 space-y-4 scrollbar-hide md:p-4 md:space-y-6">
           {messages.map((message) => {
             const resultCards = renderImageResultCards(message);
             const isImageResultMessage = !!resultCards;
@@ -946,7 +962,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
           )}
         </div>
 
-        <div className="p-4 bg-white border-t border-gray-100 space-y-3">
+        <div className="p-3 bg-white border-t border-gray-100 space-y-3 md:p-4">
           <form ref={formRef} onSubmit={handleSubmit} className="relative">
             <div className="flex items-end gap-2 w-full pr-2 py-2 pl-3 bg-gray-50 border border-gray-200 rounded-2xl focus-within:ring-4 focus-within:ring-black/5 focus-within:border-black transition-all">
               <ImageMentionEditor
@@ -1086,7 +1102,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
                 )}
               </div>
 
-              <div ref={skillMenuRef} className="relative min-w-0 flex-1">
+              <div ref={skillMenuRef} className="relative hidden min-w-0 flex-1 md:block">
                 <button
                   type="button"
                   disabled={!ENABLE_EXTERNAL_SKILLS}
@@ -1183,7 +1199,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
               </div>
             </div>
             {ENABLE_EXTERNAL_SKILLS && externalSkillLoadError && (
-              <p className="mt-1 px-1 text-[10px] font-medium text-amber-600">{externalSkillLoadError}</p>
+              <p className="mt-1 hidden px-1 text-[10px] font-medium text-amber-600 md:block">{externalSkillLoadError}</p>
             )}
           </form>
         </div>
