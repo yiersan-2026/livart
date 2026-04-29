@@ -28,6 +28,7 @@ class AgentPlannerServiceTest {
                 "img-b",
                 "9:16",
                 "",
+                "",
                 List.of(
                         new AiProxyDtos.ImageReferenceCandidate("img-a", "参考鞋子", 1, 300, 400),
                         new AiProxyDtos.ImageReferenceCandidate("img-b", "主图人物", 2, 512, 768)
@@ -51,6 +52,7 @@ class AgentPlannerServiceTest {
                 "帮我给这张图去背景",
                 "img-main",
                 "auto",
+                "",
                 "",
                 List.of(
                         new AiProxyDtos.ImageReferenceCandidate("img-main", "主体图", 1, 512, 768),
@@ -96,6 +98,7 @@ class AgentPlannerServiceTest {
                 "",
                 "1:1",
                 "",
+                "",
                 List.of()
         );
 
@@ -135,6 +138,7 @@ class AgentPlannerServiceTest {
                 "",
                 "1:1",
                 "",
+                "",
                 List.of()
         );
 
@@ -164,6 +168,7 @@ class AgentPlannerServiceTest {
                 "女生 23岁 178cm 90斤 皮肤白皙 抖音网红脸 晚上 劳斯莱斯 坐在车里 后排 车门打开 看着镜头 白色吊带",
                 "",
                 "9:16",
+                "",
                 "",
                 List.of()
         );
@@ -196,6 +201,7 @@ class AgentPlannerServiceTest {
                 "",
                 "auto",
                 "",
+                "",
                 List.of()
         );
 
@@ -213,6 +219,7 @@ class AgentPlannerServiceTest {
                 "怎么导出项目图片？",
                 "",
                 "auto",
+                "",
                 "",
                 List.of()
         );
@@ -246,6 +253,7 @@ class AgentPlannerServiceTest {
                 "livart 怎么导出图片？",
                 "",
                 "auto",
+                "",
                 "",
                 List.of()
         );
@@ -283,6 +291,7 @@ class AgentPlannerServiceTest {
                 "你是谁",
                 "",
                 "auto",
+                "",
                 "",
                 List.of()
         );
@@ -349,6 +358,7 @@ class AgentPlannerServiceTest {
                 "",
                 "auto",
                 "",
+                "",
                 List.of()
         );
 
@@ -374,6 +384,7 @@ class AgentPlannerServiceTest {
                 "main-image",
                 "auto",
                 "",
+                "",
                 List.of(
                         new AiProxyDtos.ImageReferenceCandidate("main-image", "人物照片", 1, 768, 1024, "11111111-1111-1111-1111-111111111111"),
                         new AiProxyDtos.ImageReferenceCandidate("ref-image", "参考背景", 2, 1024, 768, "22222222-2222-2222-2222-222222222222")
@@ -397,6 +408,7 @@ class AgentPlannerServiceTest {
                 "把圈里的花改成小猫",
                 "base",
                 "auto",
+                "",
                 "local-redraw",
                 List.of(new AiProxyDtos.ImageReferenceCandidate("base", "花园照片", 1, 1024, 1024, "33333333-3333-3333-3333-333333333333"))
         );

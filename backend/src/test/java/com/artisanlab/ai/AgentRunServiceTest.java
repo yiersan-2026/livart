@@ -33,6 +33,7 @@ class AgentRunServiceTest {
                 "",
                 "auto",
                 "",
+                "",
                 List.of(),
                 "",
                 "",
@@ -83,6 +84,7 @@ class AgentRunServiceTest {
                 "生成3张小猫",
                 "",
                 "1:1",
+                "4k",
                 "",
                 List.of(),
                 "",
@@ -93,7 +95,7 @@ class AgentRunServiceTest {
         AiProxyDtos.AgentPlanResponse plan = executePlan("text-to-image", "generate", 3, "", List.of(), "1:1");
 
         when(plannerService.createPlan(eq(userId), any())).thenReturn(plan);
-        when(aiProxyService.createTextToImageJobsFromAgent(eq(userId), eq("生成3张小猫"), eq("1:1"), eq(3), eq("")))
+        when(aiProxyService.createTextToImageJobsFromAgent(eq(userId), eq("生成3张小猫"), eq("1:1"), eq("4k"), eq(3), eq("")))
                 .thenReturn(List.of(job("job-1"), job("job-2"), job("job-3")));
 
         AiProxyDtos.AgentRunResponse response = service.run(userId, request);
@@ -102,7 +104,7 @@ class AgentRunServiceTest {
                 .containsExactly("job-1", "job-2", "job-3");
         assertThat(response.displayTitle()).isEqualTo("小猫图片");
         assertThat(response.displayMessage()).isEqualTo("我开始为你生成 3 张小猫图片。");
-        verify(aiProxyService).createTextToImageJobsFromAgent(eq(userId), eq("生成3张小猫"), eq("1:1"), eq(3), eq(""));
+        verify(aiProxyService).createTextToImageJobsFromAgent(eq(userId), eq("生成3张小猫"), eq("1:1"), eq("4k"), eq(3), eq(""));
         verify(aiProxyService, never()).createTextToImageJobFromAgent(any(), any(), any());
         verify(eventBroadcaster, times(5)).publishAgentRunEvent(eq(userId), eq("run-generate"), any());
     }
@@ -120,6 +122,7 @@ class AgentRunServiceTest {
                 "生成一张中文海报",
                 "",
                 "3:4",
+                "2k",
                 "",
                 List.of(),
                 "",
@@ -134,6 +137,7 @@ class AgentRunServiceTest {
                 eq(userId),
                 eq("生成一张中文海报"),
                 eq("3:4"),
+                eq("2k"),
                 eq(1),
                 eq("外部 Skill：GPT Image 2\nSkill 指南：按 Skill 编译提示词")
         )).thenReturn(List.of(job("skill-job")));
@@ -146,6 +150,7 @@ class AgentRunServiceTest {
                 eq(userId),
                 eq("生成一张中文海报"),
                 eq("3:4"),
+                eq("2k"),
                 eq(1),
                 eq("外部 Skill：GPT Image 2\nSkill 指南：按 Skill 编译提示词")
         );
@@ -166,6 +171,7 @@ class AgentRunServiceTest {
                 "把@shoe 放在@person 的脚上",
                 "person",
                 "auto",
+                "",
                 "",
                 List.of(
                         new AiProxyDtos.ImageReferenceCandidate("person", "人物图", 1, 512, 768, personAssetId.toString()),
@@ -209,6 +215,7 @@ class AgentRunServiceTest {
                 "base",
                 "auto",
                 "",
+                "",
                 List.of(new AiProxyDtos.ImageReferenceCandidate("base", "风景图", 1, 1024, 768, baseAssetId.toString())),
                 "",
                 "",
@@ -244,6 +251,7 @@ class AgentRunServiceTest {
                 "base",
                 "auto",
                 "",
+                "",
                 List.of(new AiProxyDtos.ImageReferenceCandidate("base", "人物图", 1, 512, 768, assetId.toString())),
                 "",
                 "tool.image.remove-background",
@@ -277,6 +285,7 @@ class AgentRunServiceTest {
                 "相机移动到原图左侧 45 度，从左侧看向固定不动的完整场景",
                 "base",
                 "auto",
+                "",
                 "",
                 List.of(new AiProxyDtos.ImageReferenceCandidate("base", "人物车内图", 1, 512, 768, assetId.toString())),
                 "",
