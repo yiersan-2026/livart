@@ -117,21 +117,21 @@ read_remote_jenkins_token() {
 
 jenkins_get() {
   local url="$1"
-  curl -g -fsS --user "$JENKINS_USER:$JENKINS_TOKEN" "$url"
+  curl --http1.1 -g -fsS --user "$JENKINS_USER:$JENKINS_TOKEN" "$url"
 }
 
 jenkins_post() {
   local url="$1"
   local crumb_json crumb_field crumb_value
-  crumb_json="$(curl -fsS --user "$JENKINS_USER:$JENKINS_TOKEN" "$JENKINS_URL/crumbIssuer/api/json" 2>/dev/null || true)"
+  crumb_json="$(curl --http1.1 -fsS --user "$JENKINS_USER:$JENKINS_TOKEN" "$JENKINS_URL/crumbIssuer/api/json" 2>/dev/null || true)"
   if [[ -n "$crumb_json" ]]; then
     crumb_field="$(printf '%s' "$crumb_json" | json_value "crumbRequestField")"
     crumb_value="$(printf '%s' "$crumb_json" | json_value "crumb")"
-    curl -g -fsS --user "$JENKINS_USER:$JENKINS_TOKEN" -H "$crumb_field: $crumb_value" -X POST "$url" >/dev/null
+    curl --http1.1 -g -fsS --user "$JENKINS_USER:$JENKINS_TOKEN" -H "$crumb_field: $crumb_value" -X POST "$url" >/dev/null
     return 0
   fi
 
-  curl -g -fsS --user "$JENKINS_USER:$JENKINS_TOKEN" -X POST "$url" >/dev/null
+  curl --http1.1 -g -fsS --user "$JENKINS_USER:$JENKINS_TOKEN" -X POST "$url" >/dev/null
 }
 
 wait_for_jenkins_build() {
@@ -172,7 +172,7 @@ wait_for_health() {
   started_at="$(date +%s)"
   echo "验证生产健康：$LIVART_HEALTH_URL"
   while true; do
-    if curl -fsS "$LIVART_HEALTH_URL" >/dev/null; then
+    if curl --http1.1 -fsS "$LIVART_HEALTH_URL" >/dev/null; then
       echo "生产健康检查通过"
       return 0
     fi
