@@ -2080,9 +2080,9 @@ const Canvas: React.FC<CanvasProps> = ({
           text: LIVART_SHARE_PROMOTION_TEXT,
           url: pageUrl
         });
-        setShareCopyNotice('已打开微信分享');
+        setShareCopyNotice('已打开系统分享面板');
         window.setTimeout(() => {
-          setShareCopyNotice(currentNotice => currentNotice === '已打开微信分享' ? '' : currentNotice);
+          setShareCopyNotice(currentNotice => currentNotice === '已打开系统分享面板' ? '' : currentNotice);
         }, 1800);
         return true;
       } catch (error) {
@@ -2104,10 +2104,7 @@ const Canvas: React.FC<CanvasProps> = ({
     }
 
     if (isMobileShareClient()) {
-      const shared = await handleNativeImageShare(item, `已复制，可粘贴到${getWeChatShareSceneLabel(scene)}`);
-      if (!shared) {
-        window.location.href = 'weixin://';
-      }
+      await handleNativeImageShare(item, `已复制，可粘贴到${getWeChatShareSceneLabel(scene)}`);
       return;
     }
 
@@ -4502,7 +4499,7 @@ const Canvas: React.FC<CanvasProps> = ({
                     {shareCopyNotice || '复制分享文案'}
                   </button>
                   <div className="mt-2 text-[10px] font-medium leading-4 text-zinc-400">
-                    PC 端微信按 social-share 的二维码方案处理；移动端会尝试唤起微信分享，失败时复制文案。
+                    PC 端微信显示二维码；移动端会打开系统分享面板，失败时复制文案。
                   </div>
                 </div>
               )}

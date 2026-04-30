@@ -74,6 +74,12 @@ const openExternalShareWindow = (url: string) => {
   window.open(url, '_blank', 'noopener,noreferrer,width=720,height=640');
 };
 
+const isMobileShareClient = () => (
+  /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || window.innerWidth <= 768
+);
+
+const isWeChatBrowser = () => /MicroMessenger/i.test(navigator.userAgent);
+
 const getWeChatShareSceneLabel = (scene: ImageSharePanelState['wechatScene']) => (
   scene === 'timeline' ? '朋友圈' : '微信好友'
 );
@@ -331,6 +337,13 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
     `${getImageShareTitle(item, title)}\n${LIVART_SHARE_PROMOTION_TEXT}`
   );
 
+  const showImageShareNotice = (notice: string) => {
+    setImageShareCopyNotice(notice);
+    window.setTimeout(() => {
+      setImageShareCopyNotice(currentNotice => currentNotice === notice ? '' : currentNotice);
+    }, 1800);
+  };
+
   const openImageSharePanel = (
     item: CanvasItem,
     title = getCanvasItemDisplayTitle(item),
@@ -345,18 +358,57 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
     ));
   };
 
-  const copyImageShareText = async (item: CanvasItem, title?: string) => {
+  const copyImageShareText = async (item: CanvasItem, title?: string, copiedNotice = '分享文案已复制') => {
     const pageUrl = getImageSharePageUrl(item, title);
     if (!pageUrl) return;
 
     try {
       await copyTextToClipboard(`${getImageShareText(item, title)}\n${pageUrl}`);
-      setImageShareCopyNotice('分享文案已复制');
-      window.setTimeout(() => {
-        setImageShareCopyNotice(currentNotice => currentNotice === '分享文案已复制' ? '' : currentNotice);
-      }, 1800);
+      showImageShareNotice(copiedNotice);
     } catch (error) {
       setImageShareCopyNotice(error instanceof Error ? error.message : '复制失败');
+    }
+  };
+
+  const nativeShareImage = async (item: CanvasItem, title?: string, fallbackNotice = '已复制，可粘贴到微信') => {
+    const pageUrl = getImageSharePageUrl(item, title);
+    if (!pageUrl) return false;
+
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: getImageShareTitle(item, title),
+          text: LIVART_SHARE_PROMOTION_TEXT,
+          url: pageUrl
+        });
+        showImageShareNotice('已打开系统分享面板');
+        return true;
+      } catch (error) {
+        const errorName = error instanceof Error ? error.name : '';
+        if (errorName === 'AbortError' || errorName === 'NotAllowedError') return false;
+      }
+    }
+
+    await copyImageShareText(item, title, fallbackNotice);
+    return false;
+  };
+
+  const shareImageToWeChat = async (
+    item: CanvasItem,
+    title: string,
+    placement: ImageSharePanelState['placement'],
+    scene: NonNullable<ImageSharePanelState['wechatScene']>
+  ) => {
+    const sharePanelState = { itemId: item.id, title, placement, wechatScene: scene };
+    setImageSharePanel(sharePanelState);
+
+    if (isWeChatBrowser()) {
+      await copyImageShareText(item, title, `已复制，请点右上角分享到${getWeChatShareSceneLabel(scene)}`);
+      return;
+    }
+
+    if (isMobileShareClient()) {
+      await nativeShareImage(item, title, `已复制，可粘贴到${getWeChatShareSceneLabel(scene)}`);
     }
   };
 
@@ -377,6 +429,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
     const pageUrl = getImageSharePageUrl(item, title);
     if (!pageUrl) return null;
     const isViewerPlacement = placement === 'viewer';
+    const shouldShowWeChatQrCode = !!imageSharePanel.wechatScene && !isMobileShareClient();
 
     return (
       <div
@@ -416,7 +469,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
         <div className="grid grid-cols-3 gap-1.5">
           <button
             type="button"
-            onClick={() => setImageSharePanel({ itemId: item.id, title, placement, wechatScene: 'friend' })}
+            onClick={() => void shareImageToWeChat(item, title, placement, 'friend')}
             className={`flex h-[58px] flex-col items-center justify-center gap-1 rounded-xl p-1.5 text-[10px] font-black transition-colors ${
               isViewerPlacement ? 'text-zinc-200 hover:bg-white/10' : 'text-zinc-500 hover:bg-zinc-50'
             }`}
@@ -427,7 +480,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
           </button>
           <button
             type="button"
-            onClick={() => setImageSharePanel({ itemId: item.id, title, placement, wechatScene: 'timeline' })}
+            onClick={() => void shareImageToWeChat(item, title, placement, 'timeline')}
             className={`flex h-[58px] flex-col items-center justify-center gap-1 rounded-xl p-1.5 text-[10px] font-black transition-colors ${
               isViewerPlacement ? 'text-zinc-200 hover:bg-white/10' : 'text-zinc-500 hover:bg-zinc-50'
             }`}
@@ -448,7 +501,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
             微博
           </button>
         </div>
-        {imageSharePanel.wechatScene && (
+        {imageSharePanel.wechatScene && shouldShowWeChatQrCode && (
           <div className={`mt-3 rounded-2xl border p-3 ${
             isViewerPlacement ? 'border-emerald-400/20 bg-emerald-400/10' : 'border-emerald-100 bg-emerald-50/70'
           }`}>
@@ -465,6 +518,15 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
                 </div>
               </div>
             </div>
+          </div>
+        )}
+        {imageSharePanel.wechatScene && !shouldShowWeChatQrCode && (
+          <div className={`mt-3 rounded-2xl border p-3 text-[11px] font-bold leading-5 ${
+            isViewerPlacement ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100' : 'border-emerald-100 bg-emerald-50/70 text-emerald-800'
+          }`}>
+            {isWeChatBrowser()
+              ? `当前已在微信内，已复制分享文案；请点击右上角“…”分享到${getWeChatShareSceneLabel(imageSharePanel.wechatScene)}。`
+              : `已尝试打开系统分享面板；如果没有看到微信，请复制文案后手动分享到${getWeChatShareSceneLabel(imageSharePanel.wechatScene)}。`}
           </div>
         )}
         <button
