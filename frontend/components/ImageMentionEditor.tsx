@@ -25,6 +25,7 @@ interface ImageMentionEditorProps {
   emptyText?: string;
   itemHint?: (item: CanvasItem) => string;
   onSubmitShortcut?: () => void;
+  focusSignal?: number;
 }
 
 const MAX_MENTION_IMAGE_OPTIONS = 80;
@@ -236,7 +237,8 @@ const ImageMentionEditor: React.FC<ImageMentionEditorProps> = ({
   dropdownClassName = 'rounded-[28px] border border-gray-100 bg-white p-4 text-gray-900 shadow-[0_32px_120px_-24px_rgba(15,23,42,0.28)] ring-1 ring-black/[0.02]',
   emptyText = '没有匹配的画布图片',
   itemHint,
-  onSubmitShortcut
+  onSubmitShortcut,
+  focusSignal = 0
 }) => {
   const mentionContextRef = useRef<ReturnType<typeof getImageMentionContextAtCaret>>(null);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
@@ -458,6 +460,12 @@ const ImageMentionEditor: React.FC<ImageMentionEditorProps> = ({
   useEffect(() => {
     syncEditorContent(value);
   }, []);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor || disabled) return;
+    moveCaretToEnd(editor);
+  }, [disabled, focusSignal]);
 
   const handleInput = (event: React.FormEvent<HTMLDivElement>) => {
     emitEditorValue(readEditorText(event.currentTarget));

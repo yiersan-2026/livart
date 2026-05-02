@@ -266,6 +266,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
   const [externalSkills, setExternalSkills] = React.useState<ExternalSkillSummary[]>([]);
   const [selectedExternalSkillId, setSelectedExternalSkillId] = React.useState('');
   const [externalSkillLoadError, setExternalSkillLoadError] = React.useState('');
+  const [inputFocusSignal, setInputFocusSignal] = React.useState(0);
   const [isAspectRatioMenuOpen, setIsAspectRatioMenuOpen] = React.useState(false);
   const [isResolutionMenuOpen, setIsResolutionMenuOpen] = React.useState(false);
   const [isSkillMenuOpen, setIsSkillMenuOpen] = React.useState(false);
@@ -843,6 +844,11 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
       lastContextImageIdRef.current = null;
       onClearContextImage();
     }
+  };
+
+  const reuseUserMessage = (messageText: string) => {
+    handleInputChange(messageText);
+    setInputFocusSignal(currentSignal => currentSignal + 1);
   };
 
   const handleSubmit = (event: React.FormEvent) => {
@@ -1981,6 +1987,19 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
                         <>
                           {renderMessageText(message.text, message.role)}
                           {renderMessageImages(message)}
+                          {message.text.trim() && (
+                            <div className="mt-2 flex justify-end">
+                              <button
+                                type="button"
+                                onClick={() => reuseUserMessage(message.text)}
+                                className="inline-flex items-center gap-1.5 rounded-full border border-zinc-200 bg-white/90 px-2.5 py-1 text-[11px] font-black text-zinc-600 transition-all hover:border-zinc-300 hover:bg-white hover:text-zinc-950 active:scale-95"
+                                title="把这条消息重新写入输入框"
+                              >
+                                <RotateCcw size={12} />
+                                复用
+                              </button>
+                            </div>
+                          )}
                         </>
                       )
                   )}
@@ -2042,6 +2061,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
                 className="prompt-editor scrollbar-hide min-w-0 flex-1 min-h-[108px] max-h-40 overflow-y-auto overflow-x-hidden bg-transparent py-1.5 text-sm leading-6 font-medium outline-none whitespace-pre-wrap break-words"
                 itemHint={() => '点击后插入稳定 ID 引用'}
                 onSubmitShortcut={() => formRef.current?.requestSubmit()}
+                focusSignal={inputFocusSignal}
               />
               <button
                 type="submit"
