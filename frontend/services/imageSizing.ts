@@ -12,7 +12,8 @@ export const IMAGE_ASPECT_RATIO_OPTIONS: Array<{
   { value: '4:3', label: '4:3', title: '横向标准画幅' },
   { value: '3:4', label: '3:4', title: '竖向标准画幅' },
   { value: '16:9', label: '16:9', title: '横向宽屏画幅' },
-  { value: '9:16', label: '9:16', title: '竖向手机画幅' }
+  { value: '9:16', label: '9:16', title: '竖向手机画幅' },
+  { value: '2:1', label: '360°', title: '完整球形全景，2:1 equirectangular 画幅' }
 ];
 
 export const IMAGE_RESOLUTION_OPTIONS: Array<{
@@ -42,7 +43,8 @@ const ASPECT_RATIO_DIMENSIONS: Record<Exclude<ImageAspectRatio, 'auto'>, FrameDi
   '4:3': { width: 4, height: 3 },
   '3:4': { width: 3, height: 4 },
   '16:9': { width: 16, height: 9 },
-  '9:16': { width: 9, height: 16 }
+  '9:16': { width: 9, height: 16 },
+  '2:1': { width: 2, height: 1 }
 };
 
 const getCanvasDimension = (value: number) => Math.max(1, Math.round(value));
@@ -141,5 +143,6 @@ export const centerFrameOnRect = (
 
 export const aspectRatioToGeminiAspectRatio = (aspectRatio: ImageAspectRatio): GeminiAspectRatio | undefined => {
   if (aspectRatio === 'auto') return undefined;
+  if (aspectRatio === '2:1') return undefined;
   return aspectRatio;
 };

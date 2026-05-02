@@ -15,11 +15,7 @@ export const AVAILABLE_MODELS = [
 ];
 
 export const AVAILABLE_CHAT_MODELS = [
-  'gpt-5.5',
-  'gpt-5.4',
-  'gpt-5.4-mini',
-  'gpt-5.3-codex',
-  'gpt-5.2'
+  'gpt-5.4-mini'
 ];
 
 export interface ApiConfig {
@@ -57,7 +53,7 @@ export const DEFAULT_API_CONFIG: ApiConfig = {
   ...buildImageApiUrls(defaultBaseUrl),
   apiKey: '',
   model: process.env.IMAGE_API_MODEL || 'gpt-image-2',
-  chatModel: process.env.PROMPT_OPTIMIZER_MODEL || process.env.CHAT_API_MODEL || 'gpt-5.5',
+  chatModel: process.env.PROMPT_OPTIMIZER_MODEL || process.env.CHAT_API_MODEL || 'gpt-5.4-mini',
   hasApiKey: false,
   serverDefault: false
 };

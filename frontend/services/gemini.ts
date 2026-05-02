@@ -20,6 +20,8 @@ export interface ImageJobStatus extends ImagePromptMetadata {
   status: 'queued' | 'running' | 'completed' | 'error';
   response?: unknown;
   error?: unknown;
+  createdAt?: number;
+  updatedAt?: number;
   upstreamStatus?: number;
   requestId?: string;
   attempts?: number;

@@ -1,4 +1,4 @@
-import type { AgentPlan, AgentPlanStep, AgentToolId, CanvasItem, ImageAspectRatio, ImageResolution } from '../types';
+import type { AgentPlan, AgentPlanStep, AgentToolId, CanvasItem, ImageAspectRatio, ImageResolution, ProductPosterAnalysis, ProductPosterRequest } from '../types';
 import { authHeaders, getStoredAuthSession } from './auth';
 import { getCanvasItemAssetId } from './canvasPersistence';
 import { hasUsableImageSource } from './imageSources';
@@ -7,6 +7,7 @@ import { getImageReferenceLabel } from './imageReferences';
 const AGENT_RUN_URL = '/api/agent/runs';
 const AGENT_RUN_STATUS_URL = '/api/agent/runs';
 const AGENT_RUN_WS_PATH = '/ws/image-jobs';
+const PRODUCT_POSTER_ANALYSIS_URL = '/api/product-posters/analyze';
 
 interface ApiResponse<T> {
   success: boolean;
@@ -55,9 +56,10 @@ export interface AgentPlanRequest {
   aspectRatio?: ImageAspectRatio;
   imageResolution?: ImageResolution;
   contextImageId?: string;
-  requestedEditMode?: 'local-redraw' | 'remover' | 'layer-subject' | 'layer-background' | 'view-change';
+  requestedEditMode?: 'local-redraw' | 'remover' | 'layer-subject' | 'layer-background' | 'view-change' | 'panorama' | 'product-poster';
   forcedToolId?: AgentToolId;
   externalSkillId?: string;
+  productPoster?: ProductPosterRequest;
   images: CanvasItem[];
 }
 
@@ -335,7 +337,9 @@ export const getAgentPlanModeLabel = (plan: AgentPlan) => {
   if (plan.mode === 'background-removal') return '去背景';
   if (plan.mode === 'remover') return '局部删除';
   if (plan.mode === 'layer-subject' || plan.mode === 'layer-background') return '图层拆分';
+  if (plan.mode === 'panorama') return '全景';
   if (plan.mode === 'view-change') return '多角度';
+  if (plan.mode === 'product-poster') return '商品详情图';
   if (plan.taskType === 'text-to-image') return '文生图';
   return '单图编辑';
 };
@@ -369,6 +373,9 @@ const getAgentPlanStatusLine = ({
   if (status === 'completed') {
     if (stepId === 'understand-demand') return '已理解你的需求...';
     if (stepId === 'knowledge-answer') return '已整理 livart 知识库回答...';
+    if (stepId === 'research-industry') return '已完成 WebSearch 行业调研...';
+    if (stepId === 'plan-poster-set') return '已完成商品详情图规划...';
+    if (stepId === 'run-product-posters') return '已提交商品详情图任务...';
     if (stepId === 'create-image-job') return '已提交生图任务...';
     if (stepId === 'wait-image-job') return '已完成图片生成...';
   }
@@ -382,6 +389,9 @@ const getAgentPlanStatusLine = ({
   if (stepId === 'knowledge-answer') {
     return '正在检索 livart 知识库...';
   }
+  if (stepId === 'research-industry') {
+    return '正在 WebSearch 行业趋势...';
+  }
   if (stepId === 'scope-check') {
     return '正在检查是否属于 livart 能力范围...';
   }
@@ -391,7 +401,9 @@ const getAgentPlanStatusLine = ({
     || stepId === 'identify-removal-target'
     || stepId === 'identify-layer-subject'
     || stepId === 'identify-layer-background'
-    || stepId === 'identify-view-change') {
+    || stepId === 'identify-panorama'
+    || stepId === 'identify-view-change'
+    || stepId === 'analyze-product') {
     return '正在规划图片任务...';
   }
   if (stepId === 'optimize-prompt'
@@ -399,7 +411,9 @@ const getAgentPlanStatusLine = ({
     || stepId === 'optimize-background-removal'
     || stepId === 'optimize-remover'
     || stepId === 'optimize-layer-split'
-    || stepId === 'optimize-view-change') {
+    || stepId === 'optimize-panorama'
+    || stepId === 'optimize-view-change'
+    || stepId === 'plan-poster-set') {
     return '正在优化提示词...';
   }
   if (stepId === 'create-image-job'
@@ -408,7 +422,9 @@ const getAgentPlanStatusLine = ({
     || stepId === 'run-background-removal'
     || stepId === 'run-remover'
     || stepId === 'run-layer-split'
-    || stepId === 'run-view-change') {
+    || stepId === 'run-panorama'
+    || stepId === 'run-view-change'
+    || stepId === 'run-product-posters') {
     return taskType === 'image-edit' || mode !== 'generate'
       ? '正在提交图片编辑任务...'
       : '正在提交生图任务...';
@@ -676,6 +692,7 @@ export const createAgentRun = async (request: AgentRunRequest): Promise<AgentRun
       requestedEditMode: request.requestedEditMode || '',
       forcedToolId: request.forcedToolId || '',
       externalSkillId: request.externalSkillId || '',
+      productPoster: request.productPoster,
       images: mapImageCandidates(request.images),
       maskDataUrl: request.maskDataUrl || '',
       clientRunId: request.clientRunId || ''
@@ -688,6 +705,36 @@ export const createAgentRun = async (request: AgentRunRequest): Promise<AgentRun
   }
 
   return normalizeAgentRunPayload(payload.data, aspectRatio, request.prompt);
+};
+
+export const analyzeProductPosterDescription = async (
+  description: string,
+  images: CanvasItem[] = [],
+  options: {
+    latestUserMessage?: string;
+    conversationContext?: string;
+  } = {}
+): Promise<ProductPosterAnalysis> => {
+  const response = await fetch(PRODUCT_POSTER_ANALYSIS_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      ...authHeaders()
+    },
+    body: JSON.stringify({
+      description,
+      latestUserMessage: options.latestUserMessage || '',
+      conversationContext: options.conversationContext || '',
+      images: mapImageCandidates(images)
+    })
+  });
+
+  const payload = await response.json().catch(() => null) as ApiResponse<ProductPosterAnalysis> | null;
+  if (!response.ok || !payload?.success || !payload.data) {
+    throw new Error(payload?.error?.message || `产品特征分析失败：${response.status}`);
+  }
+  return payload.data;
 };
 
 export const getAgentRunStatus = async (

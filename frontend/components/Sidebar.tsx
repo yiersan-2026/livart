@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import type { ActiveImageTaskInfo, ChatMessage, CanvasItem, ChatImageResultCard, ExternalSkillSummary, ImageAspectRatio, ImageResolution } from '../types';
-import { ChevronDown, Copy, Download, Eye, Github, Loader2, Send, RotateCcw, RotateCw, Share2, ZoomIn, ZoomOut, X } from 'lucide-react';
+import type { ActiveImageTaskInfo, ChatMessage, CanvasItem, ChatImageResultCard, ExternalSkillSummary, ImageAspectRatio, ImageResolution, ProductPosterAnalysis, ProductPosterFact, ProductPosterRequest } from '../types';
+import { ChevronDown, Copy, Download, Eye, Github, Globe2, Loader2, Package, Send, RotateCcw, RotateCw, Share2, Sparkles, ZoomIn, ZoomOut, X } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
 import { IMAGE_ASPECT_RATIO_OPTIONS, IMAGE_RESOLUTION_OPTIONS } from '../services/imageSizing';
 import { getImagePreviewFitStyle, getLargestCanvasImageSrc, getOriginalImageSrc, getThumbnailImageSrc, hasUsableImageSource } from '../services/imageSources';
@@ -9,6 +9,7 @@ import { formatExecutionDuration } from '../services/taskTiming';
 import { getImageModelDisplayName } from '../services/config';
 import { loadExternalSkills } from '../services/externalSkills';
 import {
+  analyzeProductPosterDescription,
   getAgentPlanCurrentProgressText
 } from '../services/agentPlanner';
 import {
@@ -21,11 +22,25 @@ import { buildImageResultDescription, getCanvasItemDisplayTitle } from '../servi
 import { buildLivartImageSharePageUrl, LIVART_SHARE_PROMOTION_TEXT } from '../services/shareLinks';
 import ImageMentionEditor from './ImageMentionEditor';
 import LivartLogo from './LivartLogo';
+import PanoramaViewer from './PanoramaViewer';
 
 const IMAGE_VIEWER_MIN_ZOOM = 1;
 const IMAGE_VIEWER_MAX_ZOOM = 10;
 const IMAGE_VIEWER_ZOOM_STEP = 1;
 const ENABLE_EXTERNAL_SKILLS = true;
+
+const PANORAMA_KEYWORD_PATTERN = /完整球形全景|球形全景|360°球形全景|360度球形全景|equirectangular|spherical panorama/i;
+
+const isLikelyPanoramaImage = (item: CanvasItem) => {
+  const ratio = item.width / Math.max(1, item.height);
+  const text = [
+    item.label,
+    item.prompt,
+    item.originalPrompt,
+    item.optimizedPrompt
+  ].filter(Boolean).join(' ');
+  return Math.abs(ratio - 2) <= 0.12 && PANORAMA_KEYWORD_PATTERN.test(text);
+};
 
 type ImageSharePanelState = {
   itemId: string;
@@ -89,21 +104,159 @@ type AssistantAnswerBlock =
   | { type: 'numbered'; items: string[] }
   | { type: 'bullets'; items: string[] };
 
+type SidebarSendOptions = {
+  forcedToolId?: 'tool.product.poster';
+  productPoster?: ProductPosterRequest;
+  contextImageId?: string;
+  contextImageIds?: string[];
+  userMessageText?: string;
+};
+
+type ProductPosterFormState = {
+  productImageIds: string[];
+  productMode: 'single' | 'series';
+  productDescription: string;
+  productName: string;
+  industry: string;
+  material: string;
+  size: string;
+  color: string;
+  style: string;
+  detailDesignStyle: string;
+  scenarios: string;
+  targetAudience: string;
+  sellingPoints: string;
+  extraDetails: string;
+  platformStyle: string;
+  posterCount: number;
+};
+
+type ProductPosterConversationMessage = {
+  id: string;
+  role: 'assistant' | 'user';
+  text: string;
+  analysis?: ProductPosterAnalysis | null;
+};
+
+const PRODUCT_POSTER_PLATFORM_OPTIONS = ['淘宝/天猫', '抖音电商', '小红书种草', '朋友圈', '独立站', '通用商业'];
+const PRODUCT_POSTER_ANALYSIS_FIELDS: Array<{ key: keyof ProductPosterAnalysis; label: string }> = [
+  { key: 'industry', label: '行业' },
+  { key: 'productName', label: '产品名称' },
+  { key: 'material', label: '材质' },
+  { key: 'size', label: '大小/规格' },
+  { key: 'color', label: '颜色' },
+  { key: 'style', label: '款式/风格' },
+  { key: 'detailDesignStyle', label: '详情图设计风格' },
+  { key: 'scenarios', label: '适用场景' },
+  { key: 'targetAudience', label: '使用人群' },
+  { key: 'sellingPoints', label: '核心卖点' },
+  { key: 'extraDetails', label: '补充参数' },
+  { key: 'platformStyle', label: '平台风格' }
+];
+
+const createDefaultProductPosterForm = (productImageIds: string[] = []): ProductPosterFormState => ({
+  productImageIds,
+  productMode: 'single',
+  productDescription: '',
+  productName: '',
+  industry: '',
+  material: '',
+  size: '',
+  color: '',
+  style: '',
+  detailDesignStyle: '',
+  scenarios: '',
+  targetAudience: '',
+  sellingPoints: '',
+  extraDetails: '',
+  platformStyle: PRODUCT_POSTER_PLATFORM_OPTIONS[0],
+  posterCount: 3
+});
+
+const createProductPosterConversationMessage = (
+  role: ProductPosterConversationMessage['role'],
+  text: string,
+  analysis?: ProductPosterAnalysis | null
+): ProductPosterConversationMessage => ({
+  id: `${role}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  role,
+  text,
+  analysis: analysis || null
+});
+
+const createInitialProductPosterConversation = () => ([
+  createProductPosterConversationMessage(
+    'assistant',
+    '把产品信息直接发给我，我会先提取出你已经说明的产品属性并整理成表格；如果你没有说明详情图设计风格，我会通过 WebSearch 补全当前更适合这类产品的流行详情图风格。'
+  )
+]);
+
+const buildProductPosterAnalysisSnapshotText = (analysis?: ProductPosterAnalysis | null) => {
+  if (!analysis) return '';
+  const fields = PRODUCT_POSTER_ANALYSIS_FIELDS
+    .map(({ key, label }) => {
+      const value = analysis[key];
+      return typeof value === 'string' && value.trim() ? `${label}=${value.trim()}` : '';
+    })
+    .filter(Boolean);
+  if (analysis.missingInformation?.length) {
+    fields.push(`仍缺信息=${analysis.missingInformation.join('、')}`);
+  }
+  if (analysis.confirmedFacts?.length) {
+    fields.push(`图像确认=${analysis.confirmedFacts.map(fact => `${fact.label || fact.key}=${fact.value}`).join('、')}`);
+  }
+  if (analysis.readyToGenerate) {
+    fields.push('状态=信息已足够生成商品详情图');
+  }
+  return fields.join('；');
+};
+
+const normalizePosterFactList = (facts?: ProductPosterFact[] | null) => (facts || [])
+  .filter(fact => fact && typeof fact.value === 'string' && fact.value.trim())
+  .map(fact => ({
+    key: fact.key || '',
+    label: fact.label || fact.key || '信息',
+    value: fact.value!.trim(),
+    source: fact.source || '',
+    confidence: fact.confidence || '',
+    note: fact.note || ''
+  }));
+
+const buildProductPosterConversationContext = (conversation: ProductPosterConversationMessage[]) => {
+  const lines = (conversation || [])
+    .slice(1)
+    .flatMap(message => {
+      const text = message.text?.trim();
+      const roleLabel = message.role === 'user' ? '用户' : '助手';
+      const result = text ? [`${roleLabel}：${text}`] : [];
+      const analysisSnapshot = buildProductPosterAnalysisSnapshotText(message.analysis);
+      if (analysisSnapshot) {
+        result.push(`助手分析快照：${analysisSnapshot}`);
+      }
+      return result;
+    })
+    .filter(Boolean);
+  const transcript = lines.join('\n').trim();
+  if (!transcript) return '';
+  return transcript.length > 4000 ? `${transcript.slice(0, 4000)}…` : transcript;
+};
+
 interface SidebarProps {
   messages: ChatMessage[];
   isThinking: boolean;
   activeTasks?: ActiveImageTaskInfo[];
-  onSendMessage: (text: string, aspectRatio: ImageAspectRatio, imageResolution: ImageResolution, externalSkillId?: string) => void;
+  onSendMessage: (text: string, aspectRatio: ImageAspectRatio, imageResolution: ImageResolution, externalSkillId?: string, options?: SidebarSendOptions) => void;
   contextImage: CanvasItem | null;
   promptSeed?: { id: string; imageId: string; prompt?: string } | null;
   inputResetKey?: number;
+  productPosterOpenSignal?: number;
   imageItems: CanvasItem[];
   onSelectContextImage: (item: CanvasItem) => void;
   onClearContextImage: () => void;
   onNavigateToImage: (item: CanvasItem) => void;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [], onSendMessage, contextImage, promptSeed, inputResetKey = 0, imageItems, onClearContextImage, onNavigateToImage }) => {
+const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [], onSendMessage, contextImage, promptSeed, inputResetKey = 0, productPosterOpenSignal = 0, imageItems, onClearContextImage, onNavigateToImage }) => {
   const [inputValue, setInputValue] = React.useState('');
   const [selectedAspectRatio, setSelectedAspectRatio] = React.useState<ImageAspectRatio>('auto');
   const [selectedImageResolution, setSelectedImageResolution] = React.useState<ImageResolution>('2k');
@@ -117,8 +270,17 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
   const [isResolutionMenuOpen, setIsResolutionMenuOpen] = React.useState(false);
   const [isSkillMenuOpen, setIsSkillMenuOpen] = React.useState(false);
   const [isActiveTaskListOpen, setIsActiveTaskListOpen] = React.useState(false);
+  const [isProductPosterModalOpen, setIsProductPosterModalOpen] = React.useState(false);
+  const [productPosterForm, setProductPosterForm] = React.useState<ProductPosterFormState>(() => createDefaultProductPosterForm());
+  const [productPosterAnalysis, setProductPosterAnalysis] = React.useState<ProductPosterAnalysis | null>(null);
+  const [productPosterConversation, setProductPosterConversation] = React.useState<ProductPosterConversationMessage[]>(() => createInitialProductPosterConversation());
+  const [productPosterDraftInput, setProductPosterDraftInput] = React.useState('');
+  const [productPosterUserFacts, setProductPosterUserFacts] = React.useState<string[]>([]);
+  const [isProductPosterAnalyzing, setIsProductPosterAnalyzing] = React.useState(false);
+  const [productPosterError, setProductPosterError] = React.useState('');
   const [timerNow, setTimerNow] = React.useState(() => Date.now());
   const [imageViewer, setImageViewer] = React.useState<{ item: CanvasItem; title: string } | null>(null);
+  const [isPanoramaViewerActive, setIsPanoramaViewerActive] = React.useState(false);
   const [imageViewerZoom, setImageViewerZoom] = React.useState(1);
   const [imageViewerRotation, setImageViewerRotation] = React.useState(0);
   const [imageViewerPan, setImageViewerPan] = React.useState({ x: 0, y: 0 });
@@ -129,7 +291,9 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
   const aspectRatioMenuRef = useRef<HTMLDivElement>(null);
   const resolutionMenuRef = useRef<HTMLDivElement>(null);
   const skillMenuRef = useRef<HTMLDivElement>(null);
+  const productPosterConversationRef = useRef<HTMLDivElement>(null);
   const lastContextImageIdRef = useRef<string | null>(null);
+  const lastProductPosterOpenSignalRef = useRef(productPosterOpenSignal);
   const appliedPromptSeedIdRef = useRef<string | null>(null);
   const imageViewerDragRef = useRef<{
     pointerId: number;
@@ -164,6 +328,29 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
     [activeTasks]
   );
   const activeTaskCount = sortedActiveTasks.length;
+
+  useEffect(() => {
+    if (!isProductPosterModalOpen) return;
+    const preferredImageId = contextImage && completedImageItems.some(item => item.id === contextImage.id)
+      ? contextImage.id
+      : completedImageItems[0]?.id || '';
+    const availableImageIds = new Set(completedImageItems.map(item => item.id));
+    setProductPosterForm(currentForm => (
+      currentForm.productImageIds.some(imageId => availableImageIds.has(imageId))
+        ? { ...currentForm, productImageIds: currentForm.productImageIds.filter(imageId => availableImageIds.has(imageId)) }
+        : { ...currentForm, productImageIds: preferredImageId ? [preferredImageId] : [] }
+    ));
+  }, [completedImageItems, contextImage, isProductPosterModalOpen]);
+
+  useEffect(() => {
+    if (!isProductPosterModalOpen) return;
+    const container = productPosterConversationRef.current;
+    if (!container) return;
+    const rafId = window.requestAnimationFrame(() => {
+      container.scrollTop = container.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(rafId);
+  }, [isProductPosterModalOpen, productPosterConversation, isProductPosterAnalyzing]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia('(max-width: 767px)');
@@ -275,11 +462,13 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
     setImageSharePanel(null);
     setImageShareCopyNotice('');
     setImageViewer({ item, title });
+    setIsPanoramaViewerActive(isLikelyPanoramaImage(item));
     resetImageViewerTransform();
   };
 
   const closeImageViewer = () => {
     setImageViewer(null);
+    setIsPanoramaViewerActive(false);
     setImageSharePanel(currentPanel => currentPanel?.placement === 'viewer' ? null : currentPanel);
     setImageShareCopyNotice('');
     resetImageViewerTransform();
@@ -673,6 +862,281 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
     setInputValue('');
   };
 
+  const openProductPosterModal = () => {
+    const preferredImageId = contextImage && completedImageItems.some(item => item.id === contextImage.id)
+      ? contextImage.id
+      : completedImageItems[0]?.id || '';
+    setProductPosterForm(createDefaultProductPosterForm(preferredImageId ? [preferredImageId] : []));
+    setProductPosterAnalysis(null);
+    setProductPosterConversation(createInitialProductPosterConversation());
+    setProductPosterDraftInput('');
+    setProductPosterUserFacts([]);
+    setProductPosterError('');
+    setIsProductPosterModalOpen(true);
+    setIsAspectRatioMenuOpen(false);
+    setIsResolutionMenuOpen(false);
+    setIsSkillMenuOpen(false);
+  };
+
+  useEffect(() => {
+    if (productPosterOpenSignal === lastProductPosterOpenSignalRef.current) return;
+    lastProductPosterOpenSignalRef.current = productPosterOpenSignal;
+    if (productPosterOpenSignal > 0) {
+      openProductPosterModal();
+    }
+  }, [productPosterOpenSignal]);
+
+  const updateProductPosterForm = <K extends keyof ProductPosterFormState>(key: K, value: ProductPosterFormState[K]) => {
+    setProductPosterForm(currentForm => ({ ...currentForm, [key]: value }));
+    setProductPosterError('');
+  };
+
+  const toggleProductPosterImage = (imageId: string) => {
+    setProductPosterForm(currentForm => {
+      const isSelected = currentForm.productImageIds.includes(imageId);
+      return {
+        ...currentForm,
+        productImageIds: isSelected
+          ? currentForm.productImageIds.filter(selectedImageId => selectedImageId !== imageId)
+          : [...currentForm.productImageIds, imageId].slice(0, 12)
+      };
+    });
+  };
+
+  const buildProductPosterPrompt = (form: ProductPosterFormState) => {
+    const modeText = form.productMode === 'series'
+      ? '这些产品图是同一个产品系列中的不同产品/SKU，请生成系列商品详情图，不要把它们融合成一个商品。'
+      : '这些产品图是同一个产品的不同角度/细节参考，请生成单品商品详情图。';
+    const fields = [
+      `产品图模式：${form.productMode === 'series' ? '产品系列' : '单个产品'}`,
+      form.productDescription && `产品描述：${form.productDescription}`,
+      form.productName && `产品名称：${form.productName}`,
+      form.industry && `产品行业：${form.industry}`,
+      form.material && `材质：${form.material}`,
+      form.size && `大小：${form.size}`,
+      form.color && `颜色：${form.color}`,
+      form.style && `款式：${form.style}`,
+      form.detailDesignStyle && `详情图设计风格：${form.detailDesignStyle}`,
+      form.scenarios && `适用场景：${form.scenarios}`,
+      form.targetAudience && `使用人群：${form.targetAudience}`,
+      form.sellingPoints && `核心卖点：${form.sellingPoints}`,
+      form.extraDetails && `补充参数：${form.extraDetails}`,
+      form.platformStyle && `平台风格：${form.platformStyle}`
+    ].filter(Boolean);
+    return `基于产品图生成 ${form.posterCount} 张商品详情图，${modeText} 并在画面中加入清晰的中文文字描述，包括短标题、核心卖点，以及在信息已明确时的材质/规格/适用场景等模块；未明确的硬参数不要编造，可改用版型特点、穿着感受、使用场景、风格气质和购买理由来表达。文字要短句化、排版整齐。${fields.join('；') || '请根据产品图自动分析行业特点、使用场景和目标人群。'}`;
+  };
+
+  const applyProductPosterAnalysis = (analysis: ProductPosterAnalysis) => {
+    setProductPosterForm(currentForm => ({
+      ...currentForm,
+      productName: analysis.productName?.trim() || currentForm.productName,
+      industry: analysis.industry?.trim() || currentForm.industry,
+      material: analysis.material?.trim() || currentForm.material,
+      size: analysis.size?.trim() || currentForm.size,
+      color: analysis.color?.trim() || currentForm.color,
+      style: analysis.style?.trim() || currentForm.style,
+      detailDesignStyle: analysis.detailDesignStyle?.trim() || currentForm.detailDesignStyle,
+      scenarios: analysis.scenarios?.trim() || currentForm.scenarios,
+      targetAudience: analysis.targetAudience?.trim() || currentForm.targetAudience,
+      sellingPoints: analysis.sellingPoints?.trim() || currentForm.sellingPoints,
+      extraDetails: analysis.extraDetails?.trim() || currentForm.extraDetails,
+      platformStyle: PRODUCT_POSTER_PLATFORM_OPTIONS.includes(analysis.platformStyle || '')
+        ? analysis.platformStyle || currentForm.platformStyle
+        : currentForm.platformStyle
+    }));
+  };
+
+  const buildProductPosterAssistantReply = (analysis: ProductPosterAnalysis) => {
+    const assistantMessage = analysis.assistantMessage?.trim();
+    if (assistantMessage) return assistantMessage;
+    if (analysis.readyToGenerate) {
+      return '我已经把商品关键信息整理好了，现在可以开始生成商品详情图。';
+    }
+    return analysis.nextQuestion?.trim() || '我还需要更多产品信息，继续补充一下吧。';
+  };
+
+  const sendProductPosterMessage = async (event?: React.FormEvent) => {
+    event?.preventDefault();
+    const message = productPosterDraftInput.trim();
+    if (!message) {
+      setProductPosterError('请先输入产品特点');
+      return;
+    }
+
+    const nextFacts = [...productPosterUserFacts, message];
+    const combinedDescription = nextFacts.join('\n');
+    const userMessage = createProductPosterConversationMessage('user', message);
+    const nextConversation = [...productPosterConversation, userMessage];
+    setProductPosterConversation(nextConversation);
+    setProductPosterUserFacts(nextFacts);
+    setProductPosterDraftInput('');
+    setIsProductPosterAnalyzing(true);
+    setProductPosterError('');
+    setProductPosterForm(currentForm => ({
+      ...currentForm,
+      productDescription: combinedDescription
+    }));
+    const selectedProductImages = productPosterForm.productImageIds
+      .map(imageId => completedImageItems.find(item => item.id === imageId))
+      .filter((item): item is CanvasItem => Boolean(item));
+    try {
+      const analysis = await analyzeProductPosterDescription(combinedDescription, selectedProductImages, {
+        latestUserMessage: message,
+        conversationContext: buildProductPosterConversationContext(nextConversation)
+      });
+      setProductPosterAnalysis(analysis);
+      applyProductPosterAnalysis(analysis);
+      setProductPosterConversation(currentConversation => [
+        ...currentConversation,
+        createProductPosterConversationMessage('assistant', buildProductPosterAssistantReply(analysis), analysis)
+      ]);
+    } catch (error) {
+      setProductPosterAnalysis(null);
+      const errorMessage = error instanceof Error ? error.message : '产品特征分析失败';
+      setProductPosterError(errorMessage);
+      setProductPosterConversation(currentConversation => [
+        ...currentConversation,
+        createProductPosterConversationMessage('assistant', errorMessage)
+      ]);
+    } finally {
+      setIsProductPosterAnalyzing(false);
+    }
+  };
+
+  const submitProductPoster = () => {
+    const selectedProductImages = productPosterForm.productImageIds
+      .map(imageId => completedImageItems.find(item => item.id === imageId))
+      .filter((item): item is CanvasItem => Boolean(item));
+    const productImage = selectedProductImages[0] || null;
+    if (!productImage) {
+      setProductPosterError('请先选择至少一张产品图片');
+      return;
+    }
+    if (!productPosterAnalysis) {
+      setProductPosterError('请先在右侧对话框里描述产品，让我先分析商品信息');
+      return;
+    }
+    if (!productPosterAnalysis.readyToGenerate) {
+      setProductPosterError(productPosterAnalysis.nextQuestion || '当前信息还不够，请继续补充后再生成');
+      return;
+    }
+
+    const prompt = buildProductPosterPrompt(productPosterForm);
+    const productPoster: ProductPosterRequest = {
+      productImageId: productImage.id,
+      productImageIds: selectedProductImages.map(item => item.id),
+      productMode: productPosterForm.productMode,
+      productDescription: productPosterForm.productDescription.trim(),
+      productName: productPosterForm.productName.trim(),
+      industry: productPosterForm.industry.trim(),
+      material: productPosterForm.material.trim(),
+      size: productPosterForm.size.trim(),
+      color: productPosterForm.color.trim(),
+      style: productPosterForm.style.trim(),
+      detailDesignStyle: productPosterForm.detailDesignStyle.trim(),
+      scenarios: productPosterForm.scenarios.trim(),
+      targetAudience: productPosterForm.targetAudience.trim(),
+      sellingPoints: productPosterForm.sellingPoints.trim(),
+      extraDetails: productPosterForm.extraDetails.trim(),
+      platformStyle: productPosterForm.platformStyle.trim(),
+      conversationContext: buildProductPosterConversationContext(productPosterConversation),
+      posterCount: productPosterForm.posterCount
+    };
+
+    onSendMessage(prompt, selectedAspectRatio, selectedImageResolution, undefined, {
+      forcedToolId: 'tool.product.poster',
+      productPoster,
+      contextImageId: productImage.id,
+      contextImageIds: selectedProductImages.map(item => item.id),
+      userMessageText: `使用 ${selectedProductImages.length} 张${productPosterForm.productMode === 'series' ? '系列产品图' : '产品图'}生成 ${productPosterForm.posterCount} 张商品详情图：${productPosterForm.productName.trim() || getCanvasItemDisplayTitle(productImage)}`
+    });
+    setIsProductPosterModalOpen(false);
+    setProductPosterError('');
+  };
+
+  const renderProductPosterAnalysisSnapshot = (analysis: ProductPosterAnalysis) => {
+    const fields = PRODUCT_POSTER_ANALYSIS_FIELDS
+      .map(field => {
+        const value = String(analysis[field.key] || '').trim();
+        return value ? { label: field.label, value } : null;
+      })
+      .filter((field): field is { label: string; value: string } => Boolean(field));
+    const confirmedFacts = normalizePosterFactList(analysis.confirmedFacts);
+    const suggestedFacts = normalizePosterFactList(analysis.suggestedFacts);
+
+    return (
+      <div className="mt-2 grid gap-2 rounded-2xl border border-zinc-200 bg-white p-3">
+        {analysis.summary && (
+          <div className="rounded-xl bg-zinc-50 px-3 py-2">
+            <div className="text-[10px] font-black uppercase tracking-[0.18em] text-zinc-400">当前理解</div>
+            <div className="mt-1 text-xs font-bold leading-5 text-zinc-800">{analysis.summary}</div>
+          </div>
+        )}
+
+        {fields.length > 0 && (
+          <div className="grid gap-2 md:grid-cols-2">
+            {fields.map(field => (
+              <div key={field.label} className="rounded-xl border border-zinc-100 bg-zinc-50 px-3 py-2">
+                <div className="text-[10px] font-black text-zinc-400">{field.label}</div>
+                <div className="mt-1 text-xs font-bold leading-5 text-zinc-800">{field.value}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {confirmedFacts.length > 0 && (
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2">
+            <div className="text-[10px] font-black uppercase tracking-[0.16em] text-emerald-600">图像已确认</div>
+            <div className="mt-2 grid gap-2">
+              {confirmedFacts.map((fact, index) => (
+                <div key={`${fact.key}-${index}`} className="rounded-xl bg-white/80 px-3 py-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] font-black text-emerald-700">{fact.label}</span>
+                    {fact.source && <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-black text-emerald-700">{fact.source}</span>}
+                    {fact.confidence && <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-black text-emerald-700">{fact.confidence}</span>}
+                  </div>
+                  <div className="mt-1 text-xs font-bold leading-5 text-zinc-800">{fact.value}</div>
+                  {fact.note && <div className="mt-1 text-[11px] font-medium leading-4 text-zinc-500">{fact.note}</div>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {suggestedFacts.length > 0 && (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2">
+            <div className="text-[10px] font-black uppercase tracking-[0.16em] text-amber-700">候选建议（待确认）</div>
+            <div className="mt-2 grid gap-2">
+              {suggestedFacts.map((fact, index) => (
+                <div key={`${fact.key}-${index}`} className="rounded-xl bg-white/85 px-3 py-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] font-black text-amber-700">{fact.label}</span>
+                    {fact.confidence && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-black text-amber-700">{fact.confidence}</span>}
+                  </div>
+                  <div className="mt-1 text-xs font-bold leading-5 text-zinc-800">{fact.value}</div>
+                  {fact.note && <div className="mt-1 text-[11px] font-medium leading-4 text-zinc-500">{fact.note}</div>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {analysis.missingInformation && analysis.missingInformation.length > 0 && (
+          <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2">
+            <div className="text-[10px] font-black uppercase tracking-[0.16em] text-zinc-500">仍需补充</div>
+            <div className="mt-1 text-xs font-bold leading-5 text-zinc-700">{analysis.missingInformation.join('、')}</div>
+          </div>
+        )}
+
+        {analysis.readyToGenerate && (
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-black text-emerald-700">
+            信息已足够，可以开始生成商品详情图。
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const getAspectRatioPreviewStyle = (aspectRatio: ImageAspectRatio): React.CSSProperties => {
     if (aspectRatio === 'auto') {
       return { width: 26, height: 18 };
@@ -923,27 +1387,47 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
         {attachedImages.map((item) => {
           const previewStyle = getImagePreviewFitStyle(item, 230, 180);
           const title = getCanvasItemDisplayTitle(item);
+          const isPanorama = isLikelyPanoramaImage(item);
+          const panoramaSrc = getLargestCanvasImageSrc(item) || getThumbnailImageSrc(item);
+          const panoramaStyle = isPanorama ? { ...previewStyle, height: '150px' } : previewStyle;
           return (
             <div
               key={item.id}
               className="group relative overflow-visible rounded-2xl bg-white p-2 text-left shadow-sm ring-1 ring-black/5 transition-all hover:-translate-y-0.5 hover:shadow-md hover:ring-indigo-200 active:scale-[0.99]"
             >
-              <button
-                type="button"
-                onClick={() => openImageViewer(item, title)}
-                title="打开大图预览"
-                className="block overflow-hidden rounded-xl bg-gray-100 text-left"
-                style={previewStyle}
-              >
-                <img src={getThumbnailImageSrc(item)} className="h-full w-full object-cover transition-transform group-hover:scale-[1.02]" />
-              </button>
+              {isPanorama && panoramaSrc ? (
+                <div className="relative overflow-hidden rounded-xl bg-black text-left" style={panoramaStyle}>
+                  <PanoramaViewer src={panoramaSrc} title={title} compact />
+                  <span className="pointer-events-none absolute left-2 top-2 z-20 rounded-full bg-black/55 px-2 py-1 text-[11px] font-black text-white backdrop-blur">
+                    360° 全景
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => openImageViewer(item, title)}
+                    className="absolute right-2 top-2 z-20 rounded-full bg-white/95 px-2.5 py-1 text-[11px] font-black text-zinc-900 shadow-sm ring-1 ring-black/10 transition-all hover:scale-105 hover:bg-white"
+                    title="打开大图预览"
+                  >
+                    查看大图
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => openImageViewer(item, title)}
+                  title="打开大图预览"
+                  className="block overflow-hidden rounded-xl bg-gray-100 text-left"
+                  style={previewStyle}
+                >
+                  <img src={getThumbnailImageSrc(item)} className="h-full w-full object-cover transition-transform group-hover:scale-[1.02]" />
+                </button>
+              )}
               <button
                 type="button"
                 onClick={(event) => {
                   event.stopPropagation();
                   openImageSharePanel(item, title, 'message');
                 }}
-                className="absolute bottom-14 right-4 flex h-8 w-8 items-center justify-center rounded-full bg-white/95 text-zinc-900 opacity-0 shadow-lg ring-1 ring-black/10 transition-all hover:scale-105 hover:bg-white group-hover:opacity-100"
+                className="absolute bottom-14 right-4 z-30 flex h-8 w-8 items-center justify-center rounded-full bg-white/95 text-zinc-900 opacity-0 shadow-lg ring-1 ring-black/10 transition-all hover:scale-105 hover:bg-white group-hover:opacity-100"
                 title="分享图片"
               >
                 <Share2 size={15} />
@@ -954,7 +1438,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
                   event.stopPropagation();
                   downloadOriginalImage(item, title);
                 }}
-                className="absolute bottom-4 right-4 flex h-8 w-8 items-center justify-center rounded-full bg-white/95 text-zinc-900 opacity-0 shadow-lg ring-1 ring-black/10 transition-all hover:scale-105 hover:bg-white group-hover:opacity-100"
+                className="absolute bottom-4 right-4 z-30 flex h-8 w-8 items-center justify-center rounded-full bg-white/95 text-zinc-900 opacity-0 shadow-lg ring-1 ring-black/10 transition-all hover:scale-105 hover:bg-white group-hover:opacity-100"
                 title="下载原始图片"
               >
                 <Download size={15} />
@@ -1003,6 +1487,8 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
       <div className="grid w-full gap-5">
         {attachedCards.map((card) => {
           const previewStyle = getImagePreviewFitStyle(card.item, 332, 260);
+          const isPanorama = isLikelyPanoramaImage(card.item);
+          const panoramaSrc = getLargestCanvasImageSrc(card.item) || getThumbnailImageSrc(card.item);
           return (
             <div key={card.item.id} className="w-full text-left">
               <div className="mb-3 flex items-center gap-1.5 text-[12px] font-bold text-zinc-400">
@@ -1013,25 +1499,42 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
                 {card.title}
               </h3>
               <div className="group relative overflow-visible rounded-[4px] bg-zinc-100" style={previewStyle}>
-                <button
-                  type="button"
-                  onClick={() => openImageViewer(card.item, card.title)}
-                  title="打开大图预览"
-                  className="block h-full w-full text-left"
-                >
-                  <img
-                    src={getThumbnailImageSrc(card.item)}
-                    className="h-full w-full object-cover transition-transform group-hover:scale-[1.01]"
-                    alt={card.title}
-                  />
-                </button>
+                {isPanorama && panoramaSrc ? (
+                  <div className="h-full w-full overflow-hidden rounded-[4px] bg-black">
+                    <PanoramaViewer src={panoramaSrc} title={card.title} compact />
+                    <span className="pointer-events-none absolute left-3 top-3 z-20 rounded-full bg-black/55 px-2.5 py-1 text-[11px] font-black text-white backdrop-blur">
+                      360° 全景
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => openImageViewer(card.item, card.title)}
+                      className="absolute right-3 top-3 z-20 rounded-full bg-white/95 px-3 py-1.5 text-[12px] font-black text-zinc-900 shadow-sm ring-1 ring-black/10 transition-all hover:scale-105 hover:bg-white"
+                      title="打开大图预览"
+                    >
+                      查看大图
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => openImageViewer(card.item, card.title)}
+                    title="打开大图预览"
+                    className="block h-full w-full text-left"
+                  >
+                    <img
+                      src={getThumbnailImageSrc(card.item)}
+                      className="h-full w-full object-cover transition-transform group-hover:scale-[1.01]"
+                      alt={card.title}
+                    />
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={(event) => {
                     event.stopPropagation();
                     openImageSharePanel(card.item, card.title, 'message');
                   }}
-                  className="absolute bottom-14 right-3 flex h-9 w-9 items-center justify-center rounded-full bg-white/95 text-zinc-900 opacity-0 shadow-lg ring-1 ring-black/10 transition-all hover:scale-105 hover:bg-white group-hover:opacity-100"
+                  className="absolute bottom-14 right-3 z-30 flex h-9 w-9 items-center justify-center rounded-full bg-white/95 text-zinc-900 opacity-0 shadow-lg ring-1 ring-black/10 transition-all hover:scale-105 hover:bg-white group-hover:opacity-100"
                   title="分享图片"
                 >
                   <Share2 size={16} />
@@ -1042,7 +1545,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
                     event.stopPropagation();
                     downloadOriginalImage(card.item, card.title);
                   }}
-                  className="absolute bottom-3 right-3 flex h-9 w-9 items-center justify-center rounded-full bg-white/95 text-zinc-900 opacity-0 shadow-lg ring-1 ring-black/10 transition-all hover:scale-105 hover:bg-white group-hover:opacity-100"
+                  className="absolute bottom-3 right-3 z-30 flex h-9 w-9 items-center justify-center rounded-full bg-white/95 text-zinc-900 opacity-0 shadow-lg ring-1 ring-black/10 transition-all hover:scale-105 hover:bg-white group-hover:opacity-100"
                   title="下载原始图片"
                 >
                   <Download size={16} />
@@ -1084,6 +1587,211 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
     </div>
   );
 
+  const renderProductPosterModal = () => {
+    if (!isProductPosterModalOpen || typeof document === 'undefined') return null;
+    const selectedProductImages = productPosterForm.productImageIds
+      .map(imageId => completedImageItems.find(item => item.id === imageId))
+      .filter((item): item is CanvasItem => Boolean(item));
+    const inputClass = 'w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm font-medium text-zinc-900 outline-none transition-all placeholder:text-zinc-400 focus:border-zinc-900 focus:bg-white focus:ring-4 focus:ring-zinc-900/5';
+    const labelClass = 'mb-1.5 block text-[11px] font-black text-zinc-500';
+    const productPosterReady = Boolean(productPosterAnalysis?.readyToGenerate);
+
+    return createPortal(
+      <div className="fixed inset-0 z-[6000001] flex items-center justify-center bg-zinc-950/35 px-4 py-6 backdrop-blur-sm">
+        <div
+          className="flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-3xl border border-zinc-200 bg-white shadow-2xl shadow-zinc-950/20"
+        >
+          <div className="flex items-center justify-between gap-3 border-b border-zinc-100 px-5 py-4">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-zinc-900 text-white">
+                <Package size={20} />
+              </div>
+              <div>
+                <h3 className="text-base font-black text-zinc-950">商品详情图 Agent</h3>
+                <p className="text-xs font-medium text-zinc-500">上传产品图后，自动分析行业并生成多张商品详情图</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsProductPosterModalOpen(false)}
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-zinc-400 transition-colors hover:bg-zinc-50 hover:text-zinc-950"
+              title="关闭"
+            >
+              <X size={18} />
+            </button>
+          </div>
+
+          <div className="grid min-h-0 flex-1 gap-4 overflow-hidden p-5 md:grid-cols-[220px,1fr]">
+            <div className="space-y-3">
+              <label className={labelClass}>选择产品图</label>
+              <div className="grid grid-cols-2 gap-2">
+                {[
+                  { value: 'single' as const, title: '单品模式', description: '同一商品的角度/细节' },
+                  { value: 'series' as const, title: '系列模式', description: '同系列不同产品/SKU' }
+                ].map(option => {
+                  const isActive = productPosterForm.productMode === option.value;
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => updateProductPosterForm('productMode', option.value)}
+                      className={`rounded-2xl border px-3 py-2 text-left transition-all ${
+                        isActive ? 'border-zinc-950 bg-zinc-950 text-white' : 'border-zinc-100 bg-zinc-50 text-zinc-700 hover:border-zinc-300 hover:bg-white'
+                      }`}
+                    >
+                      <span className="block text-xs font-black">{option.title}</span>
+                      <span className={`mt-0.5 block text-[10px] font-bold ${isActive ? 'text-white/65' : 'text-zinc-400'}`}>{option.description}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="rounded-2xl bg-zinc-50 px-3 py-2 text-[11px] font-bold leading-5 text-zinc-500">
+                {productPosterForm.productMode === 'series'
+                  ? '可选择同一系列的多张不同产品图。系统会保留每个产品差异，生成系列展示、对比和组合详情图。'
+                  : '可选择多张同一产品图片。第一张作为主图，其余作为侧面、细节、包装或材质参考。'}
+              </div>
+              <div className="max-h-[420px] space-y-2 overflow-y-auto pr-1">
+                {completedImageItems.map(item => {
+                  const selectedIndex = productPosterForm.productImageIds.indexOf(item.id);
+                  const isSelected = selectedIndex >= 0;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => toggleProductPosterImage(item.id)}
+                      className={`flex w-full items-center gap-3 rounded-2xl border p-2 text-left transition-all ${
+                        isSelected ? 'border-zinc-950 bg-zinc-950 text-white' : 'border-zinc-100 bg-zinc-50 text-zinc-800 hover:border-zinc-300 hover:bg-white'
+                      }`}
+                    >
+                      <span className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-white/80">
+                        <img src={getThumbnailImageSrc(item)} className="h-full w-full object-cover" />
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="flex items-center gap-1.5">
+                          <span className="block min-w-0 flex-1 truncate text-xs font-black">{getCanvasItemDisplayTitle(item)}</span>
+                          {isSelected && (
+                            <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-black ${selectedIndex === 0 ? 'bg-amber-400 text-zinc-950' : 'bg-white/15 text-white'}`}>
+                              {productPosterForm.productMode === 'series'
+                                ? `产品 ${selectedIndex + 1}`
+                                : selectedIndex === 0 ? '主图' : `参考 ${selectedIndex}`}
+                            </span>
+                          )}
+                        </span>
+                      </span>
+                    </button>
+                  );
+                })}
+                {completedImageItems.length === 0 && (
+                  <div className="rounded-2xl border border-dashed border-zinc-200 p-4 text-center text-xs font-bold text-zinc-400">
+                    先拖入或上传一张产品图
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="flex min-h-0 flex-col gap-3">
+              <div
+                ref={productPosterConversationRef}
+                className="min-h-[420px] flex-1 overflow-y-auto rounded-3xl border border-zinc-200 bg-zinc-50/90 p-3"
+              >
+                <div className="grid gap-3">
+                  {productPosterConversation.map(message => (
+                    <div key={message.id} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                      <div className={`max-w-[88%] ${message.role === 'user' ? 'items-end' : 'items-start'} grid gap-1.5`}>
+                        <div
+                          className={`rounded-2xl px-4 py-3 text-sm font-bold leading-6 ${
+                            message.role === 'user'
+                              ? 'bg-zinc-950 text-white'
+                              : 'border border-zinc-200 bg-white text-zinc-800'
+                          }`}
+                        >
+                          <div className="whitespace-pre-wrap break-words">{message.text}</div>
+                        </div>
+                        {message.role === 'assistant' && message.analysis && renderProductPosterAnalysisSnapshot(message.analysis)}
+                      </div>
+                    </div>
+                  ))}
+
+                  {isProductPosterAnalyzing && (
+                    <div className="flex justify-start">
+                      <div className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-bold text-zinc-600">
+                        <Loader2 size={16} className="animate-spin" />
+                        正在分析产品信息...
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="grid gap-3 rounded-3xl border border-zinc-200 bg-white p-3">
+                <form onSubmit={sendProductPosterMessage} className="grid gap-3">
+                  <div>
+                    <label htmlFor="product-poster-input" className={labelClass}>补充产品信息</label>
+                    <div className="relative mb-5">
+                      <textarea
+                        id="product-poster-input"
+                        className={`${inputClass} min-h-[112px] resize-none leading-6`}
+                        value={productPosterDraftInput}
+                        onChange={event => {
+                          setProductPosterDraftInput(event.target.value);
+                          if (productPosterError) setProductPosterError('');
+                        }}
+                        placeholder="像聊天一样告诉我产品信息，例如：这是一款香水，面向 25-35 岁女性，偏高级送礼场景..."
+                      />
+                      <button
+                        type="submit"
+                        disabled={isProductPosterAnalyzing || !productPosterDraftInput.trim()}
+                        className="absolute -bottom-4 right-3 inline-flex h-9 items-center gap-1.5 rounded-lg bg-zinc-950 px-3 text-xs font-black text-white shadow-lg shadow-zinc-950/20 transition-all hover:scale-[1.02] active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {isProductPosterAnalyzing ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
+                        发送
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <label>
+                      <span className={labelClass}>平台风格</span>
+                      <select className={inputClass} value={productPosterForm.platformStyle} onChange={event => updateProductPosterForm('platformStyle', event.target.value)}>
+                        {PRODUCT_POSTER_PLATFORM_OPTIONS.map(option => (
+                          <option key={option} value={option}>{option}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span className={labelClass}>生成数量</span>
+                      <select className={inputClass} value={productPosterForm.posterCount} onChange={event => updateProductPosterForm('posterCount', Number(event.target.value))}>
+                        {[1, 2, 3, 4, 5, 6].map(count => (
+                          <option key={count} value={count}>{count} 张</option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+
+                  {productPosterError && (
+                    <div className="rounded-2xl bg-red-50 px-3 py-2 text-xs font-bold text-red-600">{productPosterError}</div>
+                  )}
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between gap-3 border-t border-zinc-100 px-5 py-4">
+            <div className="text-xs font-bold text-zinc-400">先通过对话补齐商品信息，准备完成后再并行生成商品详情图。</div>
+            <div className="flex items-center gap-2">
+              <button type="button" onClick={() => setIsProductPosterModalOpen(false)} className="h-10 rounded-xl px-4 text-sm font-black text-zinc-500 transition-colors hover:bg-zinc-50 hover:text-zinc-950">取消</button>
+              <button type="button" onClick={submitProductPoster} disabled={selectedProductImages.length === 0 || !productPosterAnalysis || !productPosterReady || isProductPosterAnalyzing} className="inline-flex h-10 items-center gap-2 rounded-xl bg-zinc-950 px-4 text-sm font-black text-white transition-all hover:scale-[1.02] active:scale-95 disabled:cursor-not-allowed disabled:opacity-40">
+                <Sparkles size={16} />
+                确认并生成详情图
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>,
+      document.body
+    );
+  };
+
   const imageViewerControlClass = 'inline-flex h-10 w-10 items-center justify-center rounded-full text-zinc-100 transition-all hover:bg-white/10 hover:text-white active:scale-95 disabled:cursor-not-allowed disabled:opacity-35';
 
   const renderImageViewer = () => {
@@ -1092,6 +1800,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
     const viewerImageSrc = getLargestCanvasImageSrc(imageViewer.item) || getThumbnailImageSrc(imageViewer.item);
     const canZoomOut = imageViewerZoom > IMAGE_VIEWER_MIN_ZOOM;
     const canZoomIn = imageViewerZoom < IMAGE_VIEWER_MAX_ZOOM;
+    const canUsePanoramaViewer = isLikelyPanoramaImage(imageViewer.item) && !!viewerImageSrc;
 
     if (typeof document === 'undefined') return null;
 
@@ -1122,66 +1831,92 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
           <X size={22} />
         </button>
 
-        <div className="pointer-events-none absolute inset-0 z-10 flex select-none items-center justify-center overflow-hidden px-10 py-20" onWheel={handleImageViewerWheel}>
-          <img
-            src={viewerImageSrc}
-            alt={imageViewer.title}
-            draggable={false}
-            onPointerDown={handleImageViewerPointerDown}
-            onPointerMove={handleImageViewerPointerMove}
-            onPointerUp={handleImageViewerPointerEnd}
-            onPointerCancel={handleImageViewerPointerEnd}
-            onClick={(event) => event.stopPropagation()}
-            className={`pointer-events-auto max-h-[calc(100vh-168px)] max-w-[calc(100vw-80px)] object-contain will-change-transform ${
-              imageViewerZoom > 1 ? 'cursor-grab active:cursor-grabbing' : 'cursor-zoom-in'
-            }`}
-            style={{
-              transform: `translate3d(${imageViewerPan.x}px, ${imageViewerPan.y}px, 0) rotate(${imageViewerRotation}deg) scale(${imageViewerZoom})`,
-              transformOrigin: 'center center',
-              transition: imageViewerDragRef.current ? 'none' : 'transform 120ms ease-out'
-            }}
-          />
-        </div>
+        {isPanoramaViewerActive && canUsePanoramaViewer ? (
+          <div className="absolute inset-x-8 inset-y-20 z-10 overflow-hidden rounded-[4px] bg-black ring-1 ring-white/10">
+            <PanoramaViewer src={viewerImageSrc} title={imageViewer.title} />
+          </div>
+        ) : (
+          <div className="pointer-events-none absolute inset-0 z-10 flex select-none items-center justify-center overflow-hidden px-10 py-20" onWheel={handleImageViewerWheel}>
+            <img
+              src={viewerImageSrc}
+              alt={imageViewer.title}
+              draggable={false}
+              onPointerDown={handleImageViewerPointerDown}
+              onPointerMove={handleImageViewerPointerMove}
+              onPointerUp={handleImageViewerPointerEnd}
+              onPointerCancel={handleImageViewerPointerEnd}
+              onClick={(event) => event.stopPropagation()}
+              className={`pointer-events-auto max-h-[calc(100vh-168px)] max-w-[calc(100vw-80px)] object-contain will-change-transform ${
+                imageViewerZoom > 1 ? 'cursor-grab active:cursor-grabbing' : 'cursor-zoom-in'
+              }`}
+              style={{
+                transform: `translate3d(${imageViewerPan.x}px, ${imageViewerPan.y}px, 0) rotate(${imageViewerRotation}deg) scale(${imageViewerZoom})`,
+                transformOrigin: 'center center',
+                transition: imageViewerDragRef.current ? 'none' : 'transform 120ms ease-out'
+              }}
+            />
+          </div>
+        )}
 
         <div className="absolute bottom-9 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 rounded-full bg-zinc-900/80 px-2 py-2 shadow-2xl ring-1 ring-white/10 backdrop-blur-xl">
-            <button
-              type="button"
-              className={imageViewerControlClass}
-              onClick={() => rotateImageViewerBy(-90)}
-              title="向左旋转 90°"
-            >
-              <RotateCcw size={18} />
-            </button>
-            <button
-              type="button"
-              className={imageViewerControlClass}
-              onClick={() => rotateImageViewerBy(90)}
-              title="向右旋转 90°"
-            >
-              <RotateCw size={18} />
-            </button>
-            <span className="mx-1 h-5 w-px bg-white/20" />
-            <button
-              type="button"
-              className={imageViewerControlClass}
-              onClick={() => zoomImageViewerBy(-IMAGE_VIEWER_ZOOM_STEP)}
-              disabled={!canZoomOut}
-              title="缩小"
-            >
-              <ZoomOut size={18} />
-            </button>
-            <div className="min-w-14 px-1 text-center text-xs font-black tabular-nums text-zinc-200">
-              {Math.round(imageViewerZoom * 100)}%
-            </div>
-            <button
-              type="button"
-              className={imageViewerControlClass}
-              onClick={() => zoomImageViewerBy(IMAGE_VIEWER_ZOOM_STEP)}
-              disabled={!canZoomIn}
-              title="放大，最多 10 倍"
-            >
-              <ZoomIn size={18} />
-            </button>
+            {canUsePanoramaViewer && (
+              <>
+                <button
+                  type="button"
+                  className={`${imageViewerControlClass} ${isPanoramaViewerActive ? 'bg-white text-zinc-950 hover:bg-white' : ''}`}
+                  onClick={() => {
+                    setIsPanoramaViewerActive(currentValue => !currentValue);
+                    resetImageViewerTransform();
+                  }}
+                  title={isPanoramaViewerActive ? '切换为平面查看' : '切换为 360° 全景查看'}
+                >
+                  <Globe2 size={18} />
+                </button>
+                <span className="mx-1 h-5 w-px bg-white/20" />
+              </>
+            )}
+            {!isPanoramaViewerActive && (
+              <>
+                <button
+                  type="button"
+                  className={imageViewerControlClass}
+                  onClick={() => rotateImageViewerBy(-90)}
+                  title="向左旋转 90°"
+                >
+                  <RotateCcw size={18} />
+                </button>
+                <button
+                  type="button"
+                  className={imageViewerControlClass}
+                  onClick={() => rotateImageViewerBy(90)}
+                  title="向右旋转 90°"
+                >
+                  <RotateCw size={18} />
+                </button>
+                <span className="mx-1 h-5 w-px bg-white/20" />
+                <button
+                  type="button"
+                  className={imageViewerControlClass}
+                  onClick={() => zoomImageViewerBy(-IMAGE_VIEWER_ZOOM_STEP)}
+                  disabled={!canZoomOut}
+                  title="缩小"
+                >
+                  <ZoomOut size={18} />
+                </button>
+                <div className="min-w-14 px-1 text-center text-xs font-black tabular-nums text-zinc-200">
+                  {Math.round(imageViewerZoom * 100)}%
+                </div>
+                <button
+                  type="button"
+                  className={imageViewerControlClass}
+                  onClick={() => zoomImageViewerBy(IMAGE_VIEWER_ZOOM_STEP)}
+                  disabled={!canZoomIn}
+                  title="放大，最多 10 倍"
+                >
+                  <ZoomIn size={18} />
+                </button>
+              </>
+            )}
             <span className="mx-1 h-5 w-px bg-white/20" />
             <button
               type="button"
@@ -1281,7 +2016,11 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
                         {task.label || `图片任务 ${index + 1}`}
                       </span>
                       <span className="shrink-0 tabular-nums font-black text-gray-400">
-                        已执行 {formatExecutionDuration(timerNow - task.startedAt)}
+                        {task.status === 'completed'
+                          ? `已完成 · 耗时 ${formatExecutionDuration(Math.max(0, (task.completedAt || timerNow) - task.startedAt))}`
+                          : task.status === 'queued'
+                            ? '排队中'
+                            : `已执行 ${formatExecutionDuration(Math.max(0, timerNow - task.startedAt))}`}
                       </span>
                     </div>
                   ))}
@@ -1533,6 +2272,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
           </form>
         </div>
       </div>
+      {renderProductPosterModal()}
       {renderImageViewer()}
     </>
   );

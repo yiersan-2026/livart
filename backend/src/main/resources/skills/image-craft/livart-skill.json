@@ -1,0 +1,18 @@
+{
+  "id": "image-craft",
+  "name": "Image Craft",
+  "version": "1.0.0",
+  "description": "通用视觉创作与提示词编排 Skill，适合商品摄影、商品详情图、海报、社媒图、品牌视觉、插画和编辑摄影。",
+  "sourceUrl": "https://github.com/muqsitnawaz/.agents/tree/main/skills/image-craft",
+  "license": "Source linked; prompt guidance summarized for livart",
+  "enabled": true,
+  "supportedTools": [
+    "tool.image.generate",
+    "tool.image.edit",
+    "tool.image.product-detail",
+    "tool.image.product-photography",
+    "tool.image.poster",
+    "tool.image.social-graphic"
+  ],
+  "promptGuidance": "Image Craft Skill 的核心是先理解和策划，再生成提示词：先读取用户目标、参考图、产品属性、品牌调性、目标平台、受众和最终用途；再判断用途是商品摄影、商品详情图/海报、社媒图、品牌图形、插画、编辑摄影或组合场景；最后按用途匹配专业视觉语言。所有最终提示词都应包含清晰的媒介/风格声明、具体主体与场景、画面要传达的目的、技术执行细节、质量锚点和负面约束。商品摄影必须优先保持产品准确性，识别材质、颜色、比例、logo、纹理和结构；按材质决定光线：玻璃/透明材质用背光或边缘光，金属用大面积柔光和受控反射，织物用侧光呈现纹理，食品用后上方自然光，珠宝用柔光加小点光制造闪耀。商品详情图和海报必须强调视觉层级、网格排版、主标题区、卖点信息区、材质/规格/场景标签、色彩系统、留白和信息密度；文字要短句化、模块化、清晰可读，避免长段落、乱码、二维码、水印、假价格和无关品牌。社媒图必须匹配平台画幅、安全区和缩略图可读性。避免 generic AI look、过度平滑塑料感、主体过多、过度提示、错误画幅、不合理几何、畸形结构、错误透视和无目的装饰。文生图可在用户要求多张时生成差异明显的视觉方案；图生图必须保留原图未指定区域、主体身份、材质、构图、光影、画幅和关键细节。"
+}

@@ -104,6 +104,7 @@ public class AiProxyService {
             "表情僵硬"
     );
     private static final String NEGATIVE_PROMPT_TEXT = "负面约束：避免%s。".formatted(String.join("、", NEGATIVE_PROMPT_TERMS));
+    private static final String PRODUCT_POSTER_FACT_GUARD_TEXT = "关于产品本身的厚度、尺寸、规格、容量、材质级别、性能、认证、适配、工艺、数量等事实属性，只能使用用户明确提供的信息，或产品原图/包装上已经清晰可读的现有文字与标识；禁止自行脑补、补全或杜撰任何具体数值、技术参数或宣传结论。未提供就不要写进画面文案，也不要生成不存在的参数标注；如果出现人物、桌面等参照物但没有明确尺寸，只需让产品视觉比例自然可信，不要据此反推出任何未提供参数。";
     static final String VIEW_CHANGE_GAZE_LOCK_TEXT = "硬性多角度视线约束：人物、动物或角色的身体、头部和眼睛都锁定在原图里的世界坐标中，不跟随新相机转动。"
             + "如果原图角色正对原始相机，当新相机移动到左侧、右侧或斜侧时，画面应看到侧脸或三分之四脸；角色视线仍指向原始相机位置，"
             + "不应继续直视当前画面、当前观看者或新镜头。禁止 looking at viewer、looking at new camera、direct eye contact with the new camera、subject turns head toward the new camera。";
@@ -631,6 +632,7 @@ public class AiProxyService {
             case "3:4" -> "画幅比例要求：最终输出为 3:4 竖向标准构图，不要添加白边、相框或多余留白来凑比例。";
             case "16:9" -> "画幅比例要求：最终输出为 16:9 横向宽屏构图，不要添加白边、相框或多余留白来凑比例。";
             case "9:16" -> "画幅比例要求：最终输出为 9:16 竖向手机屏幕构图，不要添加白边、相框或多余留白来凑比例。";
+            case "2:1" -> "画幅比例要求：最终输出为 2:1 横向完整球形全景 equirectangular 构图，也就是 360° 水平视角 + 180° 垂直视角；左右边缘自然衔接，顶部和底部空间合理连续，不要添加白边、相框或多余留白来凑比例。";
             default -> "";
         };
     }
@@ -699,16 +701,19 @@ public class AiProxyService {
             case "1k|3:4" -> "1152x1536";
             case "1k|16:9" -> "1536x864";
             case "1k|9:16" -> "864x1536";
+            case "1k|2:1" -> "1536x768";
             case "2k|1:1" -> "2048x2048";
             case "2k|4:3" -> "2048x1536";
             case "2k|3:4" -> "1536x2048";
             case "2k|16:9" -> "2048x1152";
             case "2k|9:16" -> "1152x2048";
+            case "2k|2:1" -> "2048x1024";
             case "4k|1:1" -> "2880x2880";
             case "4k|4:3" -> "3264x2448";
             case "4k|3:4" -> "2448x3264";
             case "4k|16:9" -> "3840x2160";
             case "4k|9:16" -> "2160x3840";
+            case "4k|2:1" -> "3840x1920";
             default -> "";
         };
     }
@@ -732,12 +737,16 @@ public class AiProxyService {
             case "3:4" -> Optional.of(new ImageAspect(3, 4));
             case "16:9" -> Optional.of(new ImageAspect(16, 9));
             case "9:16" -> Optional.of(new ImageAspect(9, 16));
+            case "2:1" -> Optional.of(new ImageAspect(2, 1));
             default -> Optional.empty();
         };
     }
 
     private static Optional<ImageAspect> detectPromptAspectRatio(String prompt) {
         String text = prompt == null ? "" : prompt.replace('：', ':').replaceAll("\\s+", "");
+        if (containsAspectRatio(text, 2, 1) || text.contains("360°") || text.contains("360度") || text.toLowerCase(Locale.ROOT).contains("equirectangular")) {
+            return Optional.of(new ImageAspect(2, 1));
+        }
         if (containsAspectRatio(text, 16, 9)) {
             return Optional.of(new ImageAspect(16, 9));
         }
@@ -785,6 +794,8 @@ public class AiProxyService {
                 || "layer-split-subject".equals(normalizedValue)
                 || "layer-split-background".equals(normalizedValue)
                 || "view-change".equals(normalizedValue)
+                || "panorama".equals(normalizedValue)
+                || "product-poster".equals(normalizedValue)
                 || "skill-text-to-image".equals(normalizedValue)
                 || "skill-image-to-image".equals(normalizedValue)) {
             return normalizedValue;
@@ -1480,6 +1491,13 @@ public class AiProxyService {
                 - 只补充画面主体、场景、构图、风格、材质、色彩、光影、镜头/视角和质量描述；最终是否能生成由后续生图接口判断。
                 - 必须在提示词末尾加入完整负面约束：%s
                 - 使用中文输出，保持一段完整提示词。""".formatted(NEGATIVE_PROMPT_TEXT);
+        String productPosterSharedRules = sharedRules.replace(
+                "- 保留用户原始意图，不新增用户没有要求的主体或文字。",
+                "- 保留用户原始意图，不新增用户没有要求的主体；商品详情图任务允许为了电商详情表达补充必要的中文短标题、短卖点和标签。"
+        ).replace(
+                "- 只补充画面主体、场景、构图、风格、材质、色彩、光影、镜头/视角和质量描述；最终是否能生成由后续生图接口判断。",
+                "- 只补充画面主体、场景、构图、风格、材质、色彩、光影、镜头/视角和质量描述；最终是否能生成由后续生图接口判断。\n- %s".formatted(PRODUCT_POSTER_FACT_GUARD_TEXT)
+        );
 
         if ("skill-text-to-image".equals(mode)) {
             return """
@@ -1558,6 +1576,45 @@ public class AiProxyService {
                     - 必须保留原图完整内容、各主要元素身份、结构比例、材质、颜色、服装/外观、核心特征、背景风格、相对位置关系、画幅比例和原始景别。
                     - 允许为了整图新视角合理补全被遮挡侧面和透视细节，但不要只旋转某个元素、不要让背景/地面/桌面/车门/车轮/墙面停留在原视角，也不要改变画面元素类别、人物身份、品牌、服装、表情、材质和色彩。
                     - 不要添加白边、相框、说明文字、坐标轴、3D 控制器或无关新物体。""".formatted(sharedRules, VIEW_CHANGE_GAZE_LOCK_TEXT, VIEW_CHANGE_FRAMING_LOCK_TEXT);
+        }
+
+        if ("panorama".equals(mode)) {
+            return """
+                    %s
+                    - 当前任务是把原图转换为完整球形全景 / equirectangular panorama，不是重新生成无关场景，不是普通扩图，不是改视角。
+                    - 输出必须是 2:1 横向完整球形全景构图，也就是 360° 水平视角 + 180° 垂直视角，可以用于 360° 全景查看器；左右边缘必须自然衔接，顶部和底部空间要合理连续，水平线稳定，画面不能出现白边、黑边、相框或拼贴痕迹。
+                    - 必须保持原图场景主题、主体身份、物体种类、相对位置关系、材质、颜色、光影方向、镜头氛围和核心视觉记忆不变。
+                    - 只允许补全原图视野外为了形成环绕空间所需的合理延展区域，例如左右两侧环境、天空/天花板、地面/桌面、墙面、道路、室内结构、背景空间和遮挡后续区域。
+                    - 原图已有的人物、动物、商品、车辆、家具、建筑、文字/logo 和关键物体不能被替换成新物体，不能改变身份、结构比例、颜色、材质、姿态或核心外观。
+                    - 如果需要补充新区域，新区域必须从原图透视、材质、光源和空间规律自然延展；不要新增与原图无关的主体、人物、品牌、文字、水印、二维码或装饰。
+                    - 使用中文输出一段可直接用于图片编辑接口的完整提示词。""".formatted(sharedRules);
+        }
+
+        if ("product-poster".equals(mode)) {
+            return """
+                    %s
+                    - 当前任务是基于产品原图生成电商商品详情图，不是重新设计一个新商品。
+                    - 必须遵守输入上下文中的产品图模式：单品模式时第 1 张 image 是主产品，其余 image 是角度/细节/包装参考；系列模式时所有 image 是同一产品系列的不同产品/SKU/款式/颜色。
+                    - 单品模式要保持第 1 张产品的形状、颜色、材质、纹理、logo、图案、边缘、结构比例和核心识别点尽量不变；系列模式要分别保留每个产品的独立外观和差异，不要融合成一个商品，也不要只突出其中一个商品。
+                    - 风格目标必须明显偏向“更有艺术感、更简洁、更优雅”：画面安静、克制、高级，像高端品牌画册或精品杂志内页，而不是普通促销海报。
+                    - 一张详情图只讲一个重点：首屏吸引力、材质工艺、场景应用、尺寸参数、人群价值或包装送礼其一；不要把所有信息塞进同一张图。
+                    - 构图必须明显采用杂志排版 / editorial magazine layout：优先使用杂志式网格、标题区、标签区、留白区和轻微不对称的编辑感版式；产品是绝对主角，信息层级清晰，元素少而准，道具少而精，不要为了填满画面堆砌背景或装饰。
+                    - 配色尽量控制在 2 到 3 个主色，优先低饱和、中性色或符合行业气质的克制点缀色；不要使用廉价炫彩渐变、大面积高饱和撞色或脏乱配色。
+                    - 优先强调光影、材质、反射、纹理、颗粒、纸感和空间呼吸感；质感表达比装饰数量更重要。
+                    - 必须先判断产品所在行业，再选择匹配行业的视觉风格和排版密度，不能所有产品都套同一种电商模板：
+                      * 香水、香氛、珠宝、艺术礼品：更有艺术气息，更简洁，更多高级留白，光影和材质更精致，文字更少更克制。
+                      * 美妆、护肤：干净通透，柔和高光，强调成分、功效、肤感和质地。
+                      * 数码、AI、潮流贴纸：科技感、年轻化、桌搭场景，色块和图标更明确。
+                      * 食品饮品：温暖、有食欲、真实场景，强调口味、原料、产地和新鲜感。
+                      * 家居日用：生活方式、空间感、清爽可信，强调尺寸、材质和使用场景。
+                      * 服饰鞋包：穿搭、模特、材质细节，强调版型、面料和搭配。
+                    - 可以根据产品信息和行业特点补充商业背景、真实使用场景、道具、光影、空间层次、信息卡片、图标、分割线、标题区域、卖点区域和详情页模块。
+                    - 如果输入上下文中包含“外部 Skill / Skill 指南”，必须把它作为商品详情图审美、视觉语言、构图层级和提示词结构约束使用。
+                    - 如果用户填写了材质、颜色、款式、场景、人群或卖点，必须体现在商品详情图的文字描述和视觉策略中。
+                    - %s
+                    - 画面必须包含清晰可读的中文短文字：短标题、1 到 3 个核心卖点（普通品类可到 4 个）、材质/规格/适用场景标签；文字要短句化、模块化、排版整齐，像杂志栏位里的品牌文案，不像大促销海报。
+                    - 不要把产品改成其他款式，不要生成长段落、乱码、水印、二维码、无关品牌、虚构价格或与产品冲突的装饰。
+                    - 输出应像可直接上架的电商商品详情图、详情页首屏、卖点说明图、材质工艺图或场景说明图。""".formatted(productPosterSharedRules, PRODUCT_POSTER_FACT_GUARD_TEXT);
         }
 
         return """
@@ -1659,8 +1716,33 @@ public class AiProxyService {
     }
 
     private String finalizeOptimizedPrompt(String mode, String prompt) {
-        String guardedPrompt = "view-change".equals(mode) ? appendViewChangeGazeConstraints(prompt) : prompt;
+        String guardedPrompt = "view-change".equals(mode)
+                ? appendViewChangeGazeConstraints(prompt)
+                : "panorama".equals(mode) ? appendPanoramaConstraints(prompt) : prompt;
         return appendNegativePromptConstraints(guardedPrompt == null ? "" : guardedPrompt);
+    }
+
+    static String appendPanoramaConstraints(String prompt) {
+        String trimmedPrompt = prompt == null ? "" : prompt.trim();
+        if (trimmedPrompt.isBlank()) {
+            return trimmedPrompt;
+        }
+
+        String normalizedPrompt = trimmedPrompt.replaceAll("[。；;，,\\s]+$", "");
+        List<String> constraints = new ArrayList<>();
+        if (!trimmedPrompt.contains("2:1")) {
+            constraints.add("硬性全景画幅约束：最终输出必须是 2:1 横向完整球形全景 equirectangular panorama，也就是 360° 水平视角 + 180° 垂直视角。");
+        }
+        if (!trimmedPrompt.contains("左右边缘")) {
+            constraints.add("硬性全景拼接约束：左右边缘必须自然衔接，顶部和底部空间合理连续，水平线稳定，不能有白边、黑边、相框或拼贴痕迹。");
+        }
+        if (!trimmedPrompt.contains("保持原图场景")) {
+            constraints.add("硬性一致性约束：保持原图场景主题、主体身份、物体种类、相对位置、材质、颜色、光影方向和整体氛围不变，只补全形成 360° 环绕空间所需的合理延展区域。");
+        }
+        if (constraints.isEmpty()) {
+            return trimmedPrompt;
+        }
+        return "%s。\n%s".formatted(normalizedPrompt, String.join("\n", constraints));
     }
 
     static String appendViewChangeGazeConstraints(String prompt) {

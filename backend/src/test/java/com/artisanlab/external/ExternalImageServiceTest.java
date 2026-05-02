@@ -10,6 +10,8 @@ import org.mockito.ArgumentCaptor;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -18,6 +20,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class ExternalImageServiceTest {
     @Test
@@ -131,6 +134,34 @@ class ExternalImageServiceTest {
         } finally {
             server.stop(0);
         }
+    }
+
+    @Test
+    void returnsRecentParseHistory() {
+        ExternalImageParseHistoryMapper parseHistoryMapper = mock(ExternalImageParseHistoryMapper.class);
+        UUID userId = UUID.randomUUID();
+        ExternalImageParseHistoryEntity historyEntity = new ExternalImageParseHistoryEntity();
+        historyEntity.setUserId(userId);
+        historyEntity.setSourceUrl("https://www.xiaohongshu.com/explore/abc");
+        historyEntity.setSourceHost("www.xiaohongshu.com");
+        historyEntity.setImageCount(3);
+        historyEntity.setLastParsedAt(OffsetDateTime.parse("2026-05-01T10:15:30+08:00"));
+        when(parseHistoryMapper.selectRecentByUserId(userId, 8)).thenReturn(List.of(historyEntity));
+
+        ExternalImageService service = new ExternalImageService(
+                properties("http://127.0.0.1:65535/api/v1/external/images"),
+                new ObjectMapper(),
+                mock(AssetService.class),
+                parseHistoryMapper
+        );
+
+        ExternalImageDtos.ParseHistoryResponse response = service.loadParseHistory(userId);
+
+        assertThat(response.items()).hasSize(1);
+        assertThat(response.items().get(0).sourceUrl()).isEqualTo("https://www.xiaohongshu.com/explore/abc");
+        assertThat(response.items().get(0).sourceHost()).isEqualTo("www.xiaohongshu.com");
+        assertThat(response.items().get(0).imageCount()).isEqualTo(3);
+        assertThat(response.items().get(0).lastParsedAt()).isEqualTo(OffsetDateTime.parse("2026-05-01T10:15:30+08:00"));
     }
 
     private ArtisanProperties properties(String endpoint) {

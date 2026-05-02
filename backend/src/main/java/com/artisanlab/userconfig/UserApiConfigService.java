@@ -12,13 +12,8 @@ import java.util.UUID;
 @Service
 public class UserApiConfigService {
     private static final Set<String> IMAGE_MODELS = Set.of("gpt-image-2");
-    private static final Set<String> CHAT_MODELS = Set.of(
-            "gpt-5.5",
-            "gpt-5.4",
-            "gpt-5.4-mini",
-            "gpt-5.3-codex",
-            "gpt-5.2"
-    );
+    private static final String ONLY_CHAT_MODEL = "gpt-5.4-mini";
+    private static final Set<String> CHAT_MODELS = Set.of(ONLY_CHAT_MODEL);
     private static final Set<String> MASKED_API_KEYS = Set.of(
             "",
             "__server_default__",
@@ -37,13 +32,13 @@ public class UserApiConfigService {
             @Value("${artisan.ai.default-base-url:}") String defaultBaseUrl,
             @Value("${artisan.ai.default-api-key:}") String defaultApiKey,
             @Value("${artisan.ai.default-image-model:gpt-image-2}") String defaultImageModel,
-            @Value("${artisan.ai.default-chat-model:gpt-5.5}") String defaultChatModel
+            @Value("${artisan.ai.default-chat-model:gpt-5.4-mini}") String defaultChatModel
     ) {
         this.mapper = mapper;
         this.defaultBaseUrl = defaultBaseUrl == null ? "" : defaultBaseUrl;
         this.defaultApiKey = defaultApiKey == null ? "" : defaultApiKey;
         this.defaultImageModel = defaultImageModel == null ? "" : defaultImageModel;
-        this.defaultChatModel = defaultChatModel == null ? "" : defaultChatModel;
+        this.defaultChatModel = normalizeChatModel(defaultChatModel);
     }
 
     @Transactional(readOnly = true)
@@ -70,7 +65,7 @@ public class UserApiConfigService {
         String baseUrl = normalizeBaseUrl(request.baseUrl());
         String apiKey = request.apiKey() == null ? "" : request.apiKey().trim();
         String imageModel = normalizeModel(request.model(), IMAGE_MODELS, "生图模型不支持");
-        String chatModel = normalizeModel(request.chatModel(), CHAT_MODELS, "对话模型不支持");
+        String chatModel = normalizeChatModel(request.chatModel());
         UserApiConfigEntity existingEntity = mapper.findByUserId(userId);
 
         if (baseUrl.isBlank()) {
@@ -100,7 +95,7 @@ public class UserApiConfigService {
                 entity.getBaseUrl(),
                 UserApiConfigDtos.MASKED_API_KEY,
                 entity.getImageModel(),
-                entity.getChatModel(),
+                normalizeChatModel(entity.getChatModel()),
                 joinUrl(entity.getBaseUrl(), "images/generations"),
                 joinUrl(entity.getBaseUrl(), "images/edits"),
                 entity.getUpdatedAt(),
@@ -123,9 +118,9 @@ public class UserApiConfigService {
                 "默认生图模型不支持"
         );
         String chatModel = normalizeModel(
-                defaultChatModel.isBlank() ? "gpt-5.5" : defaultChatModel,
+                normalizeChatModel(defaultChatModel),
                 CHAT_MODELS,
-                "默认对话模型不支持"
+                "默认对话模型仅支持 gpt-5.4-mini"
         );
 
         return new UserApiConfigDtos.Response(
@@ -155,9 +150,9 @@ public class UserApiConfigService {
                 "默认生图模型不支持"
         );
         String chatModel = normalizeModel(
-                defaultChatModel.isBlank() ? "gpt-5.5" : defaultChatModel,
+                normalizeChatModel(defaultChatModel),
                 CHAT_MODELS,
-                "默认对话模型不支持"
+                "默认对话模型仅支持 gpt-5.4-mini"
         );
 
         return new UserApiConfigDtos.ResolvedConfig(
@@ -176,11 +171,16 @@ public class UserApiConfigService {
                 entity.getBaseUrl(),
                 entity.getApiKey(),
                 entity.getImageModel(),
-                entity.getChatModel(),
+                normalizeChatModel(entity.getChatModel()),
                 joinUrl(entity.getBaseUrl(), "images/generations"),
                 joinUrl(entity.getBaseUrl(), "images/edits"),
                 false
         );
+    }
+
+    private String normalizeChatModel(String model) {
+        String normalized = model == null ? "" : model.trim();
+        return CHAT_MODELS.contains(normalized) ? normalized : ONLY_CHAT_MODEL;
     }
 
     private String normalizeBaseUrl(String baseUrl) {

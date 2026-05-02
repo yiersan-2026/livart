@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Check, DownloadCloud, Link2, Loader2, Search, X } from 'lucide-react';
-import type { ExternalImageCandidate } from '../services/externalImages';
-import { searchExternalImages } from '../services/externalImages';
+import type { ExternalImageCandidate, ExternalImageParseHistoryItem } from '../services/externalImages';
+import { loadExternalImageParseHistory, searchExternalImages } from '../services/externalImages';
 
 const SUPPORTED_SOCIAL_PLATFORMS = [
   { label: '抖音', logo: '抖音', className: 'bg-zinc-950 text-white shadow-[inset_2px_0_0_#25f4ee,inset_-2px_0_0_#fe2c55]' },
@@ -24,6 +24,11 @@ const getCandidateTitle = (candidate: ExternalImageCandidate, index: number) => 
   candidate.formatLabel || candidate.title || `图片 ${index + 1}`
 );
 
+const formatParseHistoryCaption = (item: ExternalImageParseHistoryItem) => {
+  const host = item.sourceHost?.trim() || '已解析链接';
+  return `${host} · ${Math.max(0, item.imageCount || 0)} 张`;
+};
+
 const ExternalImageImportModal: React.FC<ExternalImageImportModalProps> = ({
   isOpen,
   isImporting,
@@ -34,6 +39,8 @@ const ExternalImageImportModal: React.FC<ExternalImageImportModalProps> = ({
   const [images, setImages] = useState<ExternalImageCandidate[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [historyItems, setHistoryItems] = useState<ExternalImageParseHistoryItem[]>([]);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -41,9 +48,37 @@ const ExternalImageImportModal: React.FC<ExternalImageImportModalProps> = ({
       setSourceUrl('');
       setImages([]);
       setSelectedIds([]);
+      setHistoryItems([]);
       setError('');
       setIsSearching(false);
     }
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    let cancelled = false;
+    setIsLoadingHistory(true);
+    loadExternalImageParseHistory()
+      .then(items => {
+        if (!cancelled) {
+          setHistoryItems(items);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setHistoryItems([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsLoadingHistory(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [isOpen]);
 
   const selectedImages = useMemo(() => {
@@ -160,56 +195,97 @@ const ExternalImageImportModal: React.FC<ExternalImageImportModalProps> = ({
           )}
         </div>
 
-        <div className="min-h-[280px] flex-1 overflow-y-auto px-6 py-5">
-          {isSearching ? (
-            <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-              {Array.from({ length: 8 }).map((_, index) => (
-                <div key={index} className="aspect-[4/5] animate-pulse bg-white ring-1 ring-gray-100" />
-              ))}
+        <div className="flex min-h-[360px] flex-1 overflow-hidden">
+          <aside className="flex w-[250px] shrink-0 flex-col border-r border-gray-100 bg-white/60 px-5 py-5">
+            <div className="text-[11px] font-black uppercase tracking-[0.14em] text-gray-400">
+              最近解析过的链接
             </div>
-          ) : images.length > 0 ? (
-            <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-              {images.map((candidate, index) => {
-                const selected = selectedIds.includes(candidate.id);
-                return (
-                  <button
-                    key={`${candidate.id}-${candidate.url}`}
-                    type="button"
-                    onClick={() => handleToggleImage(candidate)}
-                    aria-label={`选择${getCandidateTitle(candidate, index)}`}
-                    title={getCandidateTitle(candidate, index)}
-                    className={`group relative aspect-[4/5] overflow-hidden border bg-white p-2 transition-colors duration-150 ${
-                      selected
-                        ? 'border-zinc-900 ring-2 ring-zinc-900/10'
-                        : 'border-gray-200 hover:border-gray-400'
-                    }`}
-                  >
-                    <div className="flex h-full w-full items-center justify-center overflow-hidden bg-gray-50">
-                      <img
-                        src={candidate.thumbnailUrl || candidate.url}
-                        alt={getCandidateTitle(candidate, index)}
-                        className="max-h-full max-w-full object-contain"
-                        loading="lazy"
-                      />
-                    </div>
-                    {selected && (
-                      <span className="absolute right-4 top-4 flex h-8 w-8 items-center justify-center rounded-full bg-zinc-900 text-white ring-4 ring-white">
-                        <Check size={15} />
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
+            <div className="mt-4 min-h-0 flex-1 overflow-y-auto pr-1">
+              {isLoadingHistory ? (
+                <div className="space-y-2">
+                  {Array.from({ length: 6 }).map((_, index) => (
+                    <div key={index} className="h-14 animate-pulse rounded-2xl bg-gray-100" />
+                  ))}
+                </div>
+              ) : historyItems.length > 0 ? (
+                <div className="space-y-2">
+                  {historyItems.map((item) => (
+                    <button
+                      key={item.sourceUrl}
+                      type="button"
+                      onClick={() => setSourceUrl(item.sourceUrl)}
+                      disabled={isSearching || isImporting}
+                      title={item.sourceUrl}
+                      className="block w-full rounded-2xl border border-gray-200 bg-white px-3 py-3 text-left transition-colors hover:border-zinc-900 hover:bg-zinc-50 disabled:opacity-50"
+                    >
+                      <div className="line-clamp-2 break-all text-[12px] font-black leading-5 text-gray-900">
+                        {item.sourceUrl}
+                      </div>
+                      <div className="mt-1 text-[11px] font-bold text-gray-400">
+                        {formatParseHistoryCaption(item)}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="rounded-2xl border border-dashed border-gray-200 bg-white/80 px-4 py-5 text-xs font-bold leading-5 text-gray-300">
+                  暂时还没有解析记录
+                </div>
+              )}
             </div>
-          ) : (
-            <div className="flex h-[280px] flex-col items-center justify-center rounded-[28px] border border-dashed border-gray-200 bg-white/70 text-center">
-              <DownloadCloud size={34} className="text-gray-300" />
-              <div className="mt-3 text-sm font-black text-gray-700">还没有解析图片</div>
-              <div className="mt-1 text-xs font-bold text-gray-400">
-                支持 {SUPPORTED_SOCIAL_PLATFORM_TEXT}，输入链接后点击“解析”。
+          </aside>
+
+          <div className="min-w-0 flex-1 overflow-y-auto px-6 py-5">
+            {isSearching ? (
+              <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+                {Array.from({ length: 8 }).map((_, index) => (
+                  <div key={index} className="aspect-[4/5] animate-pulse bg-white ring-1 ring-gray-100" />
+                ))}
               </div>
-            </div>
-          )}
+            ) : images.length > 0 ? (
+              <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+                {images.map((candidate, index) => {
+                  const selected = selectedIds.includes(candidate.id);
+                  return (
+                    <button
+                      key={`${candidate.id}-${candidate.url}`}
+                      type="button"
+                      onClick={() => handleToggleImage(candidate)}
+                      aria-label={`选择${getCandidateTitle(candidate, index)}`}
+                      title={getCandidateTitle(candidate, index)}
+                      className={`group relative aspect-[4/5] overflow-hidden border bg-white p-2 transition-colors duration-150 ${
+                        selected
+                          ? 'border-zinc-900 ring-2 ring-zinc-900/10'
+                          : 'border-gray-200 hover:border-gray-400'
+                      }`}
+                    >
+                      <div className="flex h-full w-full items-center justify-center overflow-hidden bg-gray-50">
+                        <img
+                          src={candidate.thumbnailUrl || candidate.url}
+                          alt={getCandidateTitle(candidate, index)}
+                          className="max-h-full max-w-full object-contain"
+                          loading="lazy"
+                        />
+                      </div>
+                      {selected && (
+                        <span className="absolute right-4 top-4 flex h-8 w-8 items-center justify-center rounded-full bg-zinc-900 text-white ring-4 ring-white">
+                          <Check size={15} />
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="flex h-full min-h-[280px] flex-col items-center justify-center rounded-[28px] border border-dashed border-gray-200 bg-white/70 text-center">
+                <DownloadCloud size={34} className="text-gray-300" />
+                <div className="mt-3 text-sm font-black text-gray-700">还没有解析图片</div>
+                <div className="mt-1 text-xs font-bold text-gray-400">
+                  支持 {SUPPORTED_SOCIAL_PLATFORM_TEXT}，输入链接后点击“解析”。
+                </div>
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="flex items-center justify-between border-t border-gray-100 bg-white px-6 py-4">

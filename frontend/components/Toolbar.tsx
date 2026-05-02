@@ -1,6 +1,6 @@
 
 import React, { useRef } from 'react';
-import { MousePointer2, Hand, Image as ImageIcon, Type, ZoomIn, ZoomOut, Maximize, Undo2, Redo2, LayoutGrid, DownloadCloud } from 'lucide-react';
+import { MousePointer2, Hand, Image as ImageIcon, Type, ZoomIn, ZoomOut, Maximize, Undo2, Redo2, LayoutGrid, DownloadCloud, Package } from 'lucide-react';
 import type { CanvasTool } from '../types';
 
 interface ToolbarProps {
@@ -9,6 +9,7 @@ interface ToolbarProps {
   onResetView: () => void;
   onAddImage: (file: File) => void;
   onOpenExternalImageImport: () => void;
+  onOpenProductPoster: () => void;
   onAddText: () => void;
   activeTool: CanvasTool;
   onToolChange: (tool: CanvasTool) => void;
@@ -16,11 +17,12 @@ interface ToolbarProps {
   canRedo: boolean;
   onUndo: () => void;
   onRedo: () => void;
+  canOpenProductPoster: boolean;
   canAutoArrangeImages: boolean;
   onAutoArrangeImages: () => void;
 }
 
-const Toolbar: React.FC<ToolbarProps> = ({ zoom, onZoomChange, onResetView, onAddImage, onOpenExternalImageImport, onAddText, activeTool, onToolChange, canUndo, canRedo, onUndo, onRedo, canAutoArrangeImages, onAutoArrangeImages }) => {
+const Toolbar: React.FC<ToolbarProps> = ({ zoom, onZoomChange, onResetView, onAddImage, onOpenExternalImageImport, onOpenProductPoster, onAddText, activeTool, onToolChange, canUndo, canRedo, onUndo, onRedo, canOpenProductPoster, canAutoArrangeImages, onAutoArrangeImages }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleImageClick = () => {
@@ -107,6 +109,16 @@ const Toolbar: React.FC<ToolbarProps> = ({ zoom, onZoomChange, onResetView, onAd
         >
           <DownloadCloud size={18} />
           {renderTooltip('社媒图片')}
+        </button>
+
+        <button
+          onClick={onOpenProductPoster}
+          disabled={!canOpenProductPoster}
+          className={iconButtonClass}
+          aria-label="商品详情图"
+        >
+          <Package size={18} />
+          {renderTooltip(canOpenProductPoster ? '商品详情图' : '先上传产品图')}
         </button>
 
         <button 

@@ -9,7 +9,7 @@ import {
   Copy, Layers, Scissors, Check, X,
   Palette, Maximize2, Wand2,
   Download, Send, AlignLeft, AlignCenter, AlignRight, SlidersHorizontal,
-  Box, Eye, RefreshCw, Rotate3D, RotateCcw, RotateCw, Share2
+  Box, Eye, RefreshCw, Rotate3D, RotateCcw, RotateCw, Share2, Globe2
 } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
 import { getImageJobQueueMessage, type ImageGenerationResult, type ImageJobStatus, waitForImageJob } from '../services/gemini';
@@ -136,6 +136,7 @@ type SnapCandidate = {
 const REMOVER_PROMPT = '把圈起来的地方删除掉。';
 const LOCAL_REDRAW_PROMPT = '自然重绘用户涂抹的局部区域，保持未涂抹区域完全不变，并让新内容与原图的光影、材质、透视和风格自然一致。';
 const BACKGROUND_REMOVAL_PROMPT = '先识别图片中的主要主体：画面最主要的人物、商品、动物、车辆或成组前景对象；主体包含其穿戴、手持、贴附和与主体直接组成整体的部分。只保留主体，把主体以外的一切背景和无关物体替换为纯白色背景（#FFFFFF），不要透明背景，不要浅灰、米白或渐变。不要改变主体 RGB 像素，不要重绘、修复、补全、美化、移动或缩放主体；严格保留原图中已经可见的主体像素、裁切范围、构图、脸、表情、姿态、服装、颜色、纹理、发丝和边缘细节；原图里被裁切到画面外的身体、头发、衣服不要补出来。输出白底图片。';
+const PANORAMA_PROMPT = '完整球形全景转换：请把原图中的完整场景扩展并转换为可用于 360° 查看的完整球形全景图，也就是 360° 水平视角 + 180° 垂直视角的 2:1 equirectangular spherical panorama。保持原图的场景主题、主体身份、物体种类、相对位置关系、材质、颜色、光影方向和整体氛围不变；只补全原图视野外左右两侧、天空/天花板、地面/桌面等需要形成完整环绕空间的合理延展区域。输出必须是可用于全景查看器的 2:1 横向完整球形全景构图，左右边缘自然衔接，顶部和底部空间合理连续，水平线稳定，不要把主体重绘成新物体，不要改变原图已有物体的身份、结构和核心外观，不要添加白边、相框、文字、水印或无关元素。';
 const LAYER_SPLIT_SUBJECT_PROMPT = '图层拆分：请把这张图拆出“主体层”。先识别画面主要前景主体，主体包含其穿戴、手持、贴附和直接组成整体的部分；输出同画幅主体图层，主体以外区域必须是透明 alpha，不要生成新背景，不要改变主体身份、结构、比例、颜色、材质、边缘、光影和原有裁切。';
 const LAYER_SPLIT_BACKGROUND_PROMPT = '图层拆分：请把这张图拆出“背景层”。先识别画面主要前景主体，然后移除主体及其接触阴影、遮挡残影和边缘碎片；用周围背景的纹理、透视、光影、反射、噪点和景深自然补全，保持原图画幅、镜头视角和背景风格不变，不要新增主体或新场景。';
 const ENABLE_LAYER_SPLIT_TOOL = false;
@@ -2122,6 +2123,15 @@ const Canvas: React.FC<CanvasProps> = ({
     });
   };
 
+  const applyPanorama = (item: CanvasItem) => {
+    void handleInlineImageRedraw(undefined, {
+      item,
+      prompt: PANORAMA_PROMPT,
+      mode: 'panorama',
+      userMessage: `全景化 @${item.id}`
+    });
+  };
+
   const handleImageLayerSplit = async (item: CanvasItem) => {
     if (item.type !== 'image' || item.status !== 'completed' || !item.content || inlineEditingIdsRef.current.has(item.id)) return;
 
@@ -3037,14 +3047,15 @@ const Canvas: React.FC<CanvasProps> = ({
 
   const handleInlineImageRedraw = async (
     event?: React.FormEvent,
-    options?: { item?: CanvasItem; prompt?: string; mode?: 'background-removal' | 'view-change'; userMessage?: string }
+    options?: { item?: CanvasItem; prompt?: string; mode?: 'background-removal' | 'view-change' | 'panorama'; userMessage?: string }
   ) => {
     event?.preventDefault();
     const targetCandidate = options?.item || selectedItem;
     const rawPrompt = (options?.prompt ?? inlineEditPrompt).trim();
     const isBackgroundRemovalMode = options?.mode === 'background-removal';
     const isViewChangeMode = options?.mode === 'view-change';
-    const isRemoverMode = !isBackgroundRemovalMode && !isViewChangeMode && targetCandidate?.type === 'image' && localRemoverItemId === targetCandidate.id;
+    const isPanoramaMode = options?.mode === 'panorama';
+    const isRemoverMode = !isBackgroundRemovalMode && !isViewChangeMode && !isPanoramaMode && targetCandidate?.type === 'image' && localRemoverItemId === targetCandidate.id;
     if ((!rawPrompt && !isRemoverMode && !isBackgroundRemovalMode) || !targetCandidate || targetCandidate.type !== 'image' || inlineEditingIdsRef.current.has(targetCandidate.id)) return;
 
     const targetItem = targetCandidate;
@@ -3054,9 +3065,13 @@ const Canvas: React.FC<CanvasProps> = ({
         : REMOVER_PROMPT
       : isBackgroundRemovalMode
         ? rawPrompt || BACKGROUND_REMOVAL_PROMPT
+      : isPanoramaMode
+        ? rawPrompt || PANORAMA_PROMPT
       : rawPrompt;
     const userMessage = options?.userMessage || (isBackgroundRemovalMode
       ? `去背景 @${targetItem.id}`
+      : isPanoramaMode
+      ? `全景化 @${targetItem.id}`
       : isViewChangeMode
       ? `多角度 @${targetItem.id}`
       : isRemoverMode
@@ -3064,9 +3079,9 @@ const Canvas: React.FC<CanvasProps> = ({
         ? `删除 @${targetItem.id} 圈选区域：${rawPrompt}`
         : `删除 @${targetItem.id} 圈选区域`
       : `编辑 @${targetItem.id}：${rawPrompt}`);
-    const localMaskMode: ImageMaskMode | null = !isBackgroundRemovalMode && !isViewChangeMode && localRemoverItemId === targetItem.id
+    const localMaskMode: ImageMaskMode | null = !isBackgroundRemovalMode && !isViewChangeMode && !isPanoramaMode && localRemoverItemId === targetItem.id
       ? 'remover'
-      : !isBackgroundRemovalMode && !isViewChangeMode && localRedrawItemId === targetItem.id ? 'local-redraw' : null;
+      : !isBackgroundRemovalMode && !isViewChangeMode && !isPanoramaMode && localRedrawItemId === targetItem.id ? 'local-redraw' : null;
     const useLocalMask = !!localMaskMode;
     const startedAt = Date.now();
     let imageTaskStartedAt: number | null = null;
@@ -3076,12 +3091,18 @@ const Canvas: React.FC<CanvasProps> = ({
     const agentRunClientId = createAgentRunClientId();
     const inlineAgentMode: AgentPlan['mode'] = isBackgroundRemovalMode
       ? 'background-removal'
+      : isPanoramaMode
+        ? 'panorama'
       : isViewChangeMode
         ? 'view-change'
         : isRemoverMode ? 'remover' : 'edit';
-    const inlineAgentAspectRatio = isRemoverMode || isBackgroundRemovalMode || isViewChangeMode ? 'auto' : inlineEditAspectRatio;
+    const inlineAgentAspectRatio: ImageAspectRatio = isPanoramaMode
+      ? '2:1'
+      : isRemoverMode || isBackgroundRemovalMode || isViewChangeMode ? 'auto' : inlineEditAspectRatio;
     const forcedToolId: AgentToolId = isBackgroundRemovalMode
       ? 'tool.image.remove-background'
+      : isPanoramaMode
+        ? 'tool.image.panorama'
       : isViewChangeMode
         ? 'tool.image.change-view'
         : isRemoverMode
@@ -3091,6 +3112,8 @@ const Canvas: React.FC<CanvasProps> = ({
             : 'tool.image.edit';
     const inlineTaskActionLabel = isViewChangeMode
       ? '多角度'
+      : isPanoramaMode
+        ? '全景'
       : isBackgroundRemovalMode
         ? '去背景'
         : isRemoverMode
@@ -3200,7 +3223,7 @@ const Canvas: React.FC<CanvasProps> = ({
         prompt: agentPrompt,
         aspectRatio: inlineAgentAspectRatio,
         contextImageId: targetItem.id,
-        requestedEditMode: localMaskMode || (isViewChangeMode ? 'view-change' : undefined),
+        requestedEditMode: localMaskMode || (isPanoramaMode ? 'panorama' : isViewChangeMode ? 'view-change' : undefined),
         forcedToolId,
         images: persistentAgentImages,
         maskDataUrl: maskDataUrl || undefined,
@@ -3234,11 +3257,11 @@ const Canvas: React.FC<CanvasProps> = ({
       const nextZIndex = Math.max(0, ...items.map(item => item.zIndex || 0)) + 1;
       const newId = Math.random().toString(36).substr(2, 9);
       const resultMaxLongSide = Math.max(editBaseItem.width, editBaseItem.height);
-      const shouldPreserveSourceFrame = isRemoverMode || isBackgroundRemovalMode || isViewChangeMode || inlineEditAspectRatio === 'auto';
+      const shouldPreserveSourceFrame = isRemoverMode || isBackgroundRemovalMode || isViewChangeMode || (!isPanoramaMode && inlineEditAspectRatio === 'auto');
       const resultFrame = shouldPreserveSourceFrame
         ? fitDimensionsToLongSide(editBaseItem.width, editBaseItem.height, resultMaxLongSide)
         : getAspectRatioFrame(
-          inlineEditAspectRatio,
+          inlineAgentAspectRatio,
           editBaseItem.width,
           editBaseItem.height,
           resultMaxLongSide
@@ -3253,7 +3276,7 @@ const Canvas: React.FC<CanvasProps> = ({
         width: resultFrame.width,
         height: resultFrame.height,
         status: 'loading',
-        label: isViewChangeMode ? 'AI 改视角中...' : isBackgroundRemovalMode ? 'AI 去背景中...' : isRemoverMode ? 'AI 删除中...' : 'AI 重绘中...',
+        label: isPanoramaMode ? 'AI 全景化中...' : isViewChangeMode ? 'AI 改视角中...' : isBackgroundRemovalMode ? 'AI 去背景中...' : isRemoverMode ? 'AI 删除中...' : 'AI 重绘中...',
         zIndex: nextZIndex,
         parentId: editBaseItem.id,
         prompt: agentRun.requestPrompt || agentPrompt,
@@ -3285,7 +3308,7 @@ const Canvas: React.FC<CanvasProps> = ({
 
           if (jobStatus.status === 'running' && queuedInlineJob) {
             syncInlineAgentPlanMessage(inlineAgentPlan, '等待生成：图片编辑已开始执行。');
-            onItemUpdate(newId, { label: isViewChangeMode ? 'AI 改视角中...' : isBackgroundRemovalMode ? 'AI 去背景中...' : isRemoverMode ? 'AI 删除中...' : 'AI 重绘中...' });
+            onItemUpdate(newId, { label: isPanoramaMode ? 'AI 全景化中...' : isViewChangeMode ? 'AI 改视角中...' : isBackgroundRemovalMode ? 'AI 去背景中...' : isRemoverMode ? 'AI 删除中...' : 'AI 重绘中...' });
           }
         }
       });
@@ -3308,7 +3331,7 @@ const Canvas: React.FC<CanvasProps> = ({
       );
       const resultTitle = agentRun.displayTitle || agentRun.plan.displayTitle || generateImageTitleFromPrompt(
         rawPrompt || prompt || optimizedPrompt || agentRun.requestPrompt || agentPrompt,
-        isViewChangeMode ? '多角度视图' : isBackgroundRemovalMode ? '去背景' : isRemoverMode ? '删除物体' : '编辑结果'
+        isPanoramaMode ? '360全景图' : isViewChangeMode ? '多角度视图' : isBackgroundRemovalMode ? '去背景' : isRemoverMode ? '删除物体' : '编辑结果'
       );
       const resultDescription = buildImageResultDescription(resultTitle, 'edited');
       const persistedResultItem = await ensureCanvasImageAsset({
@@ -3347,6 +3370,8 @@ const Canvas: React.FC<CanvasProps> = ({
       const executionTitle = ensureImageNoun(resultTitle);
       const fallbackExecutionMessage = isBackgroundRemovalMode
         ? `我将为您去除这张${executionTitle}的背景。`
+        : isPanoramaMode
+          ? `我将为您把这张${executionTitle}转换成完整球形全景图。`
         : isViewChangeMode
           ? `我将为您生成这张${executionTitle}的新视角。`
         : isRemoverMode
@@ -3418,7 +3443,7 @@ const Canvas: React.FC<CanvasProps> = ({
         setActiveTool('brush');
       }
       setInlineEditErrors(prev => ({ ...prev, [targetItem.id]: message }));
-      onChatMessage(`出错了，没能完成${isViewChangeMode ? '多角度' : '单图编辑'}：${message}`, 'assistant', {
+      onChatMessage(`出错了，没能完成${isPanoramaMode ? '全景化' : isViewChangeMode ? '多角度' : '单图编辑'}：${message}`, 'assistant', {
         durationMs: Date.now() - startedAt
       });
     } finally {
@@ -4593,6 +4618,15 @@ const Canvas: React.FC<CanvasProps> = ({
                   title="打开多角度面板，按旋转、倾斜和缩放生成新视角"
                 >
                   <Rotate3D size={15} />多角度
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyPanorama(selectedItem)}
+                  disabled={selectedItemIsInlineEditing || selectedItem.status === 'loading'}
+                  className="flex h-11 shrink-0 items-center gap-1.5 border-r border-zinc-100 px-3 text-xs font-bold text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 disabled:opacity-35"
+                  title="把当前图片转换为 2:1 的完整球形全景图"
+                >
+                  <Globe2 size={15} />全景
                 </button>
                 {ENABLE_LAYER_SPLIT_TOOL && (
                   <button

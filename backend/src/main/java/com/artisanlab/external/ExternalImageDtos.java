@@ -24,6 +24,19 @@ public final class ExternalImageDtos {
     ) {
     }
 
+    public record ParseHistoryItem(
+            String sourceUrl,
+            String sourceHost,
+            int imageCount,
+            OffsetDateTime lastParsedAt
+    ) {
+    }
+
+    public record ParseHistoryResponse(
+            List<ParseHistoryItem> items
+    ) {
+    }
+
     public record ImageCandidate(
             String id,
             String url,

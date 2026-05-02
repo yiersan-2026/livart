@@ -8,7 +8,6 @@ import {
   getImageReferenceLabel,
   getImageReferenceMentionLabel,
   getImageReferenceMentionValue,
-  getTrailingImageMentionQuery,
   insertImageMention,
   tokenizeImageReferenceText
 } from '../services/imageReferences';
@@ -77,6 +76,116 @@ const readEditorText = (root: ParentNode) => {
   return text;
 };
 
+const MENTION_BREAK_PATTERN = /[\s@，。,.!?！？:：；;]/;
+
+const getImageMentionContextAtCaret = (value: string, caretOffset: number) => {
+  const safeCaretOffset = Math.max(0, Math.min(caretOffset, value.length));
+
+  for (let index = safeCaretOffset - 1; index >= 0; index -= 1) {
+    const currentChar = value[index];
+    if (currentChar === '@') {
+      return {
+        start: index,
+        end: safeCaretOffset,
+        query: value.slice(index + 1, safeCaretOffset),
+        caretOffset: safeCaretOffset
+      };
+    }
+
+    if (MENTION_BREAK_PATTERN.test(currentChar)) {
+      break;
+    }
+  }
+
+  return null;
+};
+
+const getCaretOffset = (editor: HTMLElement) => {
+  const selection = window.getSelection();
+  const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+  if (!range || !range.collapsed || !editor.contains(range.startContainer)) return null;
+
+  const beforeRange = range.cloneRange();
+  beforeRange.selectNodeContents(editor);
+  beforeRange.setEnd(range.startContainer, range.startOffset);
+
+  return readEditorText(beforeRange.cloneContents()).length;
+};
+
+const moveCaretToOffset = (editor: HTMLElement, targetOffset: number) => {
+  requestAnimationFrame(() => {
+    editor.focus();
+
+    const range = document.createRange();
+    const selection = window.getSelection();
+    const totalLength = readEditorText(editor).length;
+    let remaining = Math.max(0, Math.min(targetOffset, totalLength));
+    let positioned = false;
+
+    const placeAfterNode = (node: Node) => {
+      const parent = node.parentNode;
+      if (!parent) return;
+      const childIndex = Array.prototype.indexOf.call(parent.childNodes, node);
+      range.setStart(parent, childIndex + 1);
+      range.collapse(true);
+      positioned = true;
+    };
+
+    const walk = (node: Node) => {
+      if (positioned) return;
+
+      if (node.nodeType === Node.TEXT_NODE) {
+        const textContent = node.textContent?.replace(/\u00a0/g, ' ') || '';
+        if (remaining <= textContent.length) {
+          range.setStart(node, remaining);
+          range.collapse(true);
+          positioned = true;
+          return;
+        }
+        remaining -= textContent.length;
+        return;
+      }
+
+      if (!(node instanceof HTMLElement) && !(node instanceof DocumentFragment)) return;
+
+      if (node instanceof HTMLElement) {
+        if (node.dataset.imageMentionValue) {
+          const mentionLength = node.dataset.imageMentionValue.length;
+          if (remaining <= mentionLength) {
+            placeAfterNode(node);
+            return;
+          }
+          remaining -= mentionLength;
+          return;
+        }
+
+        if (node.dataset.placeholder !== undefined) return;
+
+        if (node.tagName === 'BR') {
+          if (remaining <= 1) {
+            placeAfterNode(node);
+            return;
+          }
+          remaining -= 1;
+          return;
+        }
+      }
+
+      node.childNodes.forEach(walk);
+    };
+
+    editor.childNodes.forEach(walk);
+
+    if (!positioned) {
+      range.selectNodeContents(editor);
+      range.collapse(false);
+    }
+
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  });
+};
+
 const moveCaretToEnd = (editor: HTMLElement) => {
   requestAnimationFrame(() => {
     editor.focus();
@@ -129,6 +238,7 @@ const ImageMentionEditor: React.FC<ImageMentionEditorProps> = ({
   itemHint,
   onSubmitShortcut
 }) => {
+  const mentionContextRef = useRef<ReturnType<typeof getImageMentionContextAtCaret>>(null);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [activePreviewId, setActivePreviewId] = useState<string | null>(null);
@@ -267,7 +377,24 @@ const ImageMentionEditor: React.FC<ImageMentionEditorProps> = ({
     setSearchQuery(query || '');
   };
 
-  const syncEditorContent = (nextValue: string, focusEnd = false) => {
+  const syncMentionStateWithCaret = (nextValue: string) => {
+    const editor = editorRef.current;
+    const caretOffset = editor ? getCaretOffset(editor) : null;
+    const nextMentionContext = caretOffset === null
+      ? null
+      : getImageMentionContextAtCaret(nextValue, caretOffset);
+
+    mentionContextRef.current = nextMentionContext;
+    openMentionPicker(nextMentionContext?.query ?? null);
+  };
+
+  const syncEditorContent = (
+    nextValue: string,
+    options: {
+      focus?: boolean;
+      caretOffset?: number;
+    } = {}
+  ) => {
     const editor = editorRef.current;
     if (!editor) return;
 
@@ -304,19 +431,27 @@ const ImageMentionEditor: React.FC<ImageMentionEditorProps> = ({
       editor.appendChild(chip);
     }
 
-    if (focusEnd) moveCaretToEnd(editor);
+    if (!options.focus) return;
+
+    if (typeof options.caretOffset === 'number') {
+      moveCaretToOffset(editor, options.caretOffset);
+      return;
+    }
+
+    moveCaretToEnd(editor);
   };
 
   const emitEditorValue = (nextValue: string) => {
     lastEditorValueRef.current = nextValue;
     onChange(nextValue);
-    openMentionPicker(getTrailingImageMentionQuery(nextValue));
+    syncMentionStateWithCaret(nextValue);
   };
 
   useEffect(() => {
     if (value === lastEditorValueRef.current) return;
     lastEditorValueRef.current = value;
     syncEditorContent(value);
+    mentionContextRef.current = null;
     closeMentionPicker();
   }, [value, imageItems]);
 
@@ -326,6 +461,12 @@ const ImageMentionEditor: React.FC<ImageMentionEditorProps> = ({
 
   const handleInput = (event: React.FormEvent<HTMLDivElement>) => {
     emitEditorValue(readEditorText(event.currentTarget));
+  };
+
+  const handleSelectionChange = () => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    syncMentionStateWithCaret(readEditorText(editor));
   };
 
   const handlePaste = (event: React.ClipboardEvent<HTMLDivElement>) => {
@@ -403,11 +544,20 @@ const ImageMentionEditor: React.FC<ImageMentionEditorProps> = ({
   const handleMentionSelect = (item: CanvasItem) => {
     const editor = editorRef.current;
     const currentValue = editor ? readEditorText(editor) : value;
-    const nextValue = insertImageMention(currentValue, item, imageItems);
+    const mentionContext = mentionContextRef.current;
+    const mentionValue = `${getImageReferenceMentionValue(item)} `;
+    const nextValue = mentionContext
+      ? `${currentValue.slice(0, mentionContext.start)}${mentionValue}${currentValue.slice(mentionContext.end)}`
+      : insertImageMention(currentValue, item, imageItems);
+    const nextCaretOffset = mentionContext
+      ? mentionContext.start + mentionValue.length
+      : nextValue.length;
+
     lastEditorValueRef.current = nextValue;
     onChange(nextValue);
+    mentionContextRef.current = null;
     closeMentionPicker();
-    syncEditorContent(nextValue, true);
+    syncEditorContent(nextValue, { focus: true, caretOffset: nextCaretOffset });
   };
 
   const dropdown = mentionQuery !== null && !disabled ? (
@@ -556,8 +706,11 @@ const ImageMentionEditor: React.FC<ImageMentionEditorProps> = ({
         contentEditable={!disabled}
         suppressContentEditableWarning
         onInput={handleInput}
+        onKeyUp={handleSelectionChange}
         onKeyDown={handleKeyDown}
+        onMouseUp={handleSelectionChange}
         onPaste={handlePaste}
+        onFocus={handleSelectionChange}
         className={className}
       />
     </div>

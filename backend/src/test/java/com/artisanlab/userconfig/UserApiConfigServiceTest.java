@@ -88,6 +88,28 @@ class UserApiConfigServiceTest {
         assertThat(resolvedConfig.apiKey()).isEqualTo("sk-default");
     }
 
+    @Test
+    void legacyChatModelIsForcedToGpt54Mini() {
+        UUID userId = UUID.randomUUID();
+        UserApiConfigMapper mapper = mock(UserApiConfigMapper.class);
+        UserApiConfigEntity existingEntity = entity(userId, "https://api.example/v1", "sk-existing");
+        existingEntity.setChatModel("gpt-5.5");
+        when(mapper.findByUserId(userId)).thenReturn(existingEntity);
+        UserApiConfigService service = new UserApiConfigService(
+                mapper,
+                "",
+                "",
+                "gpt-image-2",
+                "gpt-5.5"
+        );
+
+        UserApiConfigDtos.Response response = service.getConfig(userId);
+        UserApiConfigDtos.ResolvedConfig resolvedConfig = service.getRequiredConfig(userId);
+
+        assertThat(response.chatModel()).isEqualTo("gpt-5.4-mini");
+        assertThat(resolvedConfig.chatModel()).isEqualTo("gpt-5.4-mini");
+    }
+
     private static UserApiConfigEntity entity(UUID userId, String baseUrl, String apiKey) {
         UserApiConfigEntity entity = new UserApiConfigEntity();
         entity.setUserId(userId);

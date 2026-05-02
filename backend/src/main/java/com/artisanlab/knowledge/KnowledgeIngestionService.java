@@ -26,6 +26,7 @@ import java.util.UUID;
 @Service
 public class KnowledgeIngestionService {
     private static final Logger log = LoggerFactory.getLogger(KnowledgeIngestionService.class);
+    private static final String ONLY_CHAT_MODEL = "gpt-5.4-mini";
 
     private final KnowledgeChunkMapper mapper;
     private final KnowledgeEmbeddingService embeddingService;
@@ -43,7 +44,7 @@ public class KnowledgeIngestionService {
             @Value("${artisan.knowledge.auto-index-enabled:true}") boolean autoIndexEnabled,
             @Value("${artisan.ai.default-base-url:}") String defaultBaseUrl,
             @Value("${artisan.ai.default-api-key:}") String defaultApiKey,
-            @Value("${artisan.ai.default-chat-model:gpt-5.5}") String defaultChatModel,
+            @Value("${artisan.ai.default-chat-model:gpt-5.4-mini}") String defaultChatModel,
             @Value("${artisan.knowledge.embedding-batch-size:24}") int embeddingBatchSize
     ) {
         this.mapper = mapper;
@@ -52,8 +53,13 @@ public class KnowledgeIngestionService {
         this.autoIndexEnabled = autoIndexEnabled;
         this.defaultBaseUrl = defaultBaseUrl == null ? "" : defaultBaseUrl.trim();
         this.defaultApiKey = defaultApiKey == null ? "" : defaultApiKey.trim();
-        this.defaultChatModel = defaultChatModel == null ? "gpt-5.5" : defaultChatModel.trim();
+        this.defaultChatModel = normalizeChatModel(defaultChatModel);
         this.embeddingBatchSize = Math.max(1, Math.min(100, embeddingBatchSize));
+    }
+
+    private static String normalizeChatModel(String model) {
+        String normalized = model == null ? "" : model.trim();
+        return ONLY_CHAT_MODEL.equals(normalized) ? normalized : ONLY_CHAT_MODEL;
     }
 
     @EventListener(ApplicationReadyEvent.class)

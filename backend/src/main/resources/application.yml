@@ -49,10 +49,13 @@ artisan:
     default-base-url: ${LIVART_DEFAULT_API_BASE_URL:}
     default-api-key: ${LIVART_DEFAULT_API_KEY:}
     default-image-model: ${LIVART_DEFAULT_IMAGE_MODEL:gpt-image-2}
-    default-chat-model: ${LIVART_DEFAULT_CHAT_MODEL:gpt-5.5}
+    default-chat-model: ${LIVART_DEFAULT_CHAT_MODEL:gpt-5.4-mini}
     default-image-size-enabled: ${LIVART_DEFAULT_IMAGE_SIZE_ENABLED:true}
     default-image-long-side: ${LIVART_DEFAULT_IMAGE_LONG_SIDE:2048}
     image-job-worker-count: ${LIVART_IMAGE_JOB_WORKER_COUNT:16}
+    product-industry-web-search-enabled: ${LIVART_PRODUCT_INDUSTRY_WEB_SEARCH_ENABLED:true}
+    product-industry-web-search-model: ${LIVART_PRODUCT_INDUSTRY_WEB_SEARCH_MODEL:}
+    product-industry-web-search-timeout-seconds: ${LIVART_PRODUCT_INDUSTRY_WEB_SEARCH_TIMEOUT_SECONDS:25}
   knowledge:
     auto-index-enabled: ${LIVART_KNOWLEDGE_AUTO_INDEX_ENABLED:true}
     embedding-base-url: ${LIVART_KNOWLEDGE_EMBEDDING_BASE_URL:https://api.siliconflow.cn/v1}

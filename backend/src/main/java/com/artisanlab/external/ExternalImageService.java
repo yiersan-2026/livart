@@ -120,6 +120,21 @@ public class ExternalImageService {
         }
     }
 
+    public ExternalImageDtos.ParseHistoryResponse loadParseHistory(UUID userId) {
+        if (parseHistoryMapper == null) {
+            return new ExternalImageDtos.ParseHistoryResponse(List.of());
+        }
+        List<ExternalImageDtos.ParseHistoryItem> items = parseHistoryMapper.selectRecentByUserId(userId, 8).stream()
+                .map(entity -> new ExternalImageDtos.ParseHistoryItem(
+                        entity.getSourceUrl(),
+                        entity.getSourceHost(),
+                        entity.getImageCount(),
+                        entity.getLastParsedAt()
+                ))
+                .toList();
+        return new ExternalImageDtos.ParseHistoryResponse(items);
+    }
+
     private void saveParseHistory(UUID userId, String sourceUrl, int imageCount) {
         if (parseHistoryMapper == null) return;
 

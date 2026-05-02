@@ -7,6 +7,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.ResourcePatternResolver;
+import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -19,6 +20,23 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class ExternalSkillServiceTest {
+    @Test
+    void installedResourcesIncludeImageCraftSkill() {
+        ExternalSkillService service = new ExternalSkillService(
+                new PathMatchingResourcePatternResolver(),
+                new ObjectMapper(),
+                ""
+        );
+
+        service.loadInstalledSkills();
+
+        assertThat(service.listEnabledSkills())
+                .extracting(ExternalSkillDtos.SkillSummary::id)
+                .contains("gpt-image", "image-craft");
+        assertThat(service.requirePromptGuidance("image-craft"))
+                .contains("Image Craft", "商品摄影", "商品详情图", "视觉层级");
+    }
+
     @Test
     void loadsClasspathSkillAndReturnsPromptGuidance() throws Exception {
         ResourcePatternResolver resolver = mock(ResourcePatternResolver.class);

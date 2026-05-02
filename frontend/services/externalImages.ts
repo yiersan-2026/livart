@@ -28,6 +28,13 @@ export interface ImportedExternalImage {
   sourceUrl: string;
 }
 
+export interface ExternalImageParseHistoryItem {
+  sourceUrl: string;
+  sourceHost?: string;
+  imageCount: number;
+  lastParsedAt?: string;
+}
+
 interface ApiResponse<T> {
   success: boolean;
   data?: T;
@@ -40,6 +47,10 @@ interface ApiResponse<T> {
 interface SearchExternalImagesResponse {
   sourceUrl: string;
   images: ExternalImageCandidate[];
+}
+
+interface ExternalImageParseHistoryResponse {
+  items: ExternalImageParseHistoryItem[];
 }
 
 const unwrapApiResponse = async <T>(response: Response): Promise<T> => {
@@ -65,6 +76,17 @@ export const searchExternalImages = async (url: string) => {
   });
   const payload = await unwrapApiResponse<SearchExternalImagesResponse>(response);
   return payload.images || [];
+};
+
+export const loadExternalImageParseHistory = async () => {
+  const response = await fetch('/api/external/images/history', {
+    headers: {
+      Accept: 'application/json',
+      ...authHeaders()
+    }
+  });
+  const payload = await unwrapApiResponse<ExternalImageParseHistoryResponse>(response);
+  return payload.items || [];
 };
 
 export const importExternalImage = async (

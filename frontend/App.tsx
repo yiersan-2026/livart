@@ -1,7 +1,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { PanelRightClose, PanelRight, Settings, FolderPlus, LogOut, Loader2, X, Download, ChevronDown, Users, Images, MemoryStick, Cpu, HardDrive } from 'lucide-react';
-import type { ActiveImageTaskInfo, AgentPlan, CanvasItem, CanvasTool, ChatMessage, ImageAspectRatio, ImageResolution } from './types';
+import type { ActiveImageTaskInfo, AgentPlan, AgentToolId, CanvasItem, CanvasTool, ChatMessage, ImageAspectRatio, ImageResolution, ProductPosterRequest } from './types';
 import AuthPanel from './components/AuthPanel';
 import Canvas from './components/Canvas';
 import Sidebar from './components/Sidebar';
@@ -104,7 +104,7 @@ const formatSiteStatsPercent = (value: number | undefined) => {
   return `${Math.round(Math.max(0, Math.min(100, value)))}%`;
 };
 
-const collectAgentPlanCandidateImages = (text: string, contextImage: CanvasItem | null, items: CanvasItem[]) => {
+const collectAgentPlanCandidateImages = (text: string, contextImages: Array<CanvasItem | null | undefined>, items: CanvasItem[]) => {
   const completedImages = items.filter(item => item.type === 'image' && item.status === 'completed' && hasUsableImageSource(item));
   const candidates: CanvasItem[] = [];
   const seenIds = new Set<string>();
@@ -115,7 +115,9 @@ const collectAgentPlanCandidateImages = (text: string, contextImage: CanvasItem 
     candidates.push(candidate);
   };
 
-  pushCandidate(contextImage ? completedImages.find(item => item.id === contextImage.id) : null);
+  contextImages.forEach(contextImage => {
+    pushCandidate(contextImage ? completedImages.find(item => item.id === contextImage.id) : null);
+  });
   resolveMentionedImageReferences(text, completedImages).forEach(pushCandidate);
   return candidates.slice(0, 12);
 };
@@ -149,8 +151,18 @@ const buildExecutionAnnouncement = (plan: AgentPlan) => {
     return `我将为您拆分这张${title}的图层。`;
   }
 
+  if (plan.mode === 'panorama') {
+    return `我将为您把这张${title}转换成完整球形全景图。`;
+  }
+
   if (plan.mode === 'view-change') {
     return `我将为您生成这张${title}的新视角。`;
+  }
+
+  if (plan.mode === 'product-poster') {
+    return plan.count > 1
+      ? `我将为您生成${plan.count}张${title}。`
+      : `我将为您生成这张${title}。`;
   }
 
   if (plan.taskType === 'image-edit') {
@@ -172,7 +184,9 @@ const getAgentRunActiveTaskAction = (agentRun: Pick<AgentRun, 'plan' | 'taskType
   if (agentRun.plan.mode === 'background-removal') return '去背景';
   if (agentRun.plan.mode === 'remover') return '删除物体';
   if (agentRun.plan.mode === 'layer-subject' || agentRun.plan.mode === 'layer-background') return '图层拆分';
+  if (agentRun.plan.mode === 'panorama') return '全景';
   if (agentRun.plan.mode === 'view-change') return '多角度';
+  if (agentRun.plan.mode === 'product-poster') return '商品详情图';
   return agentRun.taskType === 'image-edit' ? '单图编辑' : '文生图';
 };
 
@@ -188,7 +202,7 @@ const buildAgentRunActiveTaskLabel = (
 };
 
 const buildCanvasItemActiveTaskLabel = (item: CanvasItem) => {
-  const stableTitle = item.label && !/(AI|排队|同步|生成中|编辑中|重绘中|删除中|去背景中|改视角中)/.test(item.label)
+  const stableTitle = item.label && !/(AI|排队|同步|生成中|编辑中|重绘中|删除中|去背景中|改视角中|全景化中)/.test(item.label)
     ? ensureImageNoun(item.label)
     : '';
   const action = item.parentId ? '图片编辑' : '图片生成';
@@ -215,6 +229,14 @@ type SidebarPromptSeed = {
   id: string;
   imageId: string;
   prompt?: string;
+};
+
+type SidebarSendOptions = {
+  forcedToolId?: AgentToolId;
+  productPoster?: ProductPosterRequest;
+  contextImageId?: string;
+  contextImageIds?: string[];
+  userMessageText?: string;
 };
 type CanvasHistorySnapshot = {
   items: CanvasItem[];
@@ -733,7 +755,7 @@ const CreateProjectModal: React.FC<CreateProjectModalProps> = ({
               autoFocus
               value={title}
               onChange={(event) => onTitleChange(event.target.value)}
-              placeholder="例如：品牌海报方案"
+              placeholder="例如：商品详情图方案"
               className="w-full rounded-2xl border border-gray-200 px-4 py-3 text-sm font-bold outline-none transition-all focus:border-indigo-200 focus:ring-4 focus:ring-indigo-500/10"
             />
           </div>
@@ -769,7 +791,15 @@ const CreateProjectModal: React.FC<CreateProjectModalProps> = ({
 };
 
 function App() {
-  const [items, setItems] = useState<CanvasItem[]>([]);
+  const [items, setItemsState] = useState<CanvasItem[]>([]);
+  const itemsRef = useRef<CanvasItem[]>([]);
+  const setItems = (updater: React.SetStateAction<CanvasItem[]>) => {
+    const nextItems = typeof updater === 'function'
+      ? (updater as (currentItems: CanvasItem[]) => CanvasItem[])(itemsRef.current)
+      : updater;
+    itemsRef.current = nextItems;
+    setItemsState(nextItems);
+  };
   const [messages, setMessages] = useState<ChatMessage[]>([createWelcomeMessage()]);
   const [activeTaskTimers, setActiveTaskTimers] = useState<Record<string, ActiveImageTaskInfo>>({});
   const [zoom, setZoom] = useState(1);
@@ -802,6 +832,7 @@ function App() {
   const [exportProjectImageError, setExportProjectImageError] = useState('');
   const [isExternalImageModalOpen, setIsExternalImageModalOpen] = useState(false);
   const [isImportingExternalImages, setIsImportingExternalImages] = useState(false);
+  const [productPosterOpenSignal, setProductPosterOpenSignal] = useState(0);
   const saveTimerRef = useRef<number | null>(null);
   const pendingSaveRef = useRef<PendingCanvasSave | null>(null);
   const isSavingCanvasRef = useRef(false);
@@ -815,6 +846,7 @@ function App() {
   const isRestoringCanvasHistoryRef = useRef(false);
   const [canvasHistoryState, setCanvasHistoryState] = useState({ canUndo: false, canRedo: false });
   const hasPendingImageJob = items.some(item => item.type === 'image' && item.status === 'loading' && !!item.imageJobId);
+  const hasProductPosterImages = items.some(item => item.type === 'image' && item.status === 'completed' && hasUsableImageSource(item));
   const hasDownloadableImage = items.some(item => item.type === 'image' && item.status === 'completed' && !!item.content);
   const hasSelectedDownloadableImage = selectedIds.some(id => {
     const item = items.find(candidate => candidate.id === id);
@@ -1288,7 +1320,7 @@ function App() {
     const startedAt = Date.now();
     const timerKeys = agentRun.jobs.map(job => imageJobTaskTimerKey(job.jobId));
     const timerLabels = agentRun.jobs.map((_, index) => buildAgentRunActiveTaskLabel(agentRun, index, agentRun.jobs.length));
-    timerKeys.forEach((timerKey, index) => startTaskTimer(startedAt, timerKey, timerLabels[index]));
+    timerKeys.forEach((timerKey, index) => startTaskTimer(startedAt, timerKey, timerLabels[index], 'queued'));
     let isTaskTimerActive = true;
     try {
       const editBaseImage = agentRun.taskType === 'image-edit'
@@ -1307,8 +1339,9 @@ function App() {
       const canvasCenterX = visibleCanvasRect.x + visibleCanvasRect.width / 2;
       const canvasCenterY = visibleCanvasRect.y + visibleCanvasRect.height / 2;
 
-      let virtualItems = [...items];
-      const maxZIndex = Math.max(60, ...items.map(item => item.zIndex || 0));
+      const latestItems = itemsRef.current;
+      let virtualItems = [...latestItems];
+      const maxZIndex = Math.max(60, ...latestItems.map(item => item.zIndex || 0));
       const placeholderItems = agentRun.jobs.map((job, index) => {
         const existingItem = virtualItems.find(item => item.type === 'image' && item.imageJobId === job.jobId);
         if (existingItem?.type === 'image') {
@@ -1347,7 +1380,7 @@ function App() {
         return item;
       });
 
-      const missingItems = placeholderItems.filter(placeholder => !items.some(item => item.id === placeholder.id));
+      const missingItems = placeholderItems.filter(placeholder => !itemsRef.current.some(item => item.id === placeholder.id));
       if (missingItems.length > 0) {
         setItems(prev => [...prev, ...missingItems]);
       }
@@ -1361,7 +1394,7 @@ function App() {
               isTaskTimerActive = false;
             }
             if (state === 'connected' && !isTaskTimerActive) {
-              timerKeys.forEach((timerKey, timerIndex) => startTaskTimer(startedAt, timerKey, timerLabels[timerIndex]));
+              timerKeys.forEach((timerKey, timerIndex) => startTaskTimer(startedAt, timerKey, timerLabels[timerIndex], 'queued'));
               isTaskTimerActive = true;
             }
             if (state === 'reconnecting') {
@@ -1372,8 +1405,12 @@ function App() {
                 agentRunStatus: 'waiting-reconnect'
               }));
             }
+          },
+          onStatus: (jobStatus) => {
+            syncImageJobTaskTimer(jobStatus, timerKeys[index], timerLabels[index]);
           }
         });
+        completeTaskTimer(startedAt, timerKeys[index]);
         const persistedImageItem = await ensureCanvasImageAsset({
           ...placeholder,
           content: imageResult.image,
@@ -1530,10 +1567,12 @@ function App() {
       resumedImageJobIdsRef.current.add(jobId);
       const restoredStartedAt = getRestoredImageJobStartedAt(item);
       const timerKey = imageJobTaskTimerKey(jobId);
-      startTaskTimer(restoredStartedAt, timerKey, buildCanvasItemActiveTaskLabel(item));
+      const restoredTaskLabel = buildCanvasItemActiveTaskLabel(item);
+      startTaskTimer(restoredStartedAt, timerKey, restoredTaskLabel, 'queued');
 
       waitForImageJob(jobId, {
         onStatus: (jobStatus) => {
+          syncImageJobTaskTimer(jobStatus, timerKey, restoredTaskLabel);
           const queueNotice = buildImageJobQueueNotice(jobStatus);
           if (!queueNotice) return;
           setItems(prev => prev.map(candidate => candidate.id === item.id
@@ -1543,6 +1582,7 @@ function App() {
         }
       })
         .then(async (imageResult) => {
+          completeTaskTimer(restoredStartedAt, timerKey);
           const resultImg = imageResult.image;
           const persistedImageItem = await ensureCanvasImageAsset({
             ...item,
@@ -1776,9 +1816,10 @@ function App() {
       const visibleCanvasRect = getVisibleCanvasRect(pan, zoom, showSidebar);
       const canvasCenterX = visibleCanvasRect.x + visibleCanvasRect.width / 2;
       const canvasCenterY = visibleCanvasRect.y + visibleCanvasRect.height / 2;
-      const maxZIndex = Math.max(60, ...items.map(item => item.zIndex || 0));
+      const latestItems = itemsRef.current;
+      const maxZIndex = Math.max(60, ...latestItems.map(item => item.zIndex || 0));
       const fallbackFrame = { width: 400, height: 400 };
-      let virtualItems = [...items];
+      let virtualItems = [...latestItems];
       const insertedItems = importedImages.map(({ candidate, asset }, index) => {
         const sourceWidth = asset.width || candidate.width || fallbackFrame.width;
         const sourceHeight = asset.height || candidate.height || fallbackFrame.height;
@@ -1890,14 +1931,21 @@ function App() {
     setMessages(prev => prev.map(message => message.id === messageId ? updater(message) : message));
   };
 
-  const startTaskTimer = (startedAt: number, key = fallbackTaskTimerKey(startedAt), label = '图片任务') => {
+  const startTaskTimer = (
+    startedAt: number,
+    key = fallbackTaskTimerKey(startedAt),
+    label = '图片任务',
+    status: ActiveImageTaskInfo['status'] = 'running'
+  ) => {
     const normalizedStartedAt = Number.isFinite(startedAt) ? startedAt : Date.now();
     const normalizedLabel = label.trim() || '图片任务';
     setActiveTaskTimers(prev => {
       const currentTask = prev[key];
+      const nextStatus = currentTask?.status === 'running' && status === 'queued' ? 'running' : status;
       if (
         currentTask?.startedAt === normalizedStartedAt &&
-        currentTask.label === normalizedLabel
+        currentTask.label === normalizedLabel &&
+        currentTask.status === nextStatus
       ) {
         return prev;
       }
@@ -1906,7 +1954,25 @@ function App() {
         [key]: {
           key,
           startedAt: normalizedStartedAt,
-          label: normalizedLabel
+          label: normalizedLabel,
+          status: nextStatus,
+          completedAt: nextStatus === 'completed' ? currentTask?.completedAt || Date.now() : undefined
+        }
+      };
+    });
+  };
+
+  const completeTaskTimer = (startedAt: number, key = '', completedAt = Date.now()) => {
+    setActiveTaskTimers(prev => {
+      const timerKey = key || Object.keys(prev).find(candidateKey => prev[candidateKey].startedAt === startedAt) || '';
+      if (!timerKey || !(timerKey in prev)) return prev;
+      const currentTask = prev[timerKey];
+      return {
+        ...prev,
+        [timerKey]: {
+          ...currentTask,
+          status: 'completed',
+          completedAt: Number.isFinite(completedAt) ? completedAt : Date.now()
         }
       };
     });
@@ -1919,6 +1985,32 @@ function App() {
       const { [timerKey]: _removed, ...next } = prev;
       return next;
     });
+  };
+
+  const getImageJobTimerTimestamp = (jobStatus: ImageJobStatus, fallback = Date.now()) => {
+    const timestamp = jobStatus.status === 'queued'
+      ? jobStatus.createdAt || jobStatus.updatedAt
+      : jobStatus.updatedAt || jobStatus.createdAt;
+    return typeof timestamp === 'number' && Number.isFinite(timestamp) ? timestamp : fallback;
+  };
+
+  const syncImageJobTaskTimer = (jobStatus: ImageJobStatus, key: string, label: string) => {
+    if (!key) return;
+    if (jobStatus.status === 'queued') {
+      startTaskTimer(getImageJobTimerTimestamp(jobStatus), key, label, 'queued');
+      return;
+    }
+    if (jobStatus.status === 'running') {
+      startTaskTimer(getImageJobTimerTimestamp(jobStatus), key, label, 'running');
+      return;
+    }
+    if (jobStatus.status === 'completed') {
+      completeTaskTimer(getImageJobTimerTimestamp(jobStatus), key, getImageJobTimerTimestamp(jobStatus));
+      return;
+    }
+    if (jobStatus.status === 'error') {
+      finishTaskTimer(0, key);
+    }
   };
 
   const handleCanvasChatMessage = (
@@ -2050,10 +2142,11 @@ function App() {
     text: string,
     aspectRatio: ImageAspectRatio = 'auto',
     imageResolution: ImageResolution = '2k',
-    externalSkillId = ''
+    externalSkillId = '',
+    options: SidebarSendOptions = {}
   ) => {
     const startedAt = Date.now();
-    addMessage(text, 'user');
+    addMessage(options.userMessageText || text, 'user');
 
     let createdImageIds: string[] = [];
     let editBaseImage: CanvasItem | null = null;
@@ -2119,11 +2212,24 @@ function App() {
 
     try {
       syncAgentPlanMessage(buildAgentDraftPlan({ aspectRatio }), '我先识别你的意图，再决定下一步。');
-      let freshContextImage = contextImage
+      const optionContextImages = (options.contextImageIds || [])
+        .map(imageId => items.find(item => item.id === imageId && item.type === 'image') || null)
+        .filter((item): item is CanvasItem => Boolean(item));
+      const optionContextImage = options.contextImageId
+        ? items.find(item => item.id === options.contextImageId && item.type === 'image') || null
+        : optionContextImages[0] || null;
+      let freshContextImage = optionContextImage || (contextImage
         ? items.find(item => item.id === contextImage.id && item.type === 'image') || contextImage
-        : null;
-      const planCandidateImages = collectAgentPlanCandidateImages(text, freshContextImage, items);
-      const requestedEditMode = selectedImageEditMode && freshContextImage && selectedImageEditMode.imageId === freshContextImage.id
+        : null);
+      const contextImagesForPlan = optionContextImages.length > 0
+        ? optionContextImages
+        : freshContextImage
+        ? [freshContextImage]
+        : [];
+      const planCandidateImages = collectAgentPlanCandidateImages(text, contextImagesForPlan, items);
+      const requestedEditMode = options.forcedToolId === 'tool.product.poster'
+        ? 'product-poster'
+        : selectedImageEditMode && freshContextImage && selectedImageEditMode.imageId === freshContextImage.id
         ? selectedImageEditMode.mode
         : undefined;
       if (requestedEditMode === 'remover') {
@@ -2143,7 +2249,7 @@ function App() {
       }
 
       let maskDataUrl = '';
-      if (requestedEditMode && freshContextImage) {
+      if (requestedEditMode && requestedEditMode !== 'product-poster' && freshContextImage) {
         const localMaskData = getImageEditMaskData(freshContextImage, requestedEditMode);
         if (!localMaskData) {
           if (requestedEditMode === 'local-redraw') {
@@ -2179,7 +2285,9 @@ function App() {
         imageResolution,
         contextImageId: freshContextImage?.id,
         requestedEditMode,
+        forcedToolId: options.forcedToolId,
         externalSkillId,
+        productPoster: options.productPoster,
         images: persistedPlanCandidateImages,
         maskDataUrl,
         clientRunId: agentRunClientId
@@ -2249,14 +2357,19 @@ function App() {
         || null
         : null;
       const plannerMode = initialPlan.mode;
+      const outputAspectRatio = initialPlan.aspectRatio || aspectRatio;
       failureActionLabel = plannerMode === 'background-removal'
         ? '去背景'
         : plannerMode === 'remover'
           ? '局部删除'
           : plannerMode === 'layer-subject' || plannerMode === 'layer-background'
             ? '图层拆分'
+            : plannerMode === 'panorama'
+              ? '全景化'
             : plannerMode === 'view-change'
               ? '多角度'
+              : plannerMode === 'product-poster'
+                ? '商品详情图'
               : editBaseImage
                 ? '单图编辑'
                 : '生成';
@@ -2270,7 +2383,7 @@ function App() {
       imageTaskStartedAt = Date.now();
       imageTaskTimerKeys = agentRun.jobs.map(job => imageJobTaskTimerKey(job.jobId));
       imageTaskTimerLabels = agentRun.jobs.map((_, index) => buildAgentRunActiveTaskLabel(agentRun, index, agentRun.jobs.length));
-      imageTaskTimerKeys.forEach((timerKey, index) => startTaskTimer(imageTaskStartedAt as number, timerKey, imageTaskTimerLabels[index]));
+      imageTaskTimerKeys.forEach((timerKey, index) => startTaskTimer(imageTaskStartedAt as number, timerKey, imageTaskTimerLabels[index], 'queued'));
       isImageTaskTimerActive = true;
 
       const fallbackWidth = editBaseImage ? editBaseImage.width : DEFAULT_GENERATED_IMAGE_LONG_SIDE;
@@ -2278,15 +2391,16 @@ function App() {
       const maxLongSide = editBaseImage
         ? Math.max(editBaseImage.width, editBaseImage.height)
         : DEFAULT_GENERATED_IMAGE_LONG_SIDE;
-      const initialFrame = editBaseImage && aspectRatio === 'auto'
+      const initialFrame = editBaseImage && outputAspectRatio === 'auto'
         ? fitDimensionsToLongSide(editBaseImage.width, editBaseImage.height, maxLongSide)
-        : getAspectRatioFrame(aspectRatio, fallbackWidth, fallbackHeight, maxLongSide);
+        : getAspectRatioFrame(outputAspectRatio, fallbackWidth, fallbackHeight, maxLongSide);
       const visibleCanvasRect = getVisibleCanvasRect(pan, zoom, showSidebar);
       const canvasCenterX = visibleCanvasRect.x + visibleCanvasRect.width / 2;
       const canvasCenterY = visibleCanvasRect.y + visibleCanvasRect.height / 2;
 
-      let virtualItems = [...items, ...persistedPlanCandidateImages.filter(candidate => !items.some(item => item.id === candidate.id))];
-      const maxZIndex = Math.max(60, ...items.map(item => item.zIndex || 0));
+      const latestItems = itemsRef.current;
+      let virtualItems = [...latestItems, ...persistedPlanCandidateImages.filter(candidate => !latestItems.some(item => item.id === candidate.id))];
+      const maxZIndex = Math.max(60, ...latestItems.map(item => item.zIndex || 0));
       const placeholderItems = agentRun.jobs.map((job, index) => {
         const generatedPosition = editBaseImage
           ? findRightSideCanvasPosition(virtualItems, editBaseImage, initialFrame.width, initialFrame.height)
@@ -2307,7 +2421,7 @@ function App() {
           width: initialFrame.width,
           height: initialFrame.height,
           status: 'loading',
-          label: plannerMode === 'background-removal' ? 'AI 去背景中...' : editBaseImage ? 'AI 编辑中...' : 'AI 生成中...',
+          label: plannerMode === 'product-poster' ? 'AI 详情图生成中...' : plannerMode === 'background-removal' ? 'AI 去背景中...' : editBaseImage ? 'AI 编辑中...' : 'AI 生成中...',
           zIndex: maxZIndex + index + 1,
           parentId: editBaseImage?.id,
           prompt: agentRun.requestPrompt || text,
@@ -2343,12 +2457,13 @@ function App() {
               updateExecutionMessage('等待重连，重连后会自动更新图片结果。', 'waiting-reconnect');
             } else {
               if (imageTaskStartedAt !== null && !isImageTaskTimerActive) {
-                imageTaskTimerKeys.forEach((timerKey, timerIndex) => startTaskTimer(imageTaskStartedAt as number, timerKey, imageTaskTimerLabels[timerIndex]));
+                imageTaskTimerKeys.forEach((timerKey, timerIndex) => startTaskTimer(imageTaskStartedAt as number, timerKey, imageTaskTimerLabels[timerIndex], 'queued'));
                 isImageTaskTimerActive = true;
               }
             }
           },
           onStatus: (jobStatus) => {
+            syncImageJobTaskTimer(jobStatus, imageTaskTimerKeys[index], imageTaskTimerLabels[index]);
             const queueNotice = buildImageJobQueueNotice(jobStatus, agentRun.jobs.length > 1 ? index : undefined);
             if (queueNotice) {
               queuedImageJobIds.add(job.jobId);
@@ -2368,18 +2483,21 @@ function App() {
                   : '图片生成已开始执行。'
               );
               setItems(prev => prev.map(item => item.id === placeholder.id
-                ? { ...item, label: plannerMode === 'background-removal' ? 'AI 去背景中...' : editBaseImage ? 'AI 编辑中...' : 'AI 生成中...' }
+                ? { ...item, label: plannerMode === 'product-poster' ? 'AI 详情图生成中...' : plannerMode === 'background-removal' ? 'AI 去背景中...' : editBaseImage ? 'AI 编辑中...' : 'AI 生成中...' }
                 : item
               ));
             }
           }
         });
+        completeTaskTimer(imageTaskStartedAt as number, imageTaskTimerKeys[index]);
         const persistedImageItem = await ensureCanvasImageAsset({
           ...placeholder,
           content: imageResult.image,
           status: 'completed'
         });
-        const resultTitle = agentRun.displayTitle || agentRun.plan.displayTitle || generateImageTitleFromPrompt(
+        const resultTitle = plannerMode === 'product-poster'
+          ? generateImageTitleFromPrompt(job.originalPrompt || imageResult.originalPrompt || agentRun.requestPrompt || text || '', '商品详情图')
+          : agentRun.displayTitle || agentRun.plan.displayTitle || generateImageTitleFromPrompt(
           text || agentRun.requestPrompt || imageResult.optimizedPrompt || job.optimizedPrompt || '',
           editBaseImage ? '编辑结果' : '生成图片'
         );
@@ -2801,6 +2919,7 @@ function App() {
           onResetView={() => { setZoom(1); setPan({ x: window.innerWidth / 4, y: window.innerHeight / 4 }); }}
           onAddImage={addImageItem}
           onOpenExternalImageImport={() => setIsExternalImageModalOpen(true)}
+          onOpenProductPoster={() => setProductPosterOpenSignal(signal => signal + 1)}
           onAddText={() => setCanvasTool(currentTool => currentTool === 'text' ? 'select' : 'text')}
           activeTool={canvasTool}
           onToolChange={setCanvasTool}
@@ -2808,6 +2927,7 @@ function App() {
           canRedo={canvasHistoryState.canRedo}
           onUndo={undoCanvas}
           onRedo={redoCanvas}
+          canOpenProductPoster={hasProductPosterImages}
           canAutoArrangeImages={items.filter(isArrangeableImageItem).length > 1}
           onAutoArrangeImages={handleAutoArrangeImages}
         />
@@ -2822,6 +2942,7 @@ function App() {
           contextImage={contextImage}
           promptSeed={sidebarPromptSeed}
           inputResetKey={sidebarInputResetKey}
+          productPosterOpenSignal={productPosterOpenSignal}
           imageItems={items.filter(item => item.type === 'image' && hasUsableImageSource(item))}
           onSelectContextImage={setContextImage}
           onClearContextImage={handleClearSidebarContextImage}

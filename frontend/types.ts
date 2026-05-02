@@ -61,7 +61,7 @@ export interface CanvasTextStyle {
 
 export type DesignStyle = 'none' | 'cyberpunk' | 'minimalist' | '3d-clay' | 'watercolor' | 'sketch';
 
-export type ImageAspectRatio = 'auto' | '1:1' | '4:3' | '3:4' | '16:9' | '9:16';
+export type ImageAspectRatio = 'auto' | '1:1' | '4:3' | '3:4' | '16:9' | '9:16' | '2:1';
 
 export type ImageResolution = '1k' | '2k' | '4k';
 
@@ -74,9 +74,63 @@ export type AgentToolId =
   | 'tool.image.remove-object'
   | 'tool.image.remove-background'
   | 'tool.image.change-view'
+  | 'tool.image.panorama'
   | 'tool.image.layer-subject'
   | 'tool.image.layer-background'
-  | 'tool.image.layer-split';
+  | 'tool.image.layer-split'
+  | 'tool.product.poster';
+
+export interface ProductPosterRequest {
+  productImageId?: string;
+  productImageIds?: string[];
+  productMode?: 'single' | 'series';
+  productDescription?: string;
+  productName?: string;
+  industry?: string;
+  material?: string;
+  size?: string;
+  color?: string;
+  style?: string;
+  detailDesignStyle?: string;
+  scenarios?: string;
+  targetAudience?: string;
+  sellingPoints?: string;
+  extraDetails?: string;
+  platformStyle?: string;
+  conversationContext?: string;
+  posterCount: number;
+}
+
+export interface ProductPosterFact {
+  key?: string;
+  label?: string;
+  value?: string;
+  source?: string;
+  confidence?: string;
+  note?: string;
+}
+
+export interface ProductPosterAnalysis {
+  summary?: string;
+  productName?: string;
+  industry?: string;
+  material?: string;
+  size?: string;
+  color?: string;
+  style?: string;
+  detailDesignStyle?: string;
+  scenarios?: string;
+  targetAudience?: string;
+  sellingPoints?: string;
+  extraDetails?: string;
+  platformStyle?: string;
+  confirmedFacts?: ProductPosterFact[];
+  suggestedFacts?: ProductPosterFact[];
+  missingInformation?: string[];
+  nextQuestion?: string;
+  readyToGenerate?: boolean;
+  assistantMessage?: string;
+}
 
 export interface AgentPlanStep {
   id: string;
@@ -92,7 +146,7 @@ export interface AgentPlan {
   rejectionMessage?: string;
   answerMessage?: string;
   taskType: 'text-to-image' | 'image-edit';
-  mode: 'generate' | 'edit' | 'background-removal' | 'remover' | 'layer-subject' | 'layer-background' | 'view-change';
+  mode: 'generate' | 'edit' | 'background-removal' | 'remover' | 'layer-subject' | 'layer-background' | 'view-change' | 'panorama' | 'product-poster';
   count: number;
   baseImageId?: string;
   referenceImageIds: string[];
@@ -138,6 +192,8 @@ export interface ActiveImageTaskInfo {
   key: string;
   startedAt: number;
   label: string;
+  status?: 'queued' | 'running' | 'completed';
+  completedAt?: number;
 }
 
 export interface ExternalSkillSummary {

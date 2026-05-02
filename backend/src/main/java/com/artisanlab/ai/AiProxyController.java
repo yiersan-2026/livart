@@ -19,15 +19,18 @@ import java.util.Map;
 public class AiProxyController {
     private final AiProxyService aiProxyService;
     private final AgentRunService agentRunService;
+    private final AgentPlannerService agentPlannerService;
     private final AuthContext authContext;
 
     public AiProxyController(
             AiProxyService aiProxyService,
             AgentRunService agentRunService,
+            AgentPlannerService agentPlannerService,
             AuthContext authContext
     ) {
         this.aiProxyService = aiProxyService;
         this.agentRunService = agentRunService;
+        this.agentPlannerService = agentPlannerService;
         this.authContext = authContext;
     }
 
@@ -41,6 +44,13 @@ public class AiProxyController {
             @Valid @RequestBody AiProxyDtos.ImageReferenceAnalysisRequest request
     ) {
         return ApiResponse.ok(aiProxyService.analyzeImageReferences(authContext.requireUserId(), request));
+    }
+
+    @PostMapping("/product-posters/analyze")
+    public ApiResponse<AiProxyDtos.ProductPosterAnalysisResponse> analyzeProductPoster(
+            @Valid @RequestBody AiProxyDtos.ProductPosterAnalysisRequest request
+    ) {
+        return ApiResponse.ok(agentPlannerService.analyzeProductPoster(authContext.requireUserId(), request));
     }
 
     @PostMapping("/agent/runs")
