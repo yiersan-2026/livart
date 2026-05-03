@@ -110,6 +110,42 @@ class AgentRunServiceTest {
     }
 
     @Test
+    void successfulRunCapturesUserMemoryBestEffort() throws IOException {
+        AgentPlannerService plannerService = mock(AgentPlannerService.class);
+        AiProxyService aiProxyService = mock(AiProxyService.class);
+        ImageJobEventBroadcaster eventBroadcaster = mock(ImageJobEventBroadcaster.class);
+        ExternalSkillService externalSkillService = mock(ExternalSkillService.class);
+        UserMemoryService userMemoryService = mock(UserMemoryService.class);
+        when(externalSkillService.requirePromptGuidance(any())).thenReturn("");
+        AgentRunService service = new AgentRunService(plannerService, aiProxyService, eventBroadcaster, externalSkillService, userMemoryService);
+        UUID userId = UUID.randomUUID();
+        AiProxyDtos.AgentRunRequest request = new AiProxyDtos.AgentRunRequest(
+                "以后默认给我做简洁优雅一点的贴纸图",
+                "",
+                "auto",
+                "2k",
+                "",
+                List.of(),
+                "",
+                "",
+                "",
+                "run-memory"
+        );
+        AiProxyDtos.AgentPlanResponse plan = executePlan("text-to-image", "generate", 1, "", List.of(), "auto");
+
+        when(plannerService.createPlan(eq(userId), any())).thenReturn(plan);
+        when(aiProxyService.createTextToImageJobsFromAgent(eq(userId), eq("以后默认给我做简洁优雅一点的贴纸图"), eq("auto"), eq("2k"), eq(1), eq("")))
+                .thenReturn(List.of(job("memory-job")));
+
+        service.run(userId, request);
+
+        verify(userMemoryService).captureAgentTurnBestEffort(
+                eq(userId),
+                any(UserMemoryService.AgentMemoryCaptureRequest.class)
+        );
+    }
+
+    @Test
     void selectedExternalSkillAddsGuidanceToTextToImagePromptOptimization() throws IOException {
         AgentPlannerService plannerService = mock(AgentPlannerService.class);
         AiProxyService aiProxyService = mock(AiProxyService.class);

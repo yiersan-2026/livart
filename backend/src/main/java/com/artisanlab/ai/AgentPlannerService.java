@@ -178,6 +178,7 @@ public class AgentPlannerService {
     private final KnowledgeAnswerService knowledgeAnswerService;
     private final ProductIndustryResearchService productIndustryResearchService;
     private final ProductPosterVisionAnalysisService productPosterVisionAnalysisService;
+    private final UserMemoryService userMemoryService;
     private final ObjectMapper objectMapper;
 
     @Autowired
@@ -187,6 +188,7 @@ public class AgentPlannerService {
             KnowledgeAnswerService knowledgeAnswerService,
             ProductIndustryResearchService productIndustryResearchService,
             ProductPosterVisionAnalysisService productPosterVisionAnalysisService,
+            UserMemoryService userMemoryService,
             ObjectMapper objectMapper
     ) {
         this.userApiConfigService = userApiConfigService;
@@ -194,7 +196,19 @@ public class AgentPlannerService {
         this.knowledgeAnswerService = knowledgeAnswerService;
         this.productIndustryResearchService = productIndustryResearchService;
         this.productPosterVisionAnalysisService = productPosterVisionAnalysisService;
+        this.userMemoryService = userMemoryService;
         this.objectMapper = objectMapper;
+    }
+
+    public AgentPlannerService(
+            UserApiConfigService userApiConfigService,
+            SpringAiTextService springAiTextService,
+            KnowledgeAnswerService knowledgeAnswerService,
+            ProductIndustryResearchService productIndustryResearchService,
+            ProductPosterVisionAnalysisService productPosterVisionAnalysisService,
+            ObjectMapper objectMapper
+    ) {
+        this(userApiConfigService, springAiTextService, knowledgeAnswerService, productIndustryResearchService, productPosterVisionAnalysisService, null, objectMapper);
     }
 
     public AgentPlannerService(
@@ -204,7 +218,7 @@ public class AgentPlannerService {
             ProductIndustryResearchService productIndustryResearchService,
             ObjectMapper objectMapper
     ) {
-        this(userApiConfigService, springAiTextService, knowledgeAnswerService, productIndustryResearchService, null, objectMapper);
+        this(userApiConfigService, springAiTextService, knowledgeAnswerService, productIndustryResearchService, null, null, objectMapper);
     }
 
     public AgentPlannerService(
@@ -213,7 +227,7 @@ public class AgentPlannerService {
             KnowledgeAnswerService knowledgeAnswerService,
             ObjectMapper objectMapper
     ) {
-        this(userApiConfigService, springAiTextService, knowledgeAnswerService, null, null, objectMapper);
+        this(userApiConfigService, springAiTextService, knowledgeAnswerService, null, null, null, objectMapper);
     }
 
     @FunctionalInterface
@@ -280,6 +294,7 @@ public class AgentPlannerService {
     public AiProxyDtos.AgentPlanResponse createPlan(UUID userId, AiProxyDtos.AgentPlanRequest request) {
         UserApiConfigDtos.ResolvedConfig config = userApiConfigService.getRequiredConfig(userId);
         long startedAt = System.currentTimeMillis();
+        String userMemoryContext = buildUserMemoryContext(userId, config, request.prompt());
 
         try {
             RawIntentDecision intentDecision = classifyIntent(config, request);
@@ -295,7 +310,7 @@ public class AgentPlannerService {
             String responseText = springAiTextService.completeText(
                     config,
                     getPlannerSystemPrompt(),
-                    buildPlannerInput(request),
+                    buildPlannerInput(request, userMemoryContext),
                     AGENT_PLANNER_TIMEOUT,
                     "agent-planner"
             );
@@ -383,6 +398,7 @@ public class AgentPlannerService {
         UserApiConfigDtos.ResolvedConfig config = userApiConfigService.getRequiredConfig(userId);
         long startedAt = System.currentTimeMillis();
         String productInfo = buildProductPosterInfo(productPoster);
+        String userMemoryContext = buildUserMemoryContext(userId, config, productInfo);
         String industryResearchContext = productIndustryResearchService == null
                 ? ""
                 : productIndustryResearchService.research(config, productInfo, researchProgressListener)
@@ -393,7 +409,7 @@ public class AgentPlannerService {
             String responseText = springAiTextService.completeText(
                     config,
                     getProductPosterPlannerSystemPrompt(),
-                    buildProductPosterPlannerInput(productPoster, productImages, aspectRatio, count, industryResearchContext),
+                    buildProductPosterPlannerInput(productPoster, productImages, aspectRatio, count, industryResearchContext, userMemoryContext),
                     AGENT_PLANNER_TIMEOUT,
                     "product-poster-planner"
             );
@@ -426,6 +442,8 @@ public class AgentPlannerService {
     ) {
         UserApiConfigDtos.ResolvedConfig config = userApiConfigService.getRequiredConfig(userId);
         long startedAt = System.currentTimeMillis();
+        String recallPrompt = firstNonBlank(request.latestUserMessage(), request.description());
+        String userMemoryContext = buildUserMemoryContext(userId, config, recallPrompt);
         try {
             boolean autonomousPlanning = isAutonomousProductPosterRequested(request.description());
             boolean shouldAutoSearchDetailDesignStyle = !hasExplicitProductPosterDetailDesignStyle(request.description());
@@ -443,7 +461,7 @@ public class AgentPlannerService {
             String responseText = springAiTextService.completeText(
                     config,
                     getProductPosterAnalysisSystemPrompt(),
-                    buildProductPosterAnalysisInput(request.description(), visionAnalysis, autonomousPlanning, industryResearchContext),
+                    buildProductPosterAnalysisInput(request.description(), visionAnalysis, autonomousPlanning, industryResearchContext, userMemoryContext),
                     PRODUCT_POSTER_ANALYSIS_TIMEOUT,
                     "product-poster-analysis"
             );
@@ -455,6 +473,9 @@ public class AgentPlannerService {
                     visionAnalysis,
                     autonomousPlanning
             );
+            if (userMemoryService != null) {
+                userMemoryService.captureProductPosterAnalysisBestEffort(userId, request, response);
+            }
             log.info("[product-poster-analysis] done duration={}ms", System.currentTimeMillis() - startedAt);
             return response;
         } catch (ApiException exception) {
@@ -499,7 +520,8 @@ public class AgentPlannerService {
             String requestDescription,
             ProductPosterVisionAnalysisService.VisionAnalysisResult visionAnalysis,
             boolean autonomousPlanning,
-            String industryResearchContext
+            String industryResearchContext,
+            String userMemoryContext
     ) {
         StringBuilder builder = new StringBuilder();
         builder.append("用户产品描述：\n").append(requestDescription == null ? "" : requestDescription.trim()).append("\n");
@@ -523,6 +545,9 @@ public class AgentPlannerService {
         }
         if (industryResearchContext != null && !industryResearchContext.isBlank()) {
             builder.append("AI websearch 行业调研：\n").append(industryResearchContext.trim()).append("\n");
+        }
+        if (userMemoryContext != null && !userMemoryContext.isBlank()) {
+            builder.append(userMemoryContext.trim()).append("\n");
         }
         return builder.toString().trim();
     }
@@ -1634,7 +1659,8 @@ public class AgentPlannerService {
             List<AiProxyDtos.ImageReferenceCandidate> productImages,
             String aspectRatio,
             int count,
-            String industryResearchContext
+            String industryResearchContext,
+            String userMemoryContext
     ) {
         StringBuilder builder = new StringBuilder();
         boolean seriesMode = isSeriesProductPoster(productPoster);
@@ -1682,6 +1708,9 @@ public class AgentPlannerService {
             builder.append("请先分析产品本身，再把上面的 websearch 结果用于确定最前沿/最流行/最引人入胜但简洁优雅的视觉风格、高转化详情页版式、产品特点展示方法、购买欲钩子、道具场景、文案角度和需要避免的设计，不要照搬搜索文本。\n");
         } else {
             builder.append("AI web search 行业调研：未获取到可用结果，请使用内置行业经验判断最流行且简洁优雅的行业审美、高转化版式、产品特点展示方法和购买欲钩子。\n");
+        }
+        if (userMemoryContext != null && !userMemoryContext.isBlank()) {
+            builder.append(userMemoryContext.trim()).append("\n");
         }
         return builder.toString();
     }
@@ -2093,10 +2122,13 @@ public class AgentPlannerService {
                 """;
     }
 
-    private String buildPlannerInput(AiProxyDtos.AgentPlanRequest request) {
+    private String buildPlannerInput(AiProxyDtos.AgentPlanRequest request, String userMemoryContext) {
         StringBuilder builder = new StringBuilder();
         builder.append("用户指令：").append(request.prompt()).append("\n");
         builder.append("当前画幅：").append(normalizeAspectRatio(request.aspectRatio())).append("\n");
+        if (userMemoryContext != null && !userMemoryContext.isBlank()) {
+            builder.append(userMemoryContext.trim()).append("\n");
+        }
         if (request.requestedEditMode() != null && !request.requestedEditMode().isBlank()) {
             builder.append("当前显式编辑模式：").append(request.requestedEditMode()).append("\n");
         }
@@ -2127,6 +2159,17 @@ public class AgentPlannerService {
             builder.append("\n");
         }
         return builder.toString();
+    }
+
+    private String buildUserMemoryContext(
+            UUID userId,
+            UserApiConfigDtos.ResolvedConfig config,
+            String latestUserMessage
+    ) {
+        if (userMemoryService == null) {
+            return "";
+        }
+        return userMemoryService.buildRelevantMemoryContext(userId, config, latestUserMessage);
     }
 
     private String buildIntentClassifierInput(AiProxyDtos.AgentPlanRequest request) {

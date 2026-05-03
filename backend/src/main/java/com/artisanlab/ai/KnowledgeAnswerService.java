@@ -5,6 +5,7 @@ import com.artisanlab.knowledge.KnowledgeSearchResult;
 import com.artisanlab.userconfig.UserApiConfigDtos;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -21,22 +22,36 @@ public class KnowledgeAnswerService {
     private static final Logger log = LoggerFactory.getLogger(KnowledgeAnswerService.class);
     private static final Duration KNOWLEDGE_ANSWER_TIMEOUT = Duration.ofSeconds(30);
     private static final String DEFAULT_MISS_MESSAGE = "我还没有在 livart 系统知识库里找到这部分说明。你可以换一种说法问我，或者先描述你想完成的图片操作。";
+    private static final String EMBEDDING_CACHE_NAMESPACE = "knowledge-query";
 
     private final KnowledgeChunkMapper mapper;
     private final KnowledgeEmbeddingService embeddingService;
     private final SpringAiTextService textService;
+    private final RedisEmbeddingCacheService redisEmbeddingCacheService;
     private final int searchLimit;
 
+    @Autowired
     public KnowledgeAnswerService(
             KnowledgeChunkMapper mapper,
             KnowledgeEmbeddingService embeddingService,
             SpringAiTextService textService,
+            RedisEmbeddingCacheService redisEmbeddingCacheService,
             @Value("${artisan.knowledge.search-limit:4}") int searchLimit
     ) {
         this.mapper = mapper;
         this.embeddingService = embeddingService;
         this.textService = textService;
+        this.redisEmbeddingCacheService = redisEmbeddingCacheService;
         this.searchLimit = Math.max(1, Math.min(8, searchLimit));
+    }
+
+    KnowledgeAnswerService(
+            KnowledgeChunkMapper mapper,
+            KnowledgeEmbeddingService embeddingService,
+            SpringAiTextService textService,
+            int searchLimit
+    ) {
+        this(mapper, embeddingService, textService, null, searchLimit);
     }
 
     public String answerSystemQuestion(
@@ -94,9 +109,18 @@ public class KnowledgeAnswerService {
     private String getQueryEmbedding(UserApiConfigDtos.ResolvedConfig config, String normalizedQuestion) {
         String model = embeddingService.embeddingModel();
         String questionHash = sha256(normalizeQuestionCacheKey(normalizedQuestion));
+        String redisCachedEmbedding = redisEmbeddingCacheService == null
+                ? ""
+                : redisEmbeddingCacheService.find(EMBEDDING_CACHE_NAMESPACE, model, questionHash);
+        if (!redisCachedEmbedding.isBlank()) {
+            return redisCachedEmbedding;
+        }
         String cachedEmbedding = mapper.findCachedQueryEmbedding(model, questionHash);
         if (cachedEmbedding != null && !cachedEmbedding.isBlank()) {
             mapper.touchCachedQueryEmbedding(model, questionHash);
+            if (redisEmbeddingCacheService != null) {
+                redisEmbeddingCacheService.put(EMBEDDING_CACHE_NAMESPACE, model, questionHash, cachedEmbedding);
+            }
             return cachedEmbedding;
         }
 
@@ -105,6 +129,9 @@ public class KnowledgeAnswerService {
         );
         if (!embedding.isBlank() && !"[]".equals(embedding)) {
             mapper.upsertCachedQueryEmbedding(model, questionHash, normalizedQuestion, embedding);
+            if (redisEmbeddingCacheService != null) {
+                redisEmbeddingCacheService.put(EMBEDDING_CACHE_NAMESPACE, model, questionHash, embedding);
+            }
         }
         return embedding;
     }

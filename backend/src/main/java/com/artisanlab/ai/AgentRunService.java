@@ -2,6 +2,7 @@ package com.artisanlab.ai;
 
 import com.artisanlab.common.ApiException;
 import com.artisanlab.skill.ExternalSkillService;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
@@ -31,6 +32,7 @@ public class AgentRunService {
     private final AiProxyService aiProxyService;
     private final ImageJobEventBroadcaster eventBroadcaster;
     private final ExternalSkillService externalSkillService;
+    private final UserMemoryService userMemoryService;
     private final Map<String, AgentRunState> agentRuns = new ConcurrentHashMap<>();
 
     public AgentRunService(
@@ -39,10 +41,22 @@ public class AgentRunService {
             ImageJobEventBroadcaster eventBroadcaster,
             ExternalSkillService externalSkillService
     ) {
+        this(agentPlannerService, aiProxyService, eventBroadcaster, externalSkillService, null);
+    }
+
+    @Autowired
+    public AgentRunService(
+            AgentPlannerService agentPlannerService,
+            AiProxyService aiProxyService,
+            ImageJobEventBroadcaster eventBroadcaster,
+            ExternalSkillService externalSkillService,
+            UserMemoryService userMemoryService
+    ) {
         this.agentPlannerService = agentPlannerService;
         this.aiProxyService = aiProxyService;
         this.eventBroadcaster = eventBroadcaster;
         this.externalSkillService = externalSkillService;
+        this.userMemoryService = userMemoryService;
     }
 
     public AiProxyDtos.AgentRunResponse run(UUID userId, AiProxyDtos.AgentRunRequest request) throws IOException {
@@ -89,6 +103,8 @@ public class AgentRunService {
             markRunError(userId, runId, runState, exception);
             throw exception;
         }
+
+        captureUserMemoryBestEffort(userId, request);
 
         if (!"execute".equals(plan.responseMode()) || !plan.allowed()) {
             if ("answer".equals(plan.responseMode())) {
@@ -522,6 +538,24 @@ public class AgentRunService {
             return normalized.substring(0, 80);
         }
         return normalized;
+    }
+
+    private void captureUserMemoryBestEffort(UUID userId, AiProxyDtos.AgentRunRequest request) {
+        if (userMemoryService == null || request == null) {
+            return;
+        }
+        String conversationContext = request.productPoster() == null ? "" : request.productPoster().conversationContext();
+        userMemoryService.captureAgentTurnBestEffort(
+                userId,
+                new UserMemoryService.AgentMemoryCaptureRequest(
+                        request.prompt(),
+                        conversationContext,
+                        request.aspectRatio(),
+                        request.imageResolution(),
+                        request.requestedEditMode(),
+                        request.forcedToolId()
+                )
+        );
     }
 
     private String buildImageEditPrompt(

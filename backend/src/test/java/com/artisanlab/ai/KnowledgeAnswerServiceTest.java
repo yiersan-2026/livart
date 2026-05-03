@@ -74,6 +74,36 @@ class KnowledgeAnswerServiceTest {
     }
 
     @Test
+    void prefersRedisCachedQueryEmbeddingWhenAvailable() {
+        KnowledgeChunkMapper mapper = mock(KnowledgeChunkMapper.class);
+        KnowledgeEmbeddingService embeddingService = mock(KnowledgeEmbeddingService.class);
+        SpringAiTextService textService = mock(SpringAiTextService.class);
+        RedisEmbeddingCacheService redisEmbeddingCacheService = mock(RedisEmbeddingCacheService.class);
+        KnowledgeAnswerService service = new KnowledgeAnswerService(
+                mapper,
+                embeddingService,
+                textService,
+                redisEmbeddingCacheService,
+                4
+        );
+
+        when(embeddingService.embeddingModel()).thenReturn("BAAI/bge-m3");
+        when(redisEmbeddingCacheService.find(eq("knowledge-query"), eq("BAAI/bge-m3"), anyString())).thenReturn("[0.7,0.8]");
+        when(mapper.searchByVector("[0.7,0.8]", 4)).thenReturn(List.of(
+                new KnowledgeSearchResult("chunk-3", "livart-system", "导出", "点击下载按钮导出图片。", 0.95d)
+        ));
+        when(textService.completeText(eq(CONFIG), anyString(), anyString(), any(), eq("knowledge-answer")))
+                .thenReturn("点击下载按钮即可导出图片。");
+
+        String answer = service.answerSystemQuestion(CONFIG, "怎么导出图片？", "默认回答");
+
+        assertThat(answer).contains("下载按钮");
+        verify(embeddingService, never()).createEmbedding(any(), anyString());
+        verify(mapper, never()).findCachedQueryEmbedding(anyString(), anyString());
+        verify(redisEmbeddingCacheService).find(eq("knowledge-query"), eq("BAAI/bge-m3"), anyString());
+    }
+
+    @Test
     void throwsWhenEmbeddingFails() {
         KnowledgeChunkMapper mapper = mock(KnowledgeChunkMapper.class);
         KnowledgeEmbeddingService embeddingService = mock(KnowledgeEmbeddingService.class);

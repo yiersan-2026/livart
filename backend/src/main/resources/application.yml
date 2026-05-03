@@ -63,6 +63,15 @@ artisan:
     embedding-model: ${LIVART_KNOWLEDGE_EMBEDDING_MODEL:BAAI/bge-m3}
     embedding-batch-size: ${LIVART_KNOWLEDGE_EMBEDDING_BATCH_SIZE:24}
     search-limit: ${LIVART_KNOWLEDGE_SEARCH_LIMIT:4}
+  memory:
+    search-limit: ${LIVART_MEMORY_SEARCH_LIMIT:4}
+    recent-limit: ${LIVART_MEMORY_RECENT_LIMIT:6}
+    score-threshold: ${LIVART_MEMORY_SCORE_THRESHOLD:0.35}
+    capture-worker-count: ${LIVART_MEMORY_CAPTURE_WORKER_COUNT:2}
+  redis:
+    embedding-cache:
+      enabled: ${LIVART_REDIS_EMBEDDING_CACHE_ENABLED:true}
+      ttl-days: ${LIVART_REDIS_EMBEDDING_CACHE_TTL_DAYS:30}
 
 logging:
   level:

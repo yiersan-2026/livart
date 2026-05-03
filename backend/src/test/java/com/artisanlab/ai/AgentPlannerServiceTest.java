@@ -335,6 +335,69 @@ class AgentPlannerServiceTest {
     }
 
     @Test
+    void createPlanAppendsUserMemoryContextToPlannerInput() {
+        UserApiConfigService userApiConfigService = mock(UserApiConfigService.class);
+        SpringAiTextService springAiTextService = mock(SpringAiTextService.class);
+        KnowledgeAnswerService knowledgeAnswerService = mock(KnowledgeAnswerService.class);
+        UserMemoryService userMemoryService = mock(UserMemoryService.class);
+        AgentPlannerService service = new AgentPlannerService(
+                userApiConfigService,
+                springAiTextService,
+                knowledgeAnswerService,
+                null,
+                null,
+                userMemoryService,
+                new com.fasterxml.jackson.databind.ObjectMapper()
+        );
+        UUID userId = UUID.randomUUID();
+        UserApiConfigDtos.ResolvedConfig config = new UserApiConfigDtos.ResolvedConfig(
+                "https://api.sisct2.xyz/v1",
+                "test-key",
+                "gpt-image-2",
+                "gpt-5.4-mini",
+                "https://api.sisct2.xyz/v1/images/generations",
+                "https://api.sisct2.xyz/v1/images/edits",
+                false
+        );
+        AiProxyDtos.AgentPlanRequest request = new AiProxyDtos.AgentPlanRequest(
+                "生成一张 AI 贴纸详情图",
+                "",
+                "9:16",
+                "",
+                "",
+                List.of()
+        );
+
+        when(userApiConfigService.getRequiredConfig(userId)).thenReturn(config);
+        when(userMemoryService.buildRelevantMemoryContext(eq(userId), eq(config), eq("生成一张 AI 贴纸详情图")))
+                .thenReturn("用户长期记忆（仅作个性化参考；若与本轮明确要求冲突，以本轮为准）：\n- 视觉偏好：简洁优雅、高级留白");
+        when(springAiTextService.completeText(
+                eq(config),
+                anyString(),
+                anyString(),
+                any(),
+                eq("agent-intent-classifier")
+        )).thenReturn("生图");
+        when(springAiTextService.completeText(
+                eq(config),
+                anyString(),
+                anyString(),
+                any(),
+                eq("agent-planner")
+        )).thenReturn("""
+                {"allowed":true,"responseMode":"execute","rejectionMessage":"","answerMessage":"","taskType":"text-to-image","mode":"generate","count":1,"baseImageId":"","referenceImageIds":[],"displayTitle":"AI贴纸详情图","displayMessage":"我将为您生成这张AI贴纸详情图。","thinkingSteps":["分析需求","整理提示词","准备生图"]}
+                """);
+
+        service.createPlan(userId, request);
+
+        ArgumentCaptor<String> plannerInputCaptor = ArgumentCaptor.forClass(String.class);
+        verify(springAiTextService).completeText(eq(config), anyString(), plannerInputCaptor.capture(), any(), eq("agent-planner"));
+        assertThat(plannerInputCaptor.getValue())
+                .contains("用户长期记忆")
+                .contains("视觉偏好：简洁优雅、高级留白");
+    }
+
+    @Test
     void analyzeProductPosterExtractsStructuredFeatures() {
         UserApiConfigService userApiConfigService = mock(UserApiConfigService.class);
         SpringAiTextService springAiTextService = mock(SpringAiTextService.class);

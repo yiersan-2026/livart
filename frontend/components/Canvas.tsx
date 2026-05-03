@@ -134,7 +134,6 @@ type SnapCandidate = {
 };
 
 const REMOVER_PROMPT = '把圈起来的地方删除掉。';
-const LOCAL_REDRAW_PROMPT = '自然重绘用户涂抹的局部区域，保持未涂抹区域完全不变，并让新内容与原图的光影、材质、透视和风格自然一致。';
 const BACKGROUND_REMOVAL_PROMPT = '先识别图片中的主要主体：画面最主要的人物、商品、动物、车辆或成组前景对象；主体包含其穿戴、手持、贴附和与主体直接组成整体的部分。只保留主体，把主体以外的一切背景和无关物体替换为纯白色背景（#FFFFFF），不要透明背景，不要浅灰、米白或渐变。不要改变主体 RGB 像素，不要重绘、修复、补全、美化、移动或缩放主体；严格保留原图中已经可见的主体像素、裁切范围、构图、脸、表情、姿态、服装、颜色、纹理、发丝和边缘细节；原图里被裁切到画面外的身体、头发、衣服不要补出来。输出白底图片。';
 const PANORAMA_PROMPT = '完整球形全景转换：请把原图中的完整场景扩展并转换为可用于 360° 查看的完整球形全景图，也就是 360° 水平视角 + 180° 垂直视角的 2:1 equirectangular spherical panorama。保持原图的场景主题、主体身份、物体种类、相对位置关系、材质、颜色、光影方向和整体氛围不变；只补全原图视野外左右两侧、天空/天花板、地面/桌面等需要形成完整环绕空间的合理延展区域。输出必须是可用于全景查看器的 2:1 横向完整球形全景构图，左右边缘自然衔接，顶部和底部空间合理连续，水平线稳定，不要把主体重绘成新物体，不要改变原图已有物体的身份、结构和核心外观，不要添加白边、相框、文字、水印或无关元素。';
 const LAYER_SPLIT_SUBJECT_PROMPT = '图层拆分：请把这张图拆出“主体层”。先识别画面主要前景主体，主体包含其穿戴、手持、贴附和直接组成整体的部分；输出同画幅主体图层，主体以外区域必须是透明 alpha，不要生成新背景，不要改变主体身份、结构、比例、颜色、材质、边缘、光影和原有裁切。';
@@ -1251,6 +1250,7 @@ const Canvas: React.FC<CanvasProps> = ({
   const selectedImageMaskMode: ImageMaskMode | null = selectedItemIsRemover
     ? 'remover'
     : selectedItemIsLocalRedraw ? 'local-redraw' : null;
+  const selectedItemShowsInlinePrompt = selectedItemIsQuickEditing || selectedItemIsLocalRedraw;
   const selectedImageMaskData = selectedItem?.type === 'image' && selectedImageMaskMode
     ? getImageMaskDataForMode(selectedItem, selectedImageMaskMode)
     : undefined;
@@ -1976,11 +1976,20 @@ const Canvas: React.FC<CanvasProps> = ({
       return;
     }
 
+    const prompt = (inlineEditPrompts[item.id] || '').trim();
+    if (selectedImageMaskMode === 'local-redraw' && !prompt) {
+      setInlineEditErrors(prev => ({
+        ...prev,
+        [item.id]: '请先描述圈选区域要怎么重绘，比如“把圈里的鞋子换成红色高跟鞋”'
+      }));
+      return;
+    }
+
     onItemUpdate(item.id, getImageMaskUpdateForMode(selectedImageMaskMode, currentMaskData));
     clearInlineEditError(item.id);
     void handleInlineImageRedraw(undefined, {
       item,
-      prompt: selectedImageMaskMode === 'remover' ? REMOVER_PROMPT : LOCAL_REDRAW_PROMPT
+      prompt
     });
   };
 
@@ -4717,7 +4726,7 @@ const Canvas: React.FC<CanvasProps> = ({
           </div>
         )}
 
-        {canvasTool === 'select' && selectedItem?.type === 'image' && selectedIds.length === 1 && selectedItemIsQuickEditing && !isDraggingSelectedImage && (
+        {canvasTool === 'select' && selectedItem?.type === 'image' && selectedIds.length === 1 && selectedItemShowsInlinePrompt && !isDraggingSelectedImage && (
           <div
             className="absolute z-[2000000] pointer-events-auto"
             style={{
@@ -4747,24 +4756,29 @@ const Canvas: React.FC<CanvasProps> = ({
                     onKeyDown={(event) => {
                       if (event.key === 'Escape') {
                         event.preventDefault();
-                        setQuickEditItemId(null);
+                        if (selectedItemIsLocalRedraw) {
+                          setLocalRedrawItemId(null);
+                          setActiveTool('select');
+                        } else {
+                          setQuickEditItemId(null);
+                        }
                       }
                     }}
                     disabled={selectedItemIsInlineEditing}
-                    placeholder="输入一句话快捷编辑这张图..."
+                    placeholder={selectedItemIsLocalRedraw ? '描述圈选区域要怎么重绘...' : '输入一句话快捷编辑这张图...'}
                     className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-zinc-800 outline-none placeholder:text-zinc-400"
                   />
                   <span className="hidden shrink-0 text-[10px] font-black uppercase tracking-widest text-zinc-300 sm:block">
                     {selectedItemIsInlineEditing && selectedInlineEditDurationText
                       ? `已执行 ${selectedInlineEditDurationText}`
-                      : 'Esc 关闭'}
+                      : selectedItemIsLocalRedraw ? '先涂抹，再描述' : 'Esc 关闭'}
                   </span>
                 </div>
                 <button
                   type="submit"
                   disabled={!inlineEditPrompt.trim() || selectedItemIsInlineEditing}
                   className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[14px] bg-zinc-900 text-white transition-all hover:bg-zinc-800 active:scale-95 disabled:cursor-not-allowed disabled:opacity-30"
-                  title="提交快捷编辑"
+                  title={selectedItemIsLocalRedraw ? '提交局部重绘' : '提交快捷编辑'}
                 >
                   {selectedItemIsInlineEditing ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
                 </button>
