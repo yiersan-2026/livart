@@ -174,7 +174,7 @@ public class AiProxyService {
             String aspectRatio,
             int count
     ) throws IOException {
-        return createTextToImageJobsFromAgent(userId, prompt, aspectRatio, "2k", count, "");
+        return createTextToImageJobsFromAgent(userId, prompt, aspectRatio, "2k", count, "", true);
     }
 
     public List<Map<String, Object>> createTextToImageJobsFromAgent(
@@ -184,6 +184,18 @@ public class AiProxyService {
             String imageResolution,
             int count,
             String promptOptimizeContext
+    ) throws IOException {
+        return createTextToImageJobsFromAgent(userId, prompt, aspectRatio, imageResolution, count, promptOptimizeContext, true);
+    }
+
+    public List<Map<String, Object>> createTextToImageJobsFromAgent(
+            UUID userId,
+            String prompt,
+            String aspectRatio,
+            String imageResolution,
+            int count,
+            String promptOptimizeContext,
+            boolean enablePromptOptimization
     ) throws IOException {
         cleanupImageJobs();
         UserApiConfigDtos.ResolvedConfig config = userApiConfigService.getRequiredConfig(userId);
@@ -196,7 +208,12 @@ public class AiProxyService {
         }
         if (promptOptimizeContext != null && !promptOptimizeContext.isBlank()) {
             body.put("promptOptimizeContext", promptOptimizeContext.trim());
-            body.put("promptOptimizationMode", "skill-text-to-image");
+            if (enablePromptOptimization) {
+                body.put("promptOptimizationMode", "skill-text-to-image");
+            }
+        }
+        if (!enablePromptOptimization) {
+            body.put("promptOptimizationMode", "disabled");
         }
 
         ImageProxyRequestBody requestBody = readJsonImageProxyRequestBody(
@@ -513,11 +530,13 @@ public class AiProxyService {
         String normalizedImageResolution = normalizeImageResolution(request.imageResolution());
         String prompt = appendImageOutputInstructions(request.prompt(), request.aspectRatio(), normalizedImageResolution);
         String promptOptimizationMode = normalizePromptOptimizationMode(request.promptOptimizationMode(), "image-to-image");
-        String optimizedPrompt = optimizePromptInline(config, promptOptimizationMode, prompt, request.imageContext());
+        String optimizedPrompt = shouldOptimizePrompt(promptOptimizationMode)
+                ? optimizePromptInline(config, promptOptimizationMode, prompt, request.imageContext())
+                : "";
         ImageOutputSettings outputSettings = resolveImageOutputSettings(prompt, request.aspectRatio(), normalizedImageResolution, false);
 
         writeTextMultipartPart(output, boundary, "model", config.model());
-        writeTextMultipartPart(output, boundary, "prompt", optimizedPrompt);
+        writeTextMultipartPart(output, boundary, "prompt", optimizedPrompt.isBlank() ? prompt : optimizedPrompt);
         if (!outputSettings.size().isBlank()) {
             writeTextMultipartPart(output, boundary, "size", outputSettings.size());
         }
@@ -573,7 +592,9 @@ public class AiProxyService {
         );
         rewrittenBody.remove(List.of("imageContext", "promptOptimizeContext", "promptContext", "promptOptimizationMode", "imageResolution"));
 
-        String optimizedPrompt = optimizePromptInline(config, promptOptimizationMode, prompt, imageContext);
+        String optimizedPrompt = shouldOptimizePrompt(promptOptimizationMode)
+                ? optimizePromptInline(config, promptOptimizationMode, prompt, imageContext)
+                : "";
         if (!optimizedPrompt.isBlank()) {
             rewrittenBody.put("prompt", optimizedPrompt);
         }
@@ -789,7 +810,8 @@ public class AiProxyService {
 
     private String normalizePromptOptimizationMode(String value, String fallbackMode) {
         String normalizedValue = value == null ? "" : value.trim();
-        if ("image-remover".equals(normalizedValue)
+        if ("disabled".equals(normalizedValue)
+                || "image-remover".equals(normalizedValue)
                 || "background-removal".equals(normalizedValue)
                 || "layer-split-subject".equals(normalizedValue)
                 || "layer-split-background".equals(normalizedValue)
@@ -801,6 +823,10 @@ public class AiProxyService {
             return normalizedValue;
         }
         return fallbackMode;
+    }
+
+    static boolean shouldOptimizePrompt(String mode) {
+        return !"disabled".equalsIgnoreCase(mode == null ? "" : mode.trim());
     }
 
     private void writeTextMultipartPart(ByteArrayOutputStream output, String boundary, String name, String value) throws IOException {

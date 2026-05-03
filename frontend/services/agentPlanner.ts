@@ -100,6 +100,7 @@ interface AgentRunStatusApiResponse {
 
 export interface AgentRunRequest extends AgentPlanRequest {
   maskDataUrl?: string;
+  enablePromptOptimization?: boolean;
   clientRunId?: string;
 }
 
@@ -695,6 +696,7 @@ export const createAgentRun = async (request: AgentRunRequest): Promise<AgentRun
       productPoster: request.productPoster,
       images: mapImageCandidates(request.images),
       maskDataUrl: request.maskDataUrl || '',
+      enablePromptOptimization: request.enablePromptOptimization !== false,
       clientRunId: request.clientRunId || ''
     })
   });

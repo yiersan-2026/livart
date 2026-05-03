@@ -110,6 +110,7 @@ type SidebarSendOptions = {
   contextImageId?: string;
   contextImageIds?: string[];
   userMessageText?: string;
+  enablePromptOptimization?: boolean;
 };
 
 type ProductPosterFormState = {
@@ -266,6 +267,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
   const [externalSkills, setExternalSkills] = React.useState<ExternalSkillSummary[]>([]);
   const [selectedExternalSkillId, setSelectedExternalSkillId] = React.useState('');
   const [externalSkillLoadError, setExternalSkillLoadError] = React.useState('');
+  const [isPromptOptimizationEnabled, setIsPromptOptimizationEnabled] = React.useState(true);
   const [inputFocusSignal, setInputFocusSignal] = React.useState(0);
   const [isAspectRatioMenuOpen, setIsAspectRatioMenuOpen] = React.useState(false);
   const [isResolutionMenuOpen, setIsResolutionMenuOpen] = React.useState(false);
@@ -860,7 +862,10 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
       prompt,
       selectedAspectRatio,
       selectedImageResolution,
-      ENABLE_EXTERNAL_SKILLS && !isMobileLayout ? selectedExternalSkillId || undefined : undefined
+      ENABLE_EXTERNAL_SKILLS && !isMobileLayout ? selectedExternalSkillId || undefined : undefined,
+      {
+        enablePromptOptimization: isPromptOptimizationEnabled
+      }
     );
     setIsAspectRatioMenuOpen(false);
     setIsResolutionMenuOpen(false);
@@ -1054,7 +1059,8 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
       productPoster,
       contextImageId: productImage.id,
       contextImageIds: selectedProductImages.map(item => item.id),
-      userMessageText: `使用 ${selectedProductImages.length} 张${productPosterForm.productMode === 'series' ? '系列产品图' : '产品图'}生成 ${productPosterForm.posterCount} 张商品详情图：${productPosterForm.productName.trim() || getCanvasItemDisplayTitle(productImage)}`
+      userMessageText: `使用 ${selectedProductImages.length} 张${productPosterForm.productMode === 'series' ? '系列产品图' : '产品图'}生成 ${productPosterForm.posterCount} 张商品详情图：${productPosterForm.productName.trim() || getCanvasItemDisplayTitle(productImage)}`,
+      enablePromptOptimization: isPromptOptimizationEnabled
     });
     setIsProductPosterModalOpen(false);
     setProductPosterError('');
@@ -2072,7 +2078,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
               </button>
             </div>
 
-            <div className="mt-2 flex items-center gap-2 rounded-2xl border border-gray-100 bg-gray-50 px-2 py-2">
+            <div className="mt-2 flex flex-wrap items-center gap-2 rounded-2xl border border-gray-100 bg-gray-50 px-2 py-2">
               <div ref={aspectRatioMenuRef} className="relative shrink-0">
                 <button
                   type="button"
@@ -2188,6 +2194,36 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
                     </div>
                   </div>
                 )}
+              </div>
+
+              <div className="flex shrink-0 items-center gap-1 rounded-xl bg-white px-1 py-1">
+                <span className="px-1 text-[10px] font-black uppercase tracking-widest text-gray-400">优化提示词</span>
+                {[
+                  { value: true, label: '是' },
+                  { value: false, label: '否' }
+                ].map(option => {
+                  const isSelected = isPromptOptimizationEnabled === option.value;
+                  return (
+                    <label
+                      key={option.label}
+                      className={`cursor-pointer rounded-lg px-2.5 py-1 text-[11px] font-black transition-all ${
+                        isSelected
+                          ? 'bg-black text-white'
+                          : 'text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600'
+                      }`}
+                      title={option.value ? '发送前先优化提示词' : '直接使用当前输入的提示词'}
+                    >
+                      <input
+                        type="radio"
+                        name="sidebar-prompt-optimization"
+                        className="sr-only"
+                        checked={isPromptOptimizationEnabled === option.value}
+                        onChange={() => setIsPromptOptimizationEnabled(option.value)}
+                      />
+                      {option.label}
+                    </label>
+                  );
+                })}
               </div>
 
               <div ref={skillMenuRef} className="relative hidden min-w-0 flex-1 md:block">

@@ -322,6 +322,7 @@ public final class AiProxyDtos {
             @Size(max = 80) String forcedToolId,
             @Size(max = 120) String externalSkillId,
             @Valid ProductPosterRequest productPoster,
+            Boolean enablePromptOptimization,
             @Size(max = 80) String clientRunId
     ) {
         public AgentRunRequest(
@@ -336,11 +337,31 @@ public final class AiProxyDtos {
                 String externalSkillId,
                 String clientRunId
         ) {
-            this(prompt, contextImageId, aspectRatio, imageResolution, requestedEditMode, images, maskDataUrl, forcedToolId, externalSkillId, null, clientRunId);
+            this(prompt, contextImageId, aspectRatio, imageResolution, requestedEditMode, images, maskDataUrl, forcedToolId, externalSkillId, null, null, clientRunId);
+        }
+
+        public AgentRunRequest(
+                String prompt,
+                String contextImageId,
+                String aspectRatio,
+                String imageResolution,
+                String requestedEditMode,
+                List<ImageReferenceCandidate> images,
+                String maskDataUrl,
+                String forcedToolId,
+                String externalSkillId,
+                ProductPosterRequest productPoster,
+                String clientRunId
+        ) {
+            this(prompt, contextImageId, aspectRatio, imageResolution, requestedEditMode, images, maskDataUrl, forcedToolId, externalSkillId, productPoster, null, clientRunId);
         }
 
         AgentPlanRequest toPlanRequest() {
             return new AgentPlanRequest(prompt, contextImageId, aspectRatio, imageResolution, requestedEditMode, productPoster, images);
+        }
+
+        boolean isPromptOptimizationEnabled() {
+            return !Boolean.FALSE.equals(enablePromptOptimization);
         }
     }
 

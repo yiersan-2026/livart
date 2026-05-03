@@ -237,6 +237,7 @@ type SidebarSendOptions = {
   contextImageId?: string;
   contextImageIds?: string[];
   userMessageText?: string;
+  enablePromptOptimization?: boolean;
 };
 type CanvasHistorySnapshot = {
   items: CanvasItem[];
@@ -2232,6 +2233,9 @@ function App() {
         : selectedImageEditMode && freshContextImage && selectedImageEditMode.imageId === freshContextImage.id
         ? selectedImageEditMode.mode
         : undefined;
+      const enablePromptOptimization = !options.forcedToolId && !requestedEditMode
+        ? options.enablePromptOptimization !== false
+        : true;
       if (requestedEditMode === 'remover') {
         failureActionLabel = '删除物体';
       } else if (requestedEditMode === 'local-redraw') {
@@ -2290,6 +2294,7 @@ function App() {
         productPoster: options.productPoster,
         images: persistedPlanCandidateImages,
         maskDataUrl,
+        enablePromptOptimization,
         clientRunId: agentRunClientId
       });
       const initialPlan = agentRun.plan;

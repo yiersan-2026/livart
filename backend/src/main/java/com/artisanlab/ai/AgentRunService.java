@@ -234,7 +234,15 @@ public class AgentRunService {
     ) throws IOException {
         List<AiProxyDtos.AgentRunJob> jobs = new ArrayList<>();
         int count = normalizeCount(plan.count());
-        aiProxyService.createTextToImageJobsFromAgent(userId, request.prompt(), plan.aspectRatio(), request.imageResolution(), count, externalSkillGuidance)
+        aiProxyService.createTextToImageJobsFromAgent(
+                        userId,
+                        request.prompt(),
+                        plan.aspectRatio(),
+                        request.imageResolution(),
+                        count,
+                        externalSkillGuidance,
+                        request.isPromptOptimizationEnabled()
+                )
                 .forEach(job -> jobs.add(toRunJob(job)));
 
         return responseWithJobs(plan, request.prompt(), jobs);
@@ -281,7 +289,7 @@ public class AgentRunService {
                 referenceImages.stream().map(candidate -> requireAssetId(candidate, "参考图")).toList(),
                 request.maskDataUrl(),
                 imageContext,
-                promptOptimizationModeFor(plan.mode(), externalSkillGuidance),
+                promptOptimizationModeFor(plan.mode(), externalSkillGuidance, request.isPromptOptimizationEnabled()),
                 request.imageResolution()
         );
 
@@ -359,7 +367,7 @@ public class AgentRunService {
                     referenceAssetIds,
                     "",
                     imageContext,
-                    "product-poster",
+                    promptOptimizationModeFor(plan.mode(), externalSkillGuidance, request.isPromptOptimizationEnabled()),
                     request.imageResolution()
             );
             jobs.add(toRunJob(aiProxyService.createImageEditJobFromAgent(userId, jobRequest)));
@@ -973,7 +981,10 @@ public class AgentRunService {
         }
     }
 
-    private String promptOptimizationModeFor(String mode, String externalSkillGuidance) {
+    private String promptOptimizationModeFor(String mode, String externalSkillGuidance, boolean enablePromptOptimization) {
+        if (!enablePromptOptimization) {
+            return "disabled";
+        }
         String nativeMode = switch (mode) {
             case "background-removal" -> "background-removal";
             case "remover" -> "image-remover";

@@ -6,6 +6,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class AiProxyServicePromptOptimizerTest {
     @Test
+    void disabledModeSkipsPromptOptimization() {
+        assertThat(AiProxyService.shouldOptimizePrompt("disabled")).isFalse();
+    }
+
+    @Test
+    void regularModeKeepsPromptOptimizationEnabled() {
+        assertThat(AiProxyService.shouldOptimizePrompt("image-to-image")).isTrue();
+    }
+
+    @Test
     void fallsBackToOriginalPromptWhenOptimizerRefuses() {
         String originalPrompt = "一只小猫在窗边看雨";
 

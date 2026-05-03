@@ -95,7 +95,7 @@ class AgentRunServiceTest {
         AiProxyDtos.AgentPlanResponse plan = executePlan("text-to-image", "generate", 3, "", List.of(), "1:1");
 
         when(plannerService.createPlan(eq(userId), any())).thenReturn(plan);
-        when(aiProxyService.createTextToImageJobsFromAgent(eq(userId), eq("生成3张小猫"), eq("1:1"), eq("4k"), eq(3), eq("")))
+        when(aiProxyService.createTextToImageJobsFromAgent(eq(userId), eq("生成3张小猫"), eq("1:1"), eq("4k"), eq(3), eq(""), eq(true)))
                 .thenReturn(List.of(job("job-1"), job("job-2"), job("job-3")));
 
         AiProxyDtos.AgentRunResponse response = service.run(userId, request);
@@ -104,9 +104,44 @@ class AgentRunServiceTest {
                 .containsExactly("job-1", "job-2", "job-3");
         assertThat(response.displayTitle()).isEqualTo("小猫图片");
         assertThat(response.displayMessage()).isEqualTo("我开始为你生成 3 张小猫图片。");
-        verify(aiProxyService).createTextToImageJobsFromAgent(eq(userId), eq("生成3张小猫"), eq("1:1"), eq("4k"), eq(3), eq(""));
+        verify(aiProxyService).createTextToImageJobsFromAgent(eq(userId), eq("生成3张小猫"), eq("1:1"), eq("4k"), eq(3), eq(""), eq(true));
         verify(aiProxyService, never()).createTextToImageJobFromAgent(any(), any(), any());
         verify(eventBroadcaster, times(5)).publishAgentRunEvent(eq(userId), eq("run-generate"), any());
+    }
+
+    @Test
+    void textToImagePlanCanDisablePromptOptimization() throws IOException {
+        AgentPlannerService plannerService = mock(AgentPlannerService.class);
+        AiProxyService aiProxyService = mock(AiProxyService.class);
+        ImageJobEventBroadcaster eventBroadcaster = mock(ImageJobEventBroadcaster.class);
+        ExternalSkillService externalSkillService = mock(ExternalSkillService.class);
+        when(externalSkillService.requirePromptGuidance(any())).thenReturn("");
+        AgentRunService service = new AgentRunService(plannerService, aiProxyService, eventBroadcaster, externalSkillService);
+        UUID userId = UUID.randomUUID();
+        AiProxyDtos.AgentRunRequest request = new AiProxyDtos.AgentRunRequest(
+                "生成1张小猫",
+                "",
+                "1:1",
+                "2k",
+                "",
+                List.of(),
+                "",
+                "",
+                "",
+                null,
+                false,
+                "run-generate-no-opt"
+        );
+        AiProxyDtos.AgentPlanResponse plan = executePlan("text-to-image", "generate", 1, "", List.of(), "1:1");
+
+        when(plannerService.createPlan(eq(userId), any())).thenReturn(plan);
+        when(aiProxyService.createTextToImageJobsFromAgent(eq(userId), eq("生成1张小猫"), eq("1:1"), eq("2k"), eq(1), eq(""), eq(false)))
+                .thenReturn(List.of(job("job-no-opt")));
+
+        AiProxyDtos.AgentRunResponse response = service.run(userId, request);
+
+        assertThat(response.jobs()).extracting(AiProxyDtos.AgentRunJob::jobId).containsExactly("job-no-opt");
+        verify(aiProxyService).createTextToImageJobsFromAgent(eq(userId), eq("生成1张小猫"), eq("1:1"), eq("2k"), eq(1), eq(""), eq(false));
     }
 
     @Test
@@ -134,7 +169,7 @@ class AgentRunServiceTest {
         AiProxyDtos.AgentPlanResponse plan = executePlan("text-to-image", "generate", 1, "", List.of(), "auto");
 
         when(plannerService.createPlan(eq(userId), any())).thenReturn(plan);
-        when(aiProxyService.createTextToImageJobsFromAgent(eq(userId), eq("以后默认给我做简洁优雅一点的贴纸图"), eq("auto"), eq("2k"), eq(1), eq("")))
+        when(aiProxyService.createTextToImageJobsFromAgent(eq(userId), eq("以后默认给我做简洁优雅一点的贴纸图"), eq("auto"), eq("2k"), eq(1), eq(""), eq(true)))
                 .thenReturn(List.of(job("memory-job")));
 
         service.run(userId, request);
@@ -175,7 +210,8 @@ class AgentRunServiceTest {
                 eq("3:4"),
                 eq("2k"),
                 eq(1),
-                eq("外部 Skill：GPT Image 2\nSkill 指南：按 Skill 编译提示词")
+                eq("外部 Skill：GPT Image 2\nSkill 指南：按 Skill 编译提示词"),
+                eq(true)
         )).thenReturn(List.of(job("skill-job")));
 
         AiProxyDtos.AgentRunResponse response = service.run(userId, request);
@@ -188,7 +224,8 @@ class AgentRunServiceTest {
                 eq("3:4"),
                 eq("2k"),
                 eq(1),
-                eq("外部 Skill：GPT Image 2\nSkill 指南：按 Skill 编译提示词")
+                eq("外部 Skill：GPT Image 2\nSkill 指南：按 Skill 编译提示词"),
+                eq(true)
         );
     }
 
@@ -270,6 +307,43 @@ class AgentRunServiceTest {
         AiProxyService.AgentImageEditJobRequest jobRequest = captor.getValue();
         assertThat(jobRequest.promptOptimizationMode()).isEqualTo("skill-image-to-image");
         assertThat(jobRequest.imageContext()).contains("外部 Skill：GPT Image 2", "保留参考图一致性");
+    }
+
+    @Test
+    void imageEditCanDisablePromptOptimizationEvenWhenExternalSkillIsSelected() throws IOException {
+        AgentPlannerService plannerService = mock(AgentPlannerService.class);
+        AiProxyService aiProxyService = mock(AiProxyService.class);
+        ImageJobEventBroadcaster eventBroadcaster = mock(ImageJobEventBroadcaster.class);
+        ExternalSkillService externalSkillService = mock(ExternalSkillService.class);
+        when(externalSkillService.requirePromptGuidance(eq("gpt-image"))).thenReturn("外部 Skill：GPT Image 2\nSkill 指南：保留参考图一致性");
+        AgentRunService service = new AgentRunService(plannerService, aiProxyService, eventBroadcaster, externalSkillService);
+        UUID userId = UUID.randomUUID();
+        UUID baseAssetId = UUID.randomUUID();
+        AiProxyDtos.AgentRunRequest request = new AiProxyDtos.AgentRunRequest(
+                "把画面改成水彩风格",
+                "base",
+                "auto",
+                "",
+                "",
+                List.of(new AiProxyDtos.ImageReferenceCandidate("base", "风景图", 1, 1024, 768, baseAssetId.toString())),
+                "",
+                "",
+                "gpt-image",
+                null,
+                false,
+                "run-skill-edit-no-opt"
+        );
+        AiProxyDtos.AgentPlanResponse plan = executePlan("image-edit", "edit", 1, "base", List.of(), "auto");
+
+        when(plannerService.createPlan(eq(userId), any())).thenReturn(plan);
+        when(aiProxyService.createImageEditJobFromAgent(eq(userId), any())).thenReturn(job("skill-edit-job-no-opt"));
+
+        service.run(userId, request);
+
+        ArgumentCaptor<AiProxyService.AgentImageEditJobRequest> captor = ArgumentCaptor.forClass(AiProxyService.AgentImageEditJobRequest.class);
+        verify(aiProxyService).createImageEditJobFromAgent(eq(userId), captor.capture());
+        AiProxyService.AgentImageEditJobRequest jobRequest = captor.getValue();
+        assertThat(jobRequest.promptOptimizationMode()).isEqualTo("disabled");
     }
 
     @Test
