@@ -171,7 +171,8 @@ class ExternalImageServiceTest {
                 new ArtisanProperties.Cors("*"),
                 new ArtisanProperties.Minio("http://localhost:9000", "minio", "minio123", "bucket"),
                 new ArtisanProperties.Rabbitmq("canvas-save", "canvas-save-dlq"),
-                new ArtisanProperties.ExternalImages(endpoint, "test-key", 5)
+                new ArtisanProperties.ExternalImages(endpoint, "test-key", 5),
+                new ArtisanProperties.ExternalApi(false, "X-Livart-Api-Key", "")
         );
     }
 }

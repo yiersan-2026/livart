@@ -51,13 +51,14 @@ public class UserApiConfigService {
     public UserApiConfigDtos.ResolvedConfig getRequiredConfig(UUID userId) {
         UserApiConfigEntity entity = mapper.findByUserId(userId);
         if (entity == null) {
-            UserApiConfigDtos.ResolvedConfig defaultConfig = getServerDefaultResolvedConfig();
-            if (defaultConfig != null) {
-                return defaultConfig;
-            }
-            throw new ApiException(HttpStatus.BAD_REQUEST, "USER_API_CONFIG_REQUIRED", "请先配置中转站 Base URL 和 API Key");
+            return getRequiredServerDefaultConfig("USER_API_CONFIG_REQUIRED", "请先配置中转站 Base URL 和 API Key");
         }
         return toResolvedConfig(entity);
+    }
+
+    @Transactional(readOnly = true)
+    public UserApiConfigDtos.ResolvedConfig getRequiredServerDefaultConfig() {
+        return getRequiredServerDefaultConfig("SERVER_DEFAULT_API_CONFIG_REQUIRED", "请先配置服务端默认 AI 中转配置");
     }
 
     @Transactional
@@ -164,6 +165,14 @@ public class UserApiConfigService {
                 joinUrl(normalizedBaseUrl, "images/edits"),
                 true
         );
+    }
+
+    private UserApiConfigDtos.ResolvedConfig getRequiredServerDefaultConfig(String code, String message) {
+        UserApiConfigDtos.ResolvedConfig defaultConfig = getServerDefaultResolvedConfig();
+        if (defaultConfig != null) {
+            return defaultConfig;
+        }
+        throw new ApiException(HttpStatus.BAD_REQUEST, code, message);
     }
 
     private UserApiConfigDtos.ResolvedConfig toResolvedConfig(UserApiConfigEntity entity) {

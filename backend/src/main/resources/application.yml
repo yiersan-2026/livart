@@ -43,6 +43,10 @@ artisan:
     endpoint: ${LIVART_EXTERNAL_IMAGES_ENDPOINT:https://gogotool.top/api/v1/external/images}
     api-key: ${LIVART_EXTERNAL_IMAGES_API_KEY:}
     timeout-seconds: ${LIVART_EXTERNAL_IMAGES_TIMEOUT_SECONDS:45}
+  external-api:
+    enabled: ${LIVART_EXTERNAL_API_ENABLED:false}
+    header-name: ${LIVART_EXTERNAL_API_HEADER_NAME:X-Livart-Api-Key}
+    api-keys: ${LIVART_EXTERNAL_API_KEYS:}
   external-skills:
     directory: ${LIVART_EXTERNAL_SKILLS_DIR:}
   ai:

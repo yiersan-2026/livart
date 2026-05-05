@@ -89,6 +89,25 @@ class UserApiConfigServiceTest {
     }
 
     @Test
+    void exposesServerDefaultConfigForExternalApis() {
+        UserApiConfigMapper mapper = mock(UserApiConfigMapper.class);
+        UserApiConfigService service = new UserApiConfigService(
+                mapper,
+                "https://api.example/v1",
+                "sk-default",
+                "gpt-image-2",
+                "gpt-5.4-mini"
+        );
+
+        UserApiConfigDtos.ResolvedConfig resolvedConfig = service.getRequiredServerDefaultConfig();
+
+        assertThat(resolvedConfig.baseUrl()).isEqualTo("https://api.example/v1");
+        assertThat(resolvedConfig.apiKey()).isEqualTo("sk-default");
+        assertThat(resolvedConfig.model()).isEqualTo("gpt-image-2");
+        assertThat(resolvedConfig.serverDefault()).isTrue();
+    }
+
+    @Test
     void legacyChatModelIsForcedToGpt54Mini() {
         UUID userId = UUID.randomUUID();
         UserApiConfigMapper mapper = mock(UserApiConfigMapper.class);
