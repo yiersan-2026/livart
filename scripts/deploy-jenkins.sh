@@ -48,6 +48,17 @@ optional_memory_field() {
   read_memory_field "$1" "$2" 2>/dev/null || true
 }
 
+first_nonempty() {
+  local value
+  for value in "$@"; do
+    if [[ -n "$value" ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  done
+  return 1
+}
+
 json_value() {
   local expression="$1"
   python3 -c '
@@ -89,9 +100,19 @@ read_remote_jenkins_token() {
   local remote_password="${JENKINS_TOKEN_REMOTE_PASSWORD:-}"
 
   if [[ -z "$remote_host" && "${LIVART_READ_CODEX_MEMORY:-true}" == "true" ]]; then
-    remote_host="$(optional_memory_field '### Production Server' 'IP')"
-    remote_user="$(optional_memory_field '### Production Server' 'User')"
-    remote_password="$(optional_memory_field '### Production Server' 'Password')"
+    remote_host="$(first_nonempty \
+      "$(optional_memory_field '### Production Server' 'IP')" \
+      "$(optional_memory_field '### Production Server' 'Current production IP')" \
+      "$(optional_memory_field '### Production Server' 'Host')" \
+    )"
+    remote_user="$(first_nonempty \
+      "$(optional_memory_field '### Production Server' 'User')" \
+      "$remote_user" \
+    )"
+    remote_password="$(first_nonempty \
+      "$(optional_memory_field '### Production Server' 'Password')" \
+      "$remote_password" \
+    )"
   fi
 
   if [[ -z "$remote_host" ]]; then
