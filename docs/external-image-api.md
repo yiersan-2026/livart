@@ -11,6 +11,13 @@
 
 推荐轮询间隔：`2 ~ 3 秒`
 
+执行成功后，Livart 会把生成图片自动：
+
+- 上传到 MinIO
+- 写入数据库映射表
+- 在查询结果中通过 `storedImages` 返回可直接访问的站内资源地址
+- 即使后端进程重启，只要该任务已经完成落库，仍可继续查询到结果
+
 ---
 
 ## 鉴权方式
@@ -228,6 +235,22 @@ X-Livart-Api-Key: YOUR_API_KEY
     "maxConcurrentJobs": 16,
     "upstreamStatus": 200,
     "contentType": "application/json; charset=utf-8",
+    "storedImages": [
+      {
+        "id": "c6f4f58d-4c84-4b84-9c11-0123456789ab",
+        "assetId": "9c9161b7-4f07-4ce0-a7df-0123456789ab",
+        "imageIndex": 0,
+        "urlPath": "/api/assets/9c9161b7-4f07-4ce0-a7df-0123456789ab/content",
+        "previewUrlPath": "/api/assets/9c9161b7-4f07-4ce0-a7df-0123456789ab/preview",
+        "thumbnailUrlPath": "/api/assets/9c9161b7-4f07-4ce0-a7df-0123456789ab/thumbnail",
+        "originalFilename": "external-job-01.png",
+        "mimeType": "image/png",
+        "sizeBytes": 123456,
+        "width": 1024,
+        "height": 1024,
+        "createdAt": "2026-05-05T21:00:00+08:00"
+      }
+    ],
     "response": {
       "data": [
         {
@@ -243,10 +266,14 @@ X-Livart-Api-Key: YOUR_API_KEY
 说明：
 
 - `data.response` 为上游生图接口原样返回的 JSON
+- `data.storedImages` 为 Livart 已经落到 MinIO 和数据库里的图片列表，推荐外部系统优先使用
 - 上游有可能返回：
   - `b64_json`
   - `url`
   - 其他图像相关字段
+- `storedImages[*].urlPath` 为原图地址
+- `storedImages[*].previewUrlPath` 为预览 WebP 地址
+- `storedImages[*].thumbnailUrlPath` 为缩略图地址
 
 ### 4）执行失败
 
@@ -346,4 +373,3 @@ curl -X POST 'https://livart.suntools.pro/api/external/v1/images/edits' \
 curl 'https://livart.suntools.pro/api/external/v1/images/jobs/7a4f4eb2-6df3-4dd4-9f5c-6e4d2d0b5c11' \
   -H 'X-Livart-Api-Key: YOUR_API_KEY'
 ```
-

@@ -3,6 +3,7 @@ package com.artisanlab.ai;
 import com.artisanlab.asset.AssetService;
 import com.artisanlab.common.ApiException;
 import com.artisanlab.externalapi.ExternalAiImageDtos;
+import com.artisanlab.externalapi.ExternalImageResultService;
 import com.artisanlab.userconfig.UserApiConfigDtos;
 import com.artisanlab.userconfig.UserApiConfigService;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -121,6 +122,7 @@ public class AiProxyService {
     private final ObjectMapper objectMapper;
     private final ImageJobEventBroadcaster imageJobEventBroadcaster;
     private final SpringAiTextService springAiTextService;
+    private final ExternalImageResultService externalImageResultService;
     private final HttpClient httpClient;
     private final boolean defaultImageSizeEnabled;
     private final int defaultImageLongSide;
@@ -134,6 +136,7 @@ public class AiProxyService {
             ObjectMapper objectMapper,
             ImageJobEventBroadcaster imageJobEventBroadcaster,
             SpringAiTextService springAiTextService,
+            ExternalImageResultService externalImageResultService,
             @Value("${artisan.ai.default-image-size-enabled:true}") boolean defaultImageSizeEnabled,
             @Value("${artisan.ai.default-image-long-side:2048}") int defaultImageLongSide,
             @Value("${artisan.ai.image-job-worker-count:0}") int imageJobWorkerCount
@@ -143,6 +146,7 @@ public class AiProxyService {
         this.objectMapper = objectMapper;
         this.imageJobEventBroadcaster = imageJobEventBroadcaster;
         this.springAiTextService = springAiTextService;
+        this.externalImageResultService = externalImageResultService;
         this.defaultImageSizeEnabled = defaultImageSizeEnabled;
         this.defaultImageLongSide = defaultImageLongSide;
         this.imageJobWorkerCount = resolveImageJobWorkerCount(imageJobWorkerCount);
@@ -230,7 +234,7 @@ public class AiProxyService {
         int jobCount = Math.max(1, Math.min(16, count));
         List<Map<String, Object>> jobs = new ArrayList<>();
         for (int index = 0; index < jobCount; index += 1) {
-            jobs.add(enqueueImageJob(userId, "text-to-image", "images/generations", config, "application/json", requestBody));
+            jobs.add(enqueueImageJob(userId, "text-to-image", "images/generations", config, "application/json", requestBody, false));
         }
         return List.copyOf(jobs);
     }
@@ -242,7 +246,7 @@ public class AiProxyService {
         cleanupImageJobs();
         UserApiConfigDtos.ResolvedConfig config = userApiConfigService.getRequiredConfig(userId);
         ImageProxyRequestBody requestBody = buildAgentImageEditRequestBody(userId, config, request);
-        return enqueueImageJob(userId, "image-to-image", "images/edits", config, "application/json", requestBody);
+        return enqueueImageJob(userId, "image-to-image", "images/edits", config, "application/json", requestBody, false);
     }
 
     public Map<String, Object> createExternalTextToImageJob(
@@ -266,7 +270,7 @@ public class AiProxyService {
                 "application/json; charset=utf-8",
                 objectMapper.writeValueAsBytes(body)
         );
-        return enqueueImageJob(ownerId, "text-to-image", "images/generations", config, "application/json", requestBody);
+        return enqueueImageJob(ownerId, "text-to-image", "images/generations", config, "application/json", requestBody, true);
     }
 
     public Map<String, Object> createExternalImageEditJob(
@@ -276,11 +280,23 @@ public class AiProxyService {
         cleanupImageJobs();
         UserApiConfigDtos.ResolvedConfig config = userApiConfigService.getRequiredServerDefaultConfig();
         ImageProxyRequestBody requestBody = buildExternalImageEditRequestBody(config, request);
-        return enqueueImageJob(ownerId, "image-to-image", "images/edits", config, "application/json", requestBody);
+        return enqueueImageJob(ownerId, "image-to-image", "images/edits", config, "application/json", requestBody, true);
     }
 
     public Map<String, Object> getExternalImageJobSnapshot(UUID ownerId, String jobId) {
-        return getImageJobSnapshot(ownerId, jobId);
+        cleanupImageJobs();
+        UUID parsedJobId = parseImageJobId(jobId);
+        ImageJobState job = imageJobs.get(parsedJobId);
+        if (job != null && job.userId().equals(ownerId)) {
+            return toJobResponse(job);
+        }
+
+        List<ExternalImageResultService.StoredImage> storedImages = externalImageResultService.listStoredImages(ownerId, parsedJobId);
+        if (!storedImages.isEmpty()) {
+            return toStoredExternalJobResponse(parsedJobId, storedImages);
+        }
+
+        throw new ApiException(HttpStatus.NOT_FOUND, "IMAGE_JOB_NOT_FOUND", "图片任务不存在或已过期");
     }
 
     private Map<String, Object> enqueueImageJob(
@@ -289,10 +305,11 @@ public class AiProxyService {
             String path,
             UserApiConfigDtos.ResolvedConfig config,
             String accept,
-            ImageProxyRequestBody requestBody
+            ImageProxyRequestBody requestBody,
+            boolean persistExternalImages
     ) {
         UUID jobId = UUID.randomUUID();
-        ImageJobState job = new ImageJobState(jobId, userId, label);
+        ImageJobState job = new ImageJobState(jobId, userId, label, persistExternalImages);
         imageJobs.put(jobId, job);
         publishImageJob(job);
 
@@ -318,13 +335,7 @@ public class AiProxyService {
 
     public Map<String, Object> getImageJobSnapshot(UUID userId, String jobId) {
         cleanupImageJobs();
-
-        UUID parsedJobId;
-        try {
-            parsedJobId = UUID.fromString(jobId);
-        } catch (IllegalArgumentException exception) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_IMAGE_JOB_ID", "无效的图片任务 ID");
-        }
+        UUID parsedJobId = parseImageJobId(jobId);
 
         ImageJobState job = imageJobs.get(parsedJobId);
         if (job == null || !job.userId().equals(userId)) {
@@ -413,6 +424,37 @@ public class AiProxyService {
         try {
             ImageProxyResult result = executeImageRequest(job.label(), targetUrl, apiKey, accept, contentType, body);
             if (result.statusCode() >= 200 && result.statusCode() <= 299) {
+                try {
+                    if (job.persistExternalImages()) {
+                        job.setStoredImages(externalImageResultService.persistJobResult(
+                                job.userId(),
+                                job.id(),
+                                job.label(),
+                                result.body(),
+                                result.contentType()
+                        ));
+                    }
+                } catch (Exception exception) {
+                    log.error("[image-job] persist external images failed jobId={} error={}", job.id(), safeMessage(exception));
+                    try {
+                        ImageProxyResult persistFailure = jsonImageProxyResult(HttpStatus.BAD_GATEWAY, Map.of(
+                                "error", "external image result store failed",
+                                "detail", safeMessage(exception)
+                        ), result.attempts());
+                        job.markFailed(
+                                persistFailure.statusCode(),
+                                persistFailure.body(),
+                                persistFailure.contentType(),
+                                persistFailure.attempts(),
+                                result.requestId()
+                        );
+                    } catch (IOException ioException) {
+                        job.markFailed(502, safeMessage(exception).getBytes(StandardCharsets.UTF_8), "text/plain; charset=utf-8", result.attempts(), result.requestId());
+                    }
+                    publishImageJob(job);
+                    publishQueuedImageJobs();
+                    return;
+                }
                 job.markCompleted(result);
                 publishImageJob(job);
                 publishQueuedImageJobs();
@@ -1392,6 +1434,9 @@ public class AiProxyService {
         if (job.requestId() != null && !job.requestId().isBlank()) {
             response.put("requestId", job.requestId());
         }
+        if (!job.storedImages().isEmpty()) {
+            response.put("storedImages", job.storedImages());
+        }
 
         if ("completed".equals(job.status())) {
             response.put("upstreamStatus", job.upstreamStatus());
@@ -1404,6 +1449,44 @@ public class AiProxyService {
         }
 
         return response;
+    }
+
+    private Map<String, Object> toStoredExternalJobResponse(
+            UUID jobId,
+            List<ExternalImageResultService.StoredImage> storedImages
+    ) {
+        long createdAt = storedImages.stream()
+                .map(ExternalImageResultService.StoredImage::createdAt)
+                .filter(java.util.Objects::nonNull)
+                .mapToLong(value -> value.toInstant().toEpochMilli())
+                .min()
+                .orElse(System.currentTimeMillis());
+        long updatedAt = storedImages.stream()
+                .map(ExternalImageResultService.StoredImage::createdAt)
+                .filter(java.util.Objects::nonNull)
+                .mapToLong(value -> value.toInstant().toEpochMilli())
+                .max()
+                .orElse(createdAt);
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("jobId", jobId.toString());
+        response.put("status", "completed");
+        response.put("label", "external-image");
+        response.put("createdAt", createdAt);
+        response.put("updatedAt", updatedAt);
+        response.put("attempts", 1);
+        response.put("maxConcurrentJobs", imageJobWorkerCount);
+        response.put("upstreamStatus", 200);
+        response.put("storedImages", storedImages);
+        return response;
+    }
+
+    private UUID parseImageJobId(String jobId) {
+        try {
+            return UUID.fromString(jobId);
+        } catch (IllegalArgumentException exception) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_IMAGE_JOB_ID", "无效的图片任务 ID");
+        }
     }
 
     private int imageJobQueuePosition(ImageJobState job) {
@@ -2046,6 +2129,7 @@ public class AiProxyService {
         private final UUID id;
         private final UUID userId;
         private final String label;
+        private final boolean persistExternalImages;
         private final long createdAt;
         private volatile long updatedAt;
         private volatile String status = "queued";
@@ -2056,11 +2140,13 @@ public class AiProxyService {
         private volatile String requestId = "";
         private volatile String originalPrompt = "";
         private volatile String optimizedPrompt = "";
+        private volatile List<ExternalImageResultService.StoredImage> storedImages = List.of();
 
-        private ImageJobState(UUID id, UUID userId, String label) {
+        private ImageJobState(UUID id, UUID userId, String label, boolean persistExternalImages) {
             this.id = id;
             this.userId = userId;
             this.label = label;
+            this.persistExternalImages = persistExternalImages;
             this.createdAt = System.currentTimeMillis();
             this.updatedAt = this.createdAt;
         }
@@ -2075,6 +2161,10 @@ public class AiProxyService {
 
         private String label() {
             return label;
+        }
+
+        private boolean persistExternalImages() {
+            return persistExternalImages;
         }
 
         private long createdAt() {
@@ -2117,9 +2207,18 @@ public class AiProxyService {
             return optimizedPrompt;
         }
 
+        private List<ExternalImageResultService.StoredImage> storedImages() {
+            return storedImages;
+        }
+
         private void setPromptMetadata(String originalPrompt, String optimizedPrompt) {
             this.originalPrompt = originalPrompt == null ? "" : originalPrompt;
             this.optimizedPrompt = optimizedPrompt == null ? "" : optimizedPrompt;
+            updatedAt = System.currentTimeMillis();
+        }
+
+        private void setStoredImages(List<ExternalImageResultService.StoredImage> storedImages) {
+            this.storedImages = storedImages == null ? List.of() : List.copyOf(storedImages);
             updatedAt = System.currentTimeMillis();
         }
 
