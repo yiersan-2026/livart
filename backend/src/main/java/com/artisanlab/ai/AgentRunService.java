@@ -266,9 +266,6 @@ public class AgentRunService {
 
         String requestedEditMode = request.requestedEditMode() == null ? "" : request.requestedEditMode().trim();
         boolean hasMask = request.maskDataUrl() != null && !request.maskDataUrl().isBlank();
-        if ("remover".equals(plan.mode()) && !hasMask) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "AGENT_MASK_REQUIRED", "请先用画笔涂抹需要删除的物体");
-        }
         if ("local-redraw".equals(requestedEditMode) && !hasMask) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "AGENT_MASK_REQUIRED", "请先用画笔涂抹需要局部重绘的区域");
         }
@@ -289,7 +286,7 @@ public class AgentRunService {
                 referenceImages.stream().map(candidate -> requireAssetId(candidate, "参考图")).toList(),
                 request.maskDataUrl(),
                 imageContext,
-                promptOptimizationModeFor(plan.mode(), externalSkillGuidance, request.isPromptOptimizationEnabled()),
+                promptOptimizationModeFor(plan.mode(), externalSkillGuidance, request.isPromptOptimizationEnabled(), hasMask),
                 request.imageResolution()
         );
 
@@ -367,7 +364,7 @@ public class AgentRunService {
                     referenceAssetIds,
                     "",
                     imageContext,
-                    promptOptimizationModeFor(plan.mode(), externalSkillGuidance, request.isPromptOptimizationEnabled()),
+                    promptOptimizationModeFor(plan.mode(), externalSkillGuidance, request.isPromptOptimizationEnabled(), false),
                     request.imageResolution()
             );
             jobs.add(toRunJob(aiProxyService.createImageEditJobFromAgent(userId, jobRequest)));
@@ -602,7 +599,9 @@ public class AgentRunService {
         }
         lines.add(switch (plan.mode()) {
             case "background-removal" -> "执行要求：只执行去背景/抠图，识别并保留原图主要主体，把主体以外的一切区域改成纯白背景。";
-            case "remover" -> "执行要求：只删除 mask 区域内的内容并自然补全背景，未被 mask 覆盖的区域必须保持原图不变。";
+            case "remover" -> hasLocalMask
+                    ? "执行要求：只删除 mask 区域内的内容并自然补全背景，未被 mask 覆盖的区域必须保持原图不变。"
+                    : "执行要求：根据用户文字描述，在整张原图里识别并删除目标物体、文字、logo、水印、污渍或瑕疵，并根据周围背景、纹理、材质、光影和透视自然补全；未被要求删除的其他主体、背景、构图、色彩和画幅尽量保持原图不变。";
             case "layer-subject" -> "执行要求：执行图层拆分的主体层提取。识别原图主要前景主体，只输出同画幅主体图层；主体以外区域必须是透明 alpha，不要生成新背景；主体身份、结构、比例、边缘、颜色、纹理、光影和原有裁切尽量保持原图一致。";
             case "layer-background" -> "执行要求：执行图层拆分的背景层生成。识别并移除原图主要前景主体及其接触阴影、遮挡残影和边缘碎片，用周围背景的纹理、透视、光影和噪点自然补全；保持原图画幅、视角和背景风格不变，不要生成新主体。";
             case "view-change" -> "执行要求：执行多角度/改视角编辑。把原图当作完整、固定不动的三维场景处理，根据用户给出的整图视角/观察视角、旋转、倾斜和缩放参数，让相机/观察点围绕整张画面移动并生成新的拍摄视角；相机位置发生变化，场景、人物和物体本身不主动旋转、不重新摆姿势。画面中所有可见元素，包括人物、动物、商品、车辆、家具、道具、背景、地面/室内结构、建筑、光源、阴影和反射，都要按照同一个新相机位姿产生一致透视变化；左侧视角或负方位角要看到人物、车辆、家具、建筑和所有可见物体的左侧面，右侧视角或正方位角要看到所有可见物体的右侧面；人物、动物或角色必须保持原先的身体姿态、头部朝向和眼神方向，不要让角色重新转头、转身或看向新镜头，即使原图角色正对原始镜头，新视角也只是从侧面观察这个固定姿态。" + AiProxyService.VIEW_CHANGE_GAZE_LOCK_TEXT + AiProxyService.VIEW_CHANGE_FRAMING_LOCK_TEXT + "不要只旋转或重绘人物、商品、车辆等单个物体，不要让背景/地面/桌面/车轮/车门/墙面停留在原视角，也不要做左右镜像翻转。尽量保持原图完整内容、各主要元素身份、结构比例、材质、颜色、服装/外观、背景风格、相对位置关系、光影方向、画幅比例和原始景别一致；不要添加白边、相框、说明文字或无关新物体。";
@@ -981,13 +980,13 @@ public class AgentRunService {
         }
     }
 
-    private String promptOptimizationModeFor(String mode, String externalSkillGuidance, boolean enablePromptOptimization) {
+    private String promptOptimizationModeFor(String mode, String externalSkillGuidance, boolean enablePromptOptimization, boolean hasMask) {
         if (!enablePromptOptimization) {
             return "disabled";
         }
         String nativeMode = switch (mode) {
             case "background-removal" -> "background-removal";
-            case "remover" -> "image-remover";
+            case "remover" -> hasMask ? "image-remover" : "image-to-image";
             case "layer-subject" -> "layer-split-subject";
             case "layer-background" -> "layer-split-background";
             case "view-change" -> "view-change";
@@ -1004,7 +1003,7 @@ public class AgentRunService {
     private String defaultEditPrompt(String mode) {
         return switch (mode) {
             case "background-removal" -> "去除图片背景，保留主体，背景改成纯白色";
-            case "remover" -> "把圈起来的地方删除掉";
+            case "remover" -> "删除图片里指定的物体并自然补全背景";
             case "layer-subject" -> "提取主体图层，主体以外透明";
             case "layer-background" -> "移除主体并自然补全背景层";
             case "view-change" -> "基于原图生成新的拍摄视角";

@@ -274,6 +274,45 @@ class AgentRunServiceTest {
     }
 
     @Test
+    void removerPlanCanRunWithoutMaskWhenUserUsesDialogDescription() throws IOException {
+        AgentPlannerService plannerService = mock(AgentPlannerService.class);
+        AiProxyService aiProxyService = mock(AiProxyService.class);
+        ImageJobEventBroadcaster eventBroadcaster = mock(ImageJobEventBroadcaster.class);
+        ExternalSkillService externalSkillService = mock(ExternalSkillService.class);
+        when(externalSkillService.requirePromptGuidance(any())).thenReturn("");
+        AgentRunService service = new AgentRunService(plannerService, aiProxyService, eventBroadcaster, externalSkillService);
+        UUID userId = UUID.randomUUID();
+        UUID baseAssetId = UUID.randomUUID();
+        AiProxyDtos.AgentRunRequest request = new AiProxyDtos.AgentRunRequest(
+                "去掉图片里右下角的路人",
+                "base",
+                "auto",
+                "",
+                "",
+                List.of(new AiProxyDtos.ImageReferenceCandidate("base", "街景图", 1, 1024, 768, baseAssetId.toString())),
+                "",
+                "",
+                "",
+                "run-remover-no-mask"
+        );
+        AiProxyDtos.AgentPlanResponse plan = executePlan("image-edit", "remover", 1, "base", List.of(), "auto");
+
+        when(plannerService.createPlan(eq(userId), any())).thenReturn(plan);
+        when(aiProxyService.createImageEditJobFromAgent(eq(userId), any())).thenReturn(job("remover-job"));
+
+        AiProxyDtos.AgentRunResponse response = service.run(userId, request);
+
+        ArgumentCaptor<AiProxyService.AgentImageEditJobRequest> captor = ArgumentCaptor.forClass(AiProxyService.AgentImageEditJobRequest.class);
+        verify(aiProxyService).createImageEditJobFromAgent(eq(userId), captor.capture());
+        AiProxyService.AgentImageEditJobRequest jobRequest = captor.getValue();
+        assertThat(response.jobs()).extracting(AiProxyDtos.AgentRunJob::jobId).containsExactly("remover-job");
+        assertThat(jobRequest.imageAssetId()).isEqualTo(baseAssetId);
+        assertThat(jobRequest.maskDataUrl()).isBlank();
+        assertThat(jobRequest.prompt()).contains("根据用户文字描述，在整张原图里识别并删除目标物体");
+        assertThat(jobRequest.promptOptimizationMode()).isEqualTo("image-to-image");
+    }
+
+    @Test
     void selectedExternalSkillSwitchesGenericImageEditToSkillMode() throws IOException {
         AgentPlannerService plannerService = mock(AgentPlannerService.class);
         AiProxyService aiProxyService = mock(AiProxyService.class);
