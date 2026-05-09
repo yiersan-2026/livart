@@ -1,8 +1,9 @@
 import React from 'react';
-import { Github, ShoppingBag } from 'lucide-react';
+import { Github, ShoppingBag, Sparkles } from 'lucide-react';
 
 const PROJECT_LINKS = {
   stickers: 'https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=3816860766594793858&origin_type=604',
+  newApi: 'https://newapi.sisct.xyz/',
   gitee: 'https://gitee.com/sunowen/livart',
   github: 'https://github.com/yiersan-2026/livart'
 };
@@ -37,6 +38,16 @@ const ProjectLinks: React.FC<ProjectLinksProps> = ({ className = '' }) => (
       aria-label="热门AI产品贴纸"
     >
       <ShoppingBag size={19} strokeWidth={2.3} />
+    </a>
+    <a
+      href={PROJECT_LINKS.newApi}
+      target="_blank"
+      rel="noreferrer"
+      className="flex h-9 w-9 items-center justify-center rounded-xl text-violet-500 transition-all hover:bg-violet-50 hover:text-violet-600 active:scale-95"
+      title="AI中转站"
+      aria-label="AI中转站"
+    >
+      <Sparkles size={19} strokeWidth={2.3} />
     </a>
     <a
       href={PROJECT_LINKS.gitee}
