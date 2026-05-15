@@ -1,6 +1,7 @@
 package com.artisanlab.canvas;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 
@@ -17,4 +18,12 @@ public interface CanvasSnapshotMapper extends BaseMapper<CanvasSnapshotEntity> {
             )
             """)
     int insertSnapshotIfDue(CanvasSnapshotEntity entity);
+
+    @Delete("""
+            DELETE FROM artisan_canvas_snapshots snapshot
+            USING artisan_canvases canvas
+            WHERE snapshot.canvas_id = canvas.id
+              AND canvas.user_id IS NOT NULL
+            """)
+    int deleteAllUserCanvasSnapshots();
 }

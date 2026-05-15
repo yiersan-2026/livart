@@ -5,6 +5,7 @@ import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Delete;
 
 import java.util.List;
 import java.util.UUID;
@@ -52,4 +53,10 @@ public interface CanvasMapper extends BaseMapper<CanvasEntity> {
               AND artisan_canvases.user_id = EXCLUDED.user_id
             """)
     int upsertIfNewer(CanvasEntity entity);
+
+    @Delete("""
+            DELETE FROM artisan_canvases
+            WHERE user_id IS NOT NULL
+            """)
+    int deleteAllUserCanvases();
 }

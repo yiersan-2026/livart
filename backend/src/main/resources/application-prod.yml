@@ -1,10 +1,15 @@
 server:
   port: ${SERVER_PORT:18180}
+  tomcat:
+    basedir: ${SERVER_TOMCAT_BASEDIR:/opt/livart/tomcat}
 
 spring:
   config:
     activate:
       on-profile: prod
+  servlet:
+    multipart:
+      location: ${SPRING_SERVLET_MULTIPART_LOCATION:/opt/livart/tmp/uploads}
   datasource:
     url: jdbc:postgresql://${DB_HOST}:${DB_PORT:5432}/${DB_NAME}
     username: ${DB_USER}

@@ -35,7 +35,9 @@ import {
   AuthSession,
   clearAuthSession,
   getStoredAuthSession,
+  hasSeenWeeklyCleanupNotice,
   loadCurrentUser,
+  markWeeklyCleanupNoticeSeen,
   logout
 } from './services/auth';
 import { getApiConfig, getImageModelDisplayName, loadApiConfig, resetApiConfigSession } from './services/config';
@@ -710,6 +712,11 @@ interface CreateProjectModalProps {
   onSubmit: () => void;
 }
 
+interface WeeklyCleanupNoticeModalProps {
+  isOpen: boolean;
+  onConfirm: () => void;
+}
+
 const CreateProjectModal: React.FC<CreateProjectModalProps> = ({
   isOpen,
   title,
@@ -791,6 +798,43 @@ const CreateProjectModal: React.FC<CreateProjectModalProps> = ({
   );
 };
 
+const WeeklyCleanupNoticeModal: React.FC<WeeklyCleanupNoticeModalProps> = ({
+  isOpen,
+  onConfirm
+}) => {
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-[5000001] flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm">
+      <div
+        role="dialog"
+        aria-modal="true"
+        className="w-full max-w-lg overflow-hidden rounded-[28px] border border-white/70 bg-white shadow-[0_40px_100px_-30px_rgba(0,0,0,0.35)]"
+      >
+        <div className="border-b border-amber-100 bg-amber-50/80 px-6 py-5">
+          <h2 className="text-xl font-black tracking-tight text-gray-900">数据清理公告</h2>
+          <p className="mt-1 text-xs font-bold text-amber-700">请及时保存图片与项目内容。</p>
+        </div>
+
+        <div className="space-y-3 px-6 py-5 text-sm font-bold leading-7 text-gray-600">
+          <p>为释放服务器硬盘空间，系统会在每周一 <span className="text-gray-900">00:00</span> 自动清除所有用户的全部项目以及关联图片资源。</p>
+          <p>请在清理前及时下载保存需要的生成图片，避免作品数据丢失。</p>
+        </div>
+
+        <div className="flex items-center justify-end border-t border-gray-100 px-6 py-4">
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="rounded-2xl bg-black px-5 py-3 text-sm font-black text-white shadow-lg transition-all hover:opacity-90 active:scale-[0.99]"
+          >
+            我知道了
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 function App() {
   const [items, setItemsState] = useState<CanvasItem[]>([]);
   const itemsRef = useRef<CanvasItem[]>([]);
@@ -834,6 +878,7 @@ function App() {
   const [isExternalImageModalOpen, setIsExternalImageModalOpen] = useState(false);
   const [isImportingExternalImages, setIsImportingExternalImages] = useState(false);
   const [productPosterOpenSignal, setProductPosterOpenSignal] = useState(0);
+  const [showWeeklyCleanupNotice, setShowWeeklyCleanupNotice] = useState(false);
   const saveTimerRef = useRef<number | null>(null);
   const pendingSaveRef = useRef<PendingCanvasSave | null>(null);
   const isSavingCanvasRef = useRef(false);
@@ -1086,6 +1131,12 @@ function App() {
       isMounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!authSession) return;
+    if (hasSeenWeeklyCleanupNotice()) return;
+    setShowWeeklyCleanupNotice(true);
+  }, [authSession]);
 
   useEffect(() => {
     if (!isAuthReady || authSession) return;
@@ -2613,6 +2664,14 @@ function App() {
     setAuthSession(session);
     setHasLoadedCanvas(false);
     setCanvasSyncStatus('loading');
+    if (!hasSeenWeeklyCleanupNotice()) {
+      setShowWeeklyCleanupNotice(true);
+    }
+  };
+
+  const handleConfirmWeeklyCleanupNotice = () => {
+    markWeeklyCleanupNoticeSeen();
+    setShowWeeklyCleanupNotice(false);
   };
 
   const handleLogout = async () => {
@@ -2703,7 +2762,12 @@ function App() {
   }
 
   return (
-    <div className="flex h-screen bg-[#fcfcfc] overflow-hidden font-sans text-gray-900">
+    <>
+      <WeeklyCleanupNoticeModal
+        isOpen={showWeeklyCleanupNotice}
+        onConfirm={handleConfirmWeeklyCleanupNotice}
+      />
+      <div className="flex h-screen bg-[#fcfcfc] overflow-hidden font-sans text-gray-900">
       <div className="relative hidden flex-1 flex-col md:flex">
         <div className="absolute left-4 top-4 z-30 flex items-center gap-2">
           <div className="flex items-center gap-1.5 rounded-2xl border border-gray-100 bg-white/90 p-1 shadow-[0_18px_48px_-28px_rgba(0,0,0,0.35)] backdrop-blur-2xl">
@@ -2987,7 +3051,8 @@ function App() {
         }}
         onImport={handleImportExternalImages}
       />
-    </div>
+      </div>
+    </>
   );
 }
 

@@ -5,6 +5,7 @@ import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Delete;
 
 import java.util.List;
 import java.util.UUID;
@@ -48,4 +49,10 @@ public interface ExternalGeneratedImageMapper extends BaseMapper<ExternalGenerat
             @Param("ownerId") UUID ownerId,
             @Param("jobId") UUID jobId
     );
+
+    @Delete("""
+            DELETE FROM artisan_external_generated_images
+            WHERE owner_id IS NOT NULL
+            """)
+    int deleteAllUserGeneratedImages();
 }

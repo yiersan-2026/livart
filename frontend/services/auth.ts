@@ -21,6 +21,8 @@ interface ApiResponse<T> {
 }
 
 const AUTH_SESSION_KEY = 'livart_auth_session';
+export const WEEKLY_CLEANUP_NOTICE_VERSION = '2026-05-weekly-cleanup-v1';
+const WEEKLY_CLEANUP_NOTICE_STORAGE_KEY = 'livart_weekly_cleanup_notice_seen';
 
 const unwrapApiResponse = async <T>(response: Response): Promise<T> => {
   const payload = await response.json().catch(() => null) as ApiResponse<T> | null;
@@ -114,4 +116,12 @@ export const logout = async () => {
       ...headers
     }
   }).catch(() => undefined);
+};
+
+export const hasSeenWeeklyCleanupNotice = () => (
+  localStorage.getItem(WEEKLY_CLEANUP_NOTICE_STORAGE_KEY) === WEEKLY_CLEANUP_NOTICE_VERSION
+);
+
+export const markWeeklyCleanupNoticeSeen = () => {
+  localStorage.setItem(WEEKLY_CLEANUP_NOTICE_STORAGE_KEY, WEEKLY_CLEANUP_NOTICE_VERSION);
 };

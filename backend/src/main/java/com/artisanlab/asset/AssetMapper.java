@@ -5,8 +5,10 @@ import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Update;
 
+import java.util.List;
 import java.util.UUID;
 
 @Mapper
@@ -41,4 +43,19 @@ public interface AssetMapper extends BaseMapper<AssetEntity> {
               AND user_id = #{userId}
             """)
     int updateAssetMetadata(AssetEntity entity);
+
+    @Select("""
+            SELECT id, canvas_id, user_id, object_key, url_path, original_filename,
+                   mime_type, size_bytes, width, height, created_at
+            FROM artisan_assets
+            WHERE user_id IS NOT NULL
+            ORDER BY created_at ASC
+            """)
+    List<AssetEntity> findAllUserOwnedAssets();
+
+    @Delete("""
+            DELETE FROM artisan_assets
+            WHERE user_id IS NOT NULL
+            """)
+    int deleteAllUserOwnedAssets();
 }

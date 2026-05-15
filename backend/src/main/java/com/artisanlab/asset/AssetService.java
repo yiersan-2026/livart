@@ -9,6 +9,7 @@ import io.minio.GetObjectResponse;
 import io.minio.MakeBucketArgs;
 import io.minio.MinioClient;
 import io.minio.PutObjectArgs;
+import io.minio.RemoveObjectArgs;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -31,6 +32,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
@@ -281,6 +283,17 @@ public class AssetService {
         }
 
         return new PreparedImageContent(originalBytes, normalizedContentType);
+    }
+
+    @Transactional
+    public int purgeAllUserAssetsAndObjects() {
+        List<AssetEntity> assets = assetMapper.findAllUserOwnedAssets();
+        int deletedObjectCount = 0;
+        for (AssetEntity asset : assets) {
+            deletedObjectCount += removeAssetObjects(asset);
+        }
+        assetMapper.deleteAllUserOwnedAssets();
+        return deletedObjectCount;
     }
 
     private AssetEntity requireUserAsset(UUID userId, UUID assetId) {
@@ -698,6 +711,38 @@ public class AssetService {
 
     private String variantObjectKey(String objectKey, String variant, String extension) {
         return "%s.%s.%s".formatted(objectKey, variant, extension);
+    }
+
+    private int removeAssetObjects(AssetEntity asset) {
+        if (asset == null || asset.getObjectKey() == null || asset.getObjectKey().isBlank()) {
+            return 0;
+        }
+
+        int removed = 0;
+        for (String objectKey : buildAllObjectKeys(asset.getObjectKey())) {
+            try {
+                minioClient.removeObject(RemoveObjectArgs.builder()
+                        .bucket(properties.minio().bucket())
+                        .object(objectKey)
+                        .build());
+                removed += 1;
+            } catch (Exception exception) {
+                log.warn("[asset] purge remove object failed assetId={} objectKey={} error={}",
+                        asset.getId(), objectKey, exception.getMessage());
+            }
+        }
+        return removed;
+    }
+
+    private List<String> buildAllObjectKeys(String originalObjectKey) {
+        List<String> objectKeys = new ArrayList<>();
+        objectKeys.add(originalObjectKey);
+        objectKeys.add(variantObjectKey(originalObjectKey, "preview", WEBP_FORMAT));
+        objectKeys.add(variantObjectKey(originalObjectKey, "thumbnail", WEBP_FORMAT));
+        for (int width : CanvasViewVariantPolicy.WIDTH_TIERS) {
+            objectKeys.add(variantObjectKey(originalObjectKey, CanvasViewVariantPolicy.variantName(width), WEBP_FORMAT));
+        }
+        return objectKeys;
     }
 
     private String variantContentType(String objectKey) {

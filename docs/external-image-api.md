@@ -111,6 +111,14 @@ Content-Type: application/json
 X-Livart-Api-Key: YOUR_API_KEY
 ```
 
+也支持：
+
+```http
+POST /api/external/v1/images/edits
+Content-Type: multipart/form-data
+X-Livart-Api-Key: YOUR_API_KEY
+```
+
 ### 入参
 
 ```json
@@ -138,6 +146,33 @@ X-Livart-Api-Key: YOUR_API_KEY
 - `aspectRatio`：可选，支持 `1:1`、`4:3`、`3:4`、`16:9`、`9:16`、`2:1`
 - `imageResolution`：可选，支持 `1k`、`2k`、`4k`
 - `enablePromptOptimization`：可选，是否开启提示词优化
+
+### multipart 方式
+
+当外部系统不方便自己转 Base64 时，可直接上传文件：
+
+- `prompt`：必填
+- `image`：必填，原图文件
+- `mask`：可选，蒙版文件
+- `referenceImages`：可选，参考图文件，可多次传同名字段
+- `aspectRatio`：可选
+- `imageResolution`：可选
+- `enablePromptOptimization`：可选
+
+示例：
+
+```bash
+curl -X POST 'https://livart.suntools.pro/api/external/v1/images/edits' \
+  -H 'X-Livart-Api-Key: YOUR_API_KEY' \
+  -F 'prompt=把鞋子换成红色高跟鞋' \
+  -F 'image=@./source.png' \
+  -F 'mask=@./mask.png' \
+  -F 'referenceImages=@./ref-1.png' \
+  -F 'referenceImages=@./ref-2.png' \
+  -F 'aspectRatio=9:16' \
+  -F 'imageResolution=2k' \
+  -F 'enablePromptOptimization=true'
+```
 
 ### 成功出参
 
