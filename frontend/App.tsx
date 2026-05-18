@@ -1,6 +1,6 @@
 
 import React, { useEffect, useRef, useState } from 'react';
-import { PanelRightClose, PanelRight, Settings, FolderPlus, LogOut, Loader2, X, Download, ChevronDown, Users, Images, MemoryStick, Cpu, HardDrive } from 'lucide-react';
+import { PanelRightClose, PanelRight, Settings, FolderPlus, LogOut, Loader2, X, Download, ChevronDown, Users, Images, MemoryStick, Cpu, HardDrive, TimerReset } from 'lucide-react';
 import type { ActiveImageTaskInfo, AgentPlan, AgentToolId, CanvasItem, CanvasTool, ChatMessage, ImageAspectRatio, ImageResolution, ProductPosterRequest } from './types';
 import AuthPanel from './components/AuthPanel';
 import Canvas from './components/Canvas';
@@ -105,6 +105,61 @@ const formatSiteStatsPercent = (value: number | undefined) => {
   if (value === undefined || !Number.isFinite(value)) return '--%';
   return `${Math.round(Math.max(0, Math.min(100, value)))}%`;
 };
+
+const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000;
+const WEEKLY_CLEANUP_LABEL_FORMATTER = new Intl.DateTimeFormat('zh-CN', {
+  timeZone: 'Asia/Shanghai',
+  month: '2-digit',
+  day: '2-digit',
+  weekday: 'short',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false
+});
+
+const getNextWeeklyCleanupAt = (nowMs = Date.now()) => {
+  const shanghaiNow = new Date(nowMs + SHANGHAI_OFFSET_MS);
+  const startOfShanghaiTodayMs = Date.UTC(
+    shanghaiNow.getUTCFullYear(),
+    shanghaiNow.getUTCMonth(),
+    shanghaiNow.getUTCDate()
+  );
+  const currentShanghaiWeekday = shanghaiNow.getUTCDay();
+  let daysUntilNextMonday = (8 - currentShanghaiWeekday) % 7;
+  const hasPassedWeeklyCleanupTime = currentShanghaiWeekday === 1
+    && (
+      shanghaiNow.getUTCHours() > 0
+      || shanghaiNow.getUTCMinutes() > 0
+      || shanghaiNow.getUTCSeconds() > 0
+      || shanghaiNow.getUTCMilliseconds() > 0
+    );
+
+  if (daysUntilNextMonday === 0 && hasPassedWeeklyCleanupTime) {
+    daysUntilNextMonday = 7;
+  }
+
+  return startOfShanghaiTodayMs + daysUntilNextMonday * 24 * 60 * 60 * 1000 - SHANGHAI_OFFSET_MS;
+};
+
+const getWeeklyCleanupCountdownInfo = (nowMs = Date.now()) => {
+  const nextCleanupAt = getNextWeeklyCleanupAt(nowMs);
+  return {
+    nextCleanupAt,
+    remainingMs: Math.max(0, nextCleanupAt - nowMs)
+  };
+};
+
+const formatWeeklyCleanupCountdown = (remainingMs: number) => {
+  const totalSeconds = Math.max(0, Math.floor(remainingMs / 1000));
+  const days = Math.floor(totalSeconds / (24 * 60 * 60));
+  const hours = Math.floor((totalSeconds % (24 * 60 * 60)) / (60 * 60));
+  const minutes = Math.floor((totalSeconds % (60 * 60)) / 60);
+  const seconds = totalSeconds % 60;
+  const timeText = [hours, minutes, seconds].map((value) => String(value).padStart(2, '0')).join(':');
+  return days > 0 ? `${days}天 ${timeText}` : timeText;
+};
+
+const formatWeeklyCleanupTime = (timestamp: number) => WEEKLY_CLEANUP_LABEL_FORMATTER.format(timestamp);
 
 const collectAgentPlanCandidateImages = (text: string, contextImages: Array<CanvasItem | null | undefined>, items: CanvasItem[]) => {
   const completedImages = items.filter(item => item.type === 'image' && item.status === 'completed' && hasUsableImageSource(item));
@@ -868,6 +923,7 @@ function App() {
   const [currentProjectTitle, setCurrentProjectTitle] = useState('默认画布');
   const [siteStats, setSiteStats] = useState<SiteStatsOverview | null>(null);
   const [siteStatsError, setSiteStatsError] = useState('');
+  const [weeklyCleanupCountdown, setWeeklyCleanupCountdown] = useState(() => getWeeklyCleanupCountdownInfo());
   const [isCreateProjectModalOpen, setIsCreateProjectModalOpen] = useState(false);
   const [newProjectTitle, setNewProjectTitle] = useState('');
   const [isCreatingProject, setIsCreatingProject] = useState(false);
@@ -1130,6 +1186,16 @@ function App() {
     return () => {
       isMounted = false;
     };
+  }, []);
+
+  useEffect(() => {
+    const updateCountdown = () => {
+      setWeeklyCleanupCountdown(getWeeklyCleanupCountdownInfo());
+    };
+
+    updateCountdown();
+    const intervalId = window.setInterval(updateCountdown, 1000);
+    return () => window.clearInterval(intervalId);
   }, []);
 
   useEffect(() => {
@@ -2815,6 +2881,14 @@ function App() {
             <span className="flex items-center gap-1.5">
               <Users size={14} className="text-gray-300" />
               用户 {formatSiteStatsCount(siteStats?.userCount)}
+            </span>
+            <span className="h-3 w-px bg-gray-100" />
+            <span
+              className="flex items-center gap-1.5 text-amber-700"
+              title={`下次自动清除时间：${formatWeeklyCleanupTime(weeklyCleanupCountdown.nextCleanupAt)}（每周一 00:00，Asia/Shanghai）`}
+            >
+              <TimerReset size={14} className="text-amber-500" />
+              清除倒计时 {formatWeeklyCleanupCountdown(weeklyCleanupCountdown.remainingMs)}
             </span>
             <span className="h-3 w-px bg-gray-100" />
             <span className="flex items-center gap-1.5">
