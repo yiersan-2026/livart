@@ -246,7 +246,7 @@ interface SidebarProps {
   messages: ChatMessage[];
   isThinking: boolean;
   activeTasks?: ActiveImageTaskInfo[];
-  onSendMessage: (text: string, aspectRatio: ImageAspectRatio, imageResolution: ImageResolution, externalSkillId?: string, options?: SidebarSendOptions) => void;
+  onSendMessage: (text: string, aspectRatio: ImageAspectRatio, imageResolution: ImageResolution, externalSkillId?: string, options?: SidebarSendOptions) => void | Promise<boolean | void>;
   contextImage: CanvasItem | null;
   promptSeed?: { id: string; imageId: string; prompt?: string } | null;
   inputResetKey?: number;
@@ -853,12 +853,12 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
     setInputFocusSignal(currentSignal => currentSignal + 1);
   };
 
-  const handleSubmit = (event: React.FormEvent) => {
+  const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     const prompt = inputValue.trim();
     if (!prompt) return;
 
-    onSendMessage(
+    const accepted = await onSendMessage(
       prompt,
       selectedAspectRatio,
       selectedImageResolution,
@@ -867,6 +867,9 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
         enablePromptOptimization: isPromptOptimizationEnabled
       }
     );
+    if (accepted === false) {
+      return;
+    }
     setIsAspectRatioMenuOpen(false);
     setIsResolutionMenuOpen(false);
     setIsSkillMenuOpen(false);
@@ -1014,7 +1017,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
     }
   };
 
-  const submitProductPoster = () => {
+  const submitProductPoster = async () => {
     const selectedProductImages = productPosterForm.productImageIds
       .map(imageId => completedImageItems.find(item => item.id === imageId))
       .filter((item): item is CanvasItem => Boolean(item));
@@ -1054,7 +1057,7 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
       posterCount: productPosterForm.posterCount
     };
 
-    onSendMessage(prompt, selectedAspectRatio, selectedImageResolution, undefined, {
+    const accepted = await onSendMessage(prompt, selectedAspectRatio, selectedImageResolution, undefined, {
       forcedToolId: 'tool.product.poster',
       productPoster,
       contextImageId: productImage.id,
@@ -1062,6 +1065,9 @@ const Sidebar: React.FC<SidebarProps> = ({ messages, isThinking, activeTasks = [
       userMessageText: `使用 ${selectedProductImages.length} 张${productPosterForm.productMode === 'series' ? '系列产品图' : '产品图'}生成 ${productPosterForm.posterCount} 张商品详情图：${productPosterForm.productName.trim() || getCanvasItemDisplayTitle(productImage)}`,
       enablePromptOptimization: isPromptOptimizationEnabled
     });
+    if (accepted === false) {
+      return;
+    }
     setIsProductPosterModalOpen(false);
     setProductPosterError('');
   };

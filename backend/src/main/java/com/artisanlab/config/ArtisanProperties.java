@@ -16,8 +16,7 @@ public record ArtisanProperties(
         @Valid @NotNull Cors cors,
         @Valid @NotNull Minio minio,
         @Valid @NotNull Rabbitmq rabbitmq,
-        @Valid @NotNull ExternalImages externalImages,
-        @Valid @NotNull ExternalApi externalApi
+        @Valid @NotNull ExternalImages externalImages
 ) {
     public record Auth(
             @NotBlank String jwtSecret,
@@ -56,10 +55,4 @@ public record ArtisanProperties(
     ) {
     }
 
-    public record ExternalApi(
-            boolean enabled,
-            @NotBlank String headerName,
-            String apiKeys
-    ) {
-    }
 }

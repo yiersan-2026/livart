@@ -20,8 +20,7 @@ class AssetServiceModelInputTest {
             new ArtisanProperties.Cors("*"),
             new ArtisanProperties.Minio("http://localhost:9000", "minio", "minio123", "bucket"),
             new ArtisanProperties.Rabbitmq("canvas-save", "canvas-save-dlq"),
-            new ArtisanProperties.ExternalImages("https://example.com/api/images", "", 30),
-            new ArtisanProperties.ExternalApi(false, "X-Livart-Api-Key", "")
+            new ArtisanProperties.ExternalImages("https://example.com/api/images", "", 30)
     ));
 
     @Test

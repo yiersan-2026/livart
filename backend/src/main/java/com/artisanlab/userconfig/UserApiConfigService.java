@@ -44,14 +44,18 @@ public class UserApiConfigService {
     @Transactional(readOnly = true)
     public UserApiConfigDtos.Response getConfig(UUID userId) {
         UserApiConfigEntity entity = mapper.findByUserId(userId);
-        return entity == null ? getServerDefaultResponse() : toResponse(entity);
+        return entity == null ? null : toResponse(entity);
     }
 
     @Transactional(readOnly = true)
     public UserApiConfigDtos.ResolvedConfig getRequiredConfig(UUID userId) {
         UserApiConfigEntity entity = mapper.findByUserId(userId);
         if (entity == null) {
-            return getRequiredServerDefaultConfig("USER_API_CONFIG_REQUIRED", "请先配置中转站 Base URL 和 API Key");
+            throw new ApiException(
+                    HttpStatus.BAD_REQUEST,
+                    "USER_API_CONFIG_REQUIRED",
+                    "请先配置自己的中转站 Base URL、API Key、生图模型和对话模型"
+            );
         }
         return toResolvedConfig(entity);
     }
@@ -102,38 +106,6 @@ public class UserApiConfigService {
                 entity.getUpdatedAt(),
                 hasPlainApiKey(entity.getApiKey()),
                 false
-        );
-    }
-
-    private UserApiConfigDtos.Response getServerDefaultResponse() {
-        String baseUrl = defaultBaseUrl.trim();
-        String apiKey = defaultApiKey.trim();
-        if (baseUrl.isBlank() || apiKey.isBlank()) {
-            return null;
-        }
-
-        String normalizedBaseUrl = normalizeBaseUrl(baseUrl);
-        String imageModel = normalizeModel(
-                defaultImageModel.isBlank() ? "gpt-image-2" : defaultImageModel,
-                IMAGE_MODELS,
-                "默认生图模型不支持"
-        );
-        String chatModel = normalizeModel(
-                normalizeChatModel(defaultChatModel),
-                CHAT_MODELS,
-                "默认对话模型仅支持 gpt-5.4-mini"
-        );
-
-        return new UserApiConfigDtos.Response(
-                normalizedBaseUrl,
-                UserApiConfigDtos.MASKED_API_KEY,
-                imageModel,
-                chatModel,
-                joinUrl(normalizedBaseUrl, "images/generations"),
-                joinUrl(normalizedBaseUrl, "images/edits"),
-                null,
-                true,
-                true
         );
     }
 

@@ -40,7 +40,7 @@ import {
   markWeeklyCleanupNoticeSeen,
   logout
 } from './services/auth';
-import { getApiConfig, getImageModelDisplayName, loadApiConfig, resetApiConfigSession } from './services/config';
+import { getApiConfig, getImageModelDisplayName, hasApiConfig, loadApiConfig, resetApiConfigSession } from './services/config';
 import { type CanvasExportScope, exportCanvasProjectImage } from './services/canvasExport';
 import {
   applyAgentRunProgressEventToPlan,
@@ -913,6 +913,7 @@ function App() {
   const [sidebarInputResetKey, setSidebarInputResetKey] = useState(0);
   const [selectedImageEditMode, setSelectedImageEditMode] = useState<{ imageId: string; mode: ImageEditMode } | null>(null);
   const [showConfigModal, setShowConfigModal] = useState(false);
+  const [isApiConfigRequired, setIsApiConfigRequired] = useState(false);
   const [isOpeningConfigModal, setIsOpeningConfigModal] = useState(false);
   const [authSession, setAuthSession] = useState<AuthSession | null>(() => getStoredAuthSession());
   const [isAuthReady, setIsAuthReady] = useState(false);
@@ -1208,8 +1209,35 @@ function App() {
     if (!isAuthReady || authSession) return;
     resetApiConfigSession();
     setShowConfigModal(false);
+    setIsApiConfigRequired(false);
     setSiteStats(null);
     setSiteStatsError('');
+  }, [isAuthReady, authSession]);
+
+  useEffect(() => {
+    if (!isAuthReady || !authSession) return;
+
+    let isMounted = true;
+    resetApiConfigSession();
+    loadApiConfig()
+      .then((config) => {
+        if (!isMounted) return;
+        const ready = !!config && hasApiConfig();
+        setIsApiConfigRequired(!ready);
+        setShowConfigModal(!ready);
+      })
+      .catch((error) => {
+        console.warn('[api-config] initial load failed', error);
+        if (isMounted) {
+          resetApiConfigSession();
+          setIsApiConfigRequired(true);
+          setShowConfigModal(true);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
   }, [isAuthReady, authSession]);
 
   useEffect(() => {
@@ -2256,13 +2284,37 @@ function App() {
     setItems(prev => arrangeCanvasImageItems(prev));
   };
 
+  const ensureUserApiConfigReady = async () => {
+    try {
+      const config = await loadApiConfig();
+      const ready = !!config && hasApiConfig();
+      setIsApiConfigRequired(!ready);
+      if (!ready) {
+        setShowConfigModal(true);
+      }
+      return ready;
+    } catch (error) {
+      console.warn('[api-config] ensure failed', error);
+      resetApiConfigSession();
+      setIsApiConfigRequired(true);
+      setShowConfigModal(true);
+      return false;
+    }
+  };
+
   const handleSidebarSendMessage = async (
     text: string,
     aspectRatio: ImageAspectRatio = 'auto',
     imageResolution: ImageResolution = '2k',
     externalSkillId = '',
     options: SidebarSendOptions = {}
-  ) => {
+  ): Promise<boolean> => {
+    const apiConfigReady = await ensureUserApiConfigReady();
+    if (!apiConfigReady) {
+      addMessage('请先配置自己的中转站 Base URL、API Key、生图模型和对话模型，保存后再发送。', 'assistant');
+      return false;
+    }
+
     const startedAt = Date.now();
     addMessage(options.userMessageText || text, 'user');
 
@@ -2441,7 +2493,7 @@ function App() {
           agentPlan: undefined,
           agentRunStatus: 'completed'
         }));
-        return;
+        return true;
       }
       if (initialPlan.responseMode === 'answer') {
         const answerPlan: AgentPlan = {
@@ -2468,7 +2520,7 @@ function App() {
           agentPlan: undefined,
           agentRunStatus: 'completed'
         }));
-        return;
+        return true;
       }
       syncAgentPlanMessage(initialPlan);
       activePlanStepId = initialPlan.steps[0]?.id || '';
@@ -2682,7 +2734,7 @@ function App() {
         }));
         setSelectedIds(editBaseImage ? [editBaseImage.id] : []);
         setContextImage(prev => prev && createdImageIds.includes(prev.id) ? null : prev);
-        return;
+        return true;
       }
       if (createdImageIds.length > 0) {
         const createdIdSet = new Set(createdImageIds);
@@ -2707,6 +2759,7 @@ function App() {
         imageTaskTimerKeys.forEach(timerKey => finishTaskTimer(imageTaskStartedAt as number, timerKey));
       }
     }
+    return true;
   };
 
   const handleAddToChat = (item: CanvasItem) => {
@@ -2747,6 +2800,7 @@ function App() {
     setAuthSession(null);
     resetApiConfigSession();
     setShowConfigModal(false);
+    setIsApiConfigRequired(false);
     resetWorkspace();
   };
 
@@ -2755,10 +2809,12 @@ function App() {
 
     setIsOpeningConfigModal(true);
     try {
-      await loadApiConfig();
+      const config = await loadApiConfig();
+      setIsApiConfigRequired(!(config && hasApiConfig()));
     } catch (error) {
       console.warn('[api-config] lazy load failed', error);
       resetApiConfigSession();
+      setIsApiConfigRequired(true);
     } finally {
       setIsOpeningConfigModal(false);
       setShowConfigModal(true);
@@ -2766,6 +2822,7 @@ function App() {
   };
 
   const handleConfigSaved = () => {
+    setIsApiConfigRequired(false);
     setShowConfigModal(false);
   };
 
@@ -3095,9 +3152,13 @@ function App() {
 
       <ConfigModal
         isOpen={showConfigModal}
-        required={false}
+        required={isApiConfigRequired}
         onSaved={handleConfigSaved}
-        onClose={() => setShowConfigModal(false)}
+        onClose={() => {
+          if (!isApiConfigRequired) {
+            setShowConfigModal(false);
+          }
+        }}
       />
 
       <CreateProjectModal

@@ -46,14 +46,12 @@ export const buildImageApiUrls = (baseUrl: string) => {
   };
 };
 
-const defaultBaseUrl = normalizeBaseUrl(process.env.IMAGE_API_BASE_URL || '');
-
 export const DEFAULT_API_CONFIG: ApiConfig = {
-  baseUrl: defaultBaseUrl,
-  ...buildImageApiUrls(defaultBaseUrl),
+  baseUrl: '',
+  ...buildImageApiUrls(''),
   apiKey: '',
-  model: process.env.IMAGE_API_MODEL || 'gpt-image-2',
-  chatModel: process.env.PROMPT_OPTIMIZER_MODEL || process.env.CHAT_API_MODEL || 'gpt-5.4-mini',
+  model: AVAILABLE_MODELS[0],
+  chatModel: AVAILABLE_CHAT_MODELS[0],
   hasApiKey: false,
   serverDefault: false
 };
@@ -140,7 +138,12 @@ export const saveApiConfig = async (config: ApiConfig): Promise<ApiConfig> => {
 };
 
 export const hasApiConfig = (): boolean => {
-  return !!(currentApiConfig.model && currentApiConfig.chatModel);
+  return !!(
+    currentApiConfig.baseUrl &&
+    currentApiConfig.hasApiKey &&
+    currentApiConfig.model &&
+    currentApiConfig.chatModel
+  );
 };
 
 export const resetApiConfigSession = () => {

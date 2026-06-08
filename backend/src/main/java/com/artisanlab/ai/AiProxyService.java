@@ -2,8 +2,6 @@ package com.artisanlab.ai;
 
 import com.artisanlab.asset.AssetService;
 import com.artisanlab.common.ApiException;
-import com.artisanlab.externalapi.ExternalAiImageDtos;
-import com.artisanlab.externalapi.ExternalImageResultService;
 import com.artisanlab.userconfig.UserApiConfigDtos;
 import com.artisanlab.userconfig.UserApiConfigService;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -21,7 +19,6 @@ import org.springframework.stereotype.Service;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.ByteArrayInputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -44,12 +41,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-import javax.imageio.ImageIO;
-
 @Service
 public class AiProxyService {
     private static final Logger log = LoggerFactory.getLogger(AiProxyService.class);
-    private static final int MAX_EXTERNAL_IMAGE_BYTES = 25 * 1024 * 1024;
     private static final Duration IMAGE_REQUEST_TIMEOUT = Duration.ofMinutes(10);
     private static final Duration IMAGE_JOB_TTL = Duration.ofHours(2);
     private static final Duration PROMPT_OPTIMIZER_TIMEOUT = Duration.ofMinutes(2);
@@ -122,7 +116,6 @@ public class AiProxyService {
     private final ObjectMapper objectMapper;
     private final ImageJobEventBroadcaster imageJobEventBroadcaster;
     private final SpringAiTextService springAiTextService;
-    private final ExternalImageResultService externalImageResultService;
     private final HttpClient httpClient;
     private final boolean defaultImageSizeEnabled;
     private final int defaultImageLongSide;
@@ -136,7 +129,6 @@ public class AiProxyService {
             ObjectMapper objectMapper,
             ImageJobEventBroadcaster imageJobEventBroadcaster,
             SpringAiTextService springAiTextService,
-            ExternalImageResultService externalImageResultService,
             @Value("${artisan.ai.default-image-size-enabled:true}") boolean defaultImageSizeEnabled,
             @Value("${artisan.ai.default-image-long-side:2048}") int defaultImageLongSide,
             @Value("${artisan.ai.image-job-worker-count:0}") int imageJobWorkerCount
@@ -146,7 +138,6 @@ public class AiProxyService {
         this.objectMapper = objectMapper;
         this.imageJobEventBroadcaster = imageJobEventBroadcaster;
         this.springAiTextService = springAiTextService;
-        this.externalImageResultService = externalImageResultService;
         this.defaultImageSizeEnabled = defaultImageSizeEnabled;
         this.defaultImageLongSide = defaultImageLongSide;
         this.imageJobWorkerCount = resolveImageJobWorkerCount(imageJobWorkerCount);
@@ -234,7 +225,7 @@ public class AiProxyService {
         int jobCount = Math.max(1, Math.min(16, count));
         List<Map<String, Object>> jobs = new ArrayList<>();
         for (int index = 0; index < jobCount; index += 1) {
-            jobs.add(enqueueImageJob(userId, "text-to-image", "images/generations", config, "application/json", requestBody, false));
+            jobs.add(enqueueImageJob(userId, "text-to-image", "images/generations", config, "application/json", requestBody));
         }
         return List.copyOf(jobs);
     }
@@ -246,57 +237,7 @@ public class AiProxyService {
         cleanupImageJobs();
         UserApiConfigDtos.ResolvedConfig config = userApiConfigService.getRequiredConfig(userId);
         ImageProxyRequestBody requestBody = buildAgentImageEditRequestBody(userId, config, request);
-        return enqueueImageJob(userId, "image-to-image", "images/edits", config, "application/json", requestBody, false);
-    }
-
-    public Map<String, Object> createExternalTextToImageJob(
-            UUID ownerId,
-            ExternalAiImageDtos.TextToImageRequest request
-    ) throws IOException {
-        cleanupImageJobs();
-        UserApiConfigDtos.ResolvedConfig config = userApiConfigService.getRequiredServerDefaultConfig();
-        ObjectNode body = objectMapper.createObjectNode();
-        String normalizedImageResolution = normalizeImageResolution(request.imageResolution());
-        body.put("model", config.model());
-        body.put("prompt", appendImageOutputInstructions(request.prompt(), request.aspectRatio(), normalizedImageResolution));
-        if (!normalizedImageResolution.isBlank()) {
-            body.put("imageResolution", normalizedImageResolution);
-        }
-        body.put("promptOptimizationMode", request.promptOptimizationEnabled() ? "skill-text-to-image" : "disabled");
-
-        ImageProxyRequestBody requestBody = readJsonImageProxyRequestBody(
-                config,
-                "text-to-image",
-                "application/json; charset=utf-8",
-                objectMapper.writeValueAsBytes(body)
-        );
-        return enqueueImageJob(ownerId, "text-to-image", "images/generations", config, "application/json", requestBody, true);
-    }
-
-    public Map<String, Object> createExternalImageEditJob(
-            UUID ownerId,
-            ExternalAiImageDtos.ImageToImageRequest request
-    ) throws IOException {
-        cleanupImageJobs();
-        UserApiConfigDtos.ResolvedConfig config = userApiConfigService.getRequiredServerDefaultConfig();
-        ImageProxyRequestBody requestBody = buildExternalImageEditRequestBody(config, request);
-        return enqueueImageJob(ownerId, "image-to-image", "images/edits", config, "application/json", requestBody, true);
-    }
-
-    public Map<String, Object> getExternalImageJobSnapshot(UUID ownerId, String jobId) {
-        cleanupImageJobs();
-        UUID parsedJobId = parseImageJobId(jobId);
-        ImageJobState job = imageJobs.get(parsedJobId);
-        if (job != null && job.userId().equals(ownerId)) {
-            return toJobResponse(job);
-        }
-
-        List<ExternalImageResultService.StoredImage> storedImages = externalImageResultService.listStoredImages(ownerId, parsedJobId);
-        if (!storedImages.isEmpty()) {
-            return toStoredExternalJobResponse(parsedJobId, storedImages);
-        }
-
-        throw new ApiException(HttpStatus.NOT_FOUND, "IMAGE_JOB_NOT_FOUND", "图片任务不存在或已过期");
+        return enqueueImageJob(userId, "image-to-image", "images/edits", config, "application/json", requestBody);
     }
 
     private Map<String, Object> enqueueImageJob(
@@ -305,11 +246,10 @@ public class AiProxyService {
             String path,
             UserApiConfigDtos.ResolvedConfig config,
             String accept,
-            ImageProxyRequestBody requestBody,
-            boolean persistExternalImages
+            ImageProxyRequestBody requestBody
     ) {
         UUID jobId = UUID.randomUUID();
-        ImageJobState job = new ImageJobState(jobId, userId, label, persistExternalImages);
+        ImageJobState job = new ImageJobState(jobId, userId, label);
         imageJobs.put(jobId, job);
         publishImageJob(job);
 
@@ -424,37 +364,6 @@ public class AiProxyService {
         try {
             ImageProxyResult result = executeImageRequest(job.label(), targetUrl, apiKey, accept, contentType, body);
             if (result.statusCode() >= 200 && result.statusCode() <= 299) {
-                try {
-                    if (job.persistExternalImages()) {
-                        job.setStoredImages(externalImageResultService.persistJobResult(
-                                job.userId(),
-                                job.id(),
-                                job.label(),
-                                result.body(),
-                                result.contentType()
-                        ));
-                    }
-                } catch (Exception exception) {
-                    log.error("[image-job] persist external images failed jobId={} error={}", job.id(), safeMessage(exception));
-                    try {
-                        ImageProxyResult persistFailure = jsonImageProxyResult(HttpStatus.BAD_GATEWAY, Map.of(
-                                "error", "external image result store failed",
-                                "detail", safeMessage(exception)
-                        ), result.attempts());
-                        job.markFailed(
-                                persistFailure.statusCode(),
-                                persistFailure.body(),
-                                persistFailure.contentType(),
-                                persistFailure.attempts(),
-                                result.requestId()
-                        );
-                    } catch (IOException ioException) {
-                        job.markFailed(502, safeMessage(exception).getBytes(StandardCharsets.UTF_8), "text/plain; charset=utf-8", result.attempts(), result.requestId());
-                    }
-                    publishImageJob(job);
-                    publishQueuedImageJobs();
-                    return;
-                }
                 job.markCompleted(result);
                 publishImageJob(job);
                 publishQueuedImageJobs();
@@ -634,41 +543,6 @@ public class AiProxyService {
         }
         if (request.maskDataUrl() != null && !request.maskDataUrl().isBlank()) {
             writeMultipartPart(output, boundary, dataUrlMultipartPart("mask", request.maskDataUrl(), "mask.png"));
-        }
-
-        writeAscii(output, "--" + boundary + "--");
-        output.write(CRLF);
-        return new ImageProxyRequestBody("multipart/form-data; boundary=" + boundary, output.toByteArray(), prompt, optimizedPrompt);
-    }
-
-    private ImageProxyRequestBody buildExternalImageEditRequestBody(
-            UserApiConfigDtos.ResolvedConfig config,
-            ExternalAiImageDtos.ImageToImageRequest request
-    ) throws IOException {
-        String boundary = "----LivartProxyBoundary" + UUID.randomUUID().toString().replace("-", "");
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
-        String normalizedImageResolution = normalizeImageResolution(request.imageResolution());
-        String prompt = appendImageOutputInstructions(request.prompt(), request.aspectRatio(), normalizedImageResolution);
-        String promptOptimizationMode = request.promptOptimizationEnabled() ? "skill-image-to-image" : "disabled";
-        String optimizedPrompt = shouldOptimizePrompt(promptOptimizationMode)
-                ? optimizePromptInline(config, promptOptimizationMode, prompt, "")
-                : "";
-        ImageOutputSettings outputSettings = resolveImageOutputSettings(prompt, request.aspectRatio(), normalizedImageResolution, false);
-
-        writeTextMultipartPart(output, boundary, "model", config.model());
-        writeTextMultipartPart(output, boundary, "prompt", optimizedPrompt.isBlank() ? prompt : optimizedPrompt);
-        if (!outputSettings.size().isBlank()) {
-            writeTextMultipartPart(output, boundary, "size", outputSettings.size());
-        }
-        if (outputSettings.highQuality()) {
-            writeTextMultipartPart(output, boundary, "quality", "high");
-        }
-        writeExternalImagePart(output, boundary, "image", request.imageBase64(), "image.png");
-        for (int index = 0; index < request.referenceImages().size(); index += 1) {
-            writeExternalImagePart(output, boundary, "image", request.referenceImages().get(index), "reference-%d.png".formatted(index + 1));
-        }
-        if (request.maskBase64() != null && !request.maskBase64().isBlank()) {
-            writeExternalImagePart(output, boundary, "mask", request.maskBase64(), "mask.png");
         }
 
         writeAscii(output, "--" + boundary + "--");
@@ -980,71 +854,6 @@ public class AiProxyService {
             return new MultipartPartData(name, filename, contentType, Base64.getDecoder().decode(encoded));
         } catch (IllegalArgumentException exception) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_IMAGE_DATA_URL", "图片蒙版 Base64 数据无效");
-        }
-    }
-
-    private void writeExternalImagePart(
-            ByteArrayOutputStream output,
-            String boundary,
-            String name,
-            String imageValue,
-            String fallbackFilename
-    ) throws IOException {
-        writeMultipartPart(output, boundary, externalImageMultipartPart(name, imageValue, fallbackFilename));
-    }
-
-    private MultipartPartData externalImageMultipartPart(String name, String imageValue, String fallbackFilename) {
-        DecodedExternalImage decodedImage = decodeExternalImage(imageValue, fallbackFilename);
-        AssetService.PreparedImageContent preparedImage = assetService.prepareModelInputImage(decodedImage.bytes(), decodedImage.contentType());
-        String filename = modelInputFilename(null, decodedImage.filename(), preparedImage.contentType());
-        return new MultipartPartData(name, filename, preparedImage.contentType(), preparedImage.bytes());
-    }
-
-    private DecodedExternalImage decodeExternalImage(String value, String fallbackFilename) {
-        String trimmedValue = value == null ? "" : value.trim();
-        if (trimmedValue.isBlank()) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "EXTERNAL_IMAGE_REQUIRED", "图生图原图不能为空");
-        }
-
-        String contentType = "image/png";
-        String encoded = trimmedValue;
-        if (trimmedValue.startsWith("data:")) {
-            int commaIndex = trimmedValue.indexOf(',');
-            int semicolonIndex = trimmedValue.indexOf(';');
-            if (commaIndex <= 0 || semicolonIndex <= 5 || !trimmedValue.substring(semicolonIndex + 1, commaIndex).contains("base64")) {
-                throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_EXTERNAL_IMAGE_DATA", "图片数据格式无效");
-            }
-            contentType = trimmedValue.substring("data:".length(), semicolonIndex).trim().toLowerCase(Locale.ROOT);
-            encoded = trimmedValue.substring(commaIndex + 1);
-        }
-
-        byte[] bytes;
-        try {
-            bytes = Base64.getDecoder().decode(encoded);
-        } catch (IllegalArgumentException exception) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_EXTERNAL_IMAGE_DATA", "图片 Base64 数据无效");
-        }
-        if (bytes.length == 0) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_EXTERNAL_IMAGE_DATA", "图片内容为空");
-        }
-        if (bytes.length > MAX_EXTERNAL_IMAGE_BYTES) {
-            throw new ApiException(HttpStatus.PAYLOAD_TOO_LARGE, "EXTERNAL_IMAGE_TOO_LARGE", "图片超过 25MB，无法处理");
-        }
-        ensureImageBytesReadable(bytes);
-
-        String filename = fallbackFilename == null || fallbackFilename.isBlank()
-                ? "image" + imageExtensionForContentType(contentType)
-                : fallbackFilename;
-        return new DecodedExternalImage(bytes, contentType, filename);
-    }
-
-    private void ensureImageBytesReadable(byte[] bytes) {
-        try {
-            if (ImageIO.read(new ByteArrayInputStream(bytes)) == null) {
-                throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_EXTERNAL_IMAGE_DATA", "图片内容无法识别");
-            }
-        } catch (IOException exception) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_EXTERNAL_IMAGE_DATA", "图片内容无法识别");
         }
     }
 
@@ -1434,10 +1243,6 @@ public class AiProxyService {
         if (job.requestId() != null && !job.requestId().isBlank()) {
             response.put("requestId", job.requestId());
         }
-        if (!job.storedImages().isEmpty()) {
-            response.put("storedImages", job.storedImages());
-        }
-
         if ("completed".equals(job.status())) {
             response.put("upstreamStatus", job.upstreamStatus());
             response.put("contentType", job.contentType());
@@ -1448,36 +1253,6 @@ public class AiProxyService {
             response.put("error", toJobErrorPayload(job));
         }
 
-        return response;
-    }
-
-    private Map<String, Object> toStoredExternalJobResponse(
-            UUID jobId,
-            List<ExternalImageResultService.StoredImage> storedImages
-    ) {
-        long createdAt = storedImages.stream()
-                .map(ExternalImageResultService.StoredImage::createdAt)
-                .filter(java.util.Objects::nonNull)
-                .mapToLong(value -> value.toInstant().toEpochMilli())
-                .min()
-                .orElse(System.currentTimeMillis());
-        long updatedAt = storedImages.stream()
-                .map(ExternalImageResultService.StoredImage::createdAt)
-                .filter(java.util.Objects::nonNull)
-                .mapToLong(value -> value.toInstant().toEpochMilli())
-                .max()
-                .orElse(createdAt);
-
-        Map<String, Object> response = new LinkedHashMap<>();
-        response.put("jobId", jobId.toString());
-        response.put("status", "completed");
-        response.put("label", "external-image");
-        response.put("createdAt", createdAt);
-        response.put("updatedAt", updatedAt);
-        response.put("attempts", 1);
-        response.put("maxConcurrentJobs", imageJobWorkerCount);
-        response.put("upstreamStatus", 200);
-        response.put("storedImages", storedImages);
         return response;
     }
 
@@ -2112,13 +1887,6 @@ public class AiProxyService {
     ) {
     }
 
-    private record DecodedExternalImage(
-            byte[] bytes,
-            String contentType,
-            String filename
-    ) {
-    }
-
     private record ImageOutputSettings(
             String size,
             boolean highQuality
@@ -2129,7 +1897,6 @@ public class AiProxyService {
         private final UUID id;
         private final UUID userId;
         private final String label;
-        private final boolean persistExternalImages;
         private final long createdAt;
         private volatile long updatedAt;
         private volatile String status = "queued";
@@ -2140,13 +1907,10 @@ public class AiProxyService {
         private volatile String requestId = "";
         private volatile String originalPrompt = "";
         private volatile String optimizedPrompt = "";
-        private volatile List<ExternalImageResultService.StoredImage> storedImages = List.of();
-
-        private ImageJobState(UUID id, UUID userId, String label, boolean persistExternalImages) {
+        private ImageJobState(UUID id, UUID userId, String label) {
             this.id = id;
             this.userId = userId;
             this.label = label;
-            this.persistExternalImages = persistExternalImages;
             this.createdAt = System.currentTimeMillis();
             this.updatedAt = this.createdAt;
         }
@@ -2161,10 +1925,6 @@ public class AiProxyService {
 
         private String label() {
             return label;
-        }
-
-        private boolean persistExternalImages() {
-            return persistExternalImages;
         }
 
         private long createdAt() {
@@ -2207,18 +1967,9 @@ public class AiProxyService {
             return optimizedPrompt;
         }
 
-        private List<ExternalImageResultService.StoredImage> storedImages() {
-            return storedImages;
-        }
-
         private void setPromptMetadata(String originalPrompt, String optimizedPrompt) {
             this.originalPrompt = originalPrompt == null ? "" : originalPrompt;
             this.optimizedPrompt = optimizedPrompt == null ? "" : optimizedPrompt;
-            updatedAt = System.currentTimeMillis();
-        }
-
-        private void setStoredImages(List<ExternalImageResultService.StoredImage> storedImages) {
-            this.storedImages = storedImages == null ? List.of() : List.copyOf(storedImages);
             updatedAt = System.currentTimeMillis();
         }
 

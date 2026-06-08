@@ -41,11 +41,11 @@ const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose, onSaved, req
   const handleSave = async () => {
     const normalizedConfig = normalizeApiConfig(config);
     if (!normalizedConfig.baseUrl || !normalizedConfig.model || !normalizedConfig.chatModel) {
-      setError('请填写中转站 Base URL、API Key、生图模型和对话模型');
+      setError('请填写自己的中转站 Base URL、API Key、生图模型和对话模型');
       return;
     }
     if (!normalizedConfig.apiKey && config.serverDefault) {
-      setError('当前正在使用服务器默认配置。如需改为个人配置，请输入自己的 API Key。');
+      setError('请改为个人配置，并输入自己的 API Key。');
       return;
     }
     if (!normalizedConfig.apiKey && !config.hasApiKey) {
@@ -75,7 +75,7 @@ const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose, onSaved, req
           <div>
             <h2 className="font-bold text-lg">中转站配置</h2>
             {required && (
-              <p className="mt-1 text-xs font-bold text-gray-400">首次登录后需要先完成配置，系统会自动拼接调用地址。</p>
+              <p className="mt-1 text-xs font-bold text-gray-400">首次登录后需要先配置自己的 AI 中转站，系统不会共用服务端 API Key。</p>
             )}
           </div>
           {!required && (
@@ -105,7 +105,7 @@ const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose, onSaved, req
                 type={showApiKey ? 'text' : 'password'}
                 value={config.apiKey}
                 onChange={(event) => setConfig({ ...config, apiKey: event.target.value })}
-                placeholder={config.serverDefault ? '当前使用服务器默认 API Key' : config.hasApiKey ? '已保存 API Key，留空表示不修改' : 'sk-...'}
+                placeholder={config.hasApiKey ? '已保存 API Key，留空表示不修改' : 'sk-...'}
                 className="w-full px-4 py-3 pr-12 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-black/10 focus:border-gray-300 transition-all"
               />
               <button
@@ -143,7 +143,7 @@ const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose, onSaved, req
                 <option key={model} value={model}>{model}</option>
               ))}
             </select>
-            <p className="text-xs text-gray-400 mt-1">用于右侧对话和图片编辑请求的提示词自动优化。</p>
+            <p className="text-xs text-gray-400 mt-1">用于右侧对话、意图识别、提示词优化和商品详情图分析。</p>
           </div>
 
           <div className="rounded-2xl border border-gray-100 bg-gray-50 p-4 text-xs text-gray-500 space-y-2">

@@ -7,6 +7,7 @@ import java.time.OffsetDateTime;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -67,7 +68,7 @@ class UserApiConfigServiceTest {
     }
 
     @Test
-    void serverDefaultConfigIsMaskedPubliclyAndResolvedInternally() {
+    void missingUserConfigIsNotReplacedByServerDefault() {
         UUID userId = UUID.randomUUID();
         UserApiConfigMapper mapper = mock(UserApiConfigMapper.class);
         when(mapper.findByUserId(userId)).thenReturn(null);
@@ -80,16 +81,14 @@ class UserApiConfigServiceTest {
         );
 
         UserApiConfigDtos.Response response = service.getConfig(userId);
-        UserApiConfigDtos.ResolvedConfig resolvedConfig = service.getRequiredConfig(userId);
 
-        assertThat(response.apiKey()).isEmpty();
-        assertThat(response.hasApiKey()).isTrue();
-        assertThat(response.serverDefault()).isTrue();
-        assertThat(resolvedConfig.apiKey()).isEqualTo("sk-default");
+        assertThat(response).isNull();
+        assertThatThrownBy(() -> service.getRequiredConfig(userId))
+                .hasMessageContaining("请先配置自己的中转站 Base URL、API Key、生图模型和对话模型");
     }
 
     @Test
-    void exposesServerDefaultConfigForExternalApis() {
+    void exposesServerDefaultConfigForInternalServices() {
         UserApiConfigMapper mapper = mock(UserApiConfigMapper.class);
         UserApiConfigService service = new UserApiConfigService(
                 mapper,
